@@ -33,7 +33,7 @@ const GAS_ESTIMATE_BUFFER = 1.2;
 // --- ABIs ---
 const UNISWAP_V3_POOL_ABI = [ "function token0() external view returns (address)", "function token1() external view returns (address)", "function fee() external view returns (uint24)", "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)" ];
 const FLASH_SWAP_ABI = [ "function initiateFlashSwap(address,uint256,uint256,bytes) external", /* events */ ];
-const QUOTER_V2_ABI = [ "function quoteExactInputSingle((address,address,uint256,uint24,uint160)) external returns (uint256,uint160,uint32,uint256)" ];
+const QUOTER_V2_ABI = [ "function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)" ];
 
 // =========================================================================
 // == Ethers Setup ==
@@ -52,7 +52,11 @@ console.warn(`⚠️ Borrow amount set to: ${ethers.formatUnits(BORROW_AMOUNT_WE
 // =========================================================================
 // == Helper Functions ==
 // =========================================================================
-function sqrtPriceX96ToPrice(sqrtPriceX96, decimals0, decimals1) { /* ... BigInt math ... */ }
+function sqrtPriceX96ToPrice(sqrtPriceX96, decimals0, decimals1) { /* ... BigInt math ... */
+    if (!sqrtPriceX96 || sqrtPriceX96 === 0n) { return NaN; } const Q96 = 2n**96n; const Q192 = Q96**2n;
+    const num = sqrtPriceX96 * sqrtPriceX96 * (10n**BigInt(decimals0)); const den = Q192 * (10n**BigInt(decimals1));
+    const mult = 10n**18n; const price = (num * mult) / den; return Number(price) / Number(mult);
+}
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms)); // Delay function
 
 // =========================================================================
@@ -61,43 +65,21 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms)); // Delay 
 async function checkArbitrage() {
     console.log(`\n[${new Date().toISOString()}] Checking: ${POOL_WETH_USDC_005.slice(0,6)} vs ${POOL_WETH_USDC_030.slice(0,6)} (Native USDC)`);
     try {
-        // --- 1. Get Pool Data & Determine Order (SEQUENTIAL FETCH with DELAY) ---
+        // 1. Get Pool Data & Determine Order (SEQUENTIAL FETCH with DELAY)
         let slot0_005, slot0_030, token0_pool005, token1_pool005;
         try {
-            // console.log("   Fetching slot0_005...");
-            slot0_005 = await pool005.slot0();
-            await delay(50); // Add delay
-
-            // console.log("   Fetching slot0_030...");
-            slot0_030 = await pool030.slot0();
-            await delay(50); // Add delay
-
-            // console.log("   Fetching token0_pool005...");
-            token0_pool005 = await pool005.token0();
-            await delay(50); // Add delay
-
-            // console.log("   Fetching token1_pool005...");
+            slot0_005 = await pool005.slot0(); await delay(50);
+            slot0_030 = await pool030.slot0(); await delay(50);
+            token0_pool005 = await pool005.token0(); await delay(50);
             token1_pool005 = await pool005.token1();
-            // console.log("   ...Fetch complete.");
-        } catch (fetchError) {
-            console.error(`   ❌ Fetch Error during sequential fetch: ${fetchError.message}`);
-            console.error(`      slot0_005: ${!!slot0_005}, slot0_030: ${!!slot0_030}, token0: ${!!token0_pool005}, token1: ${!!token1_pool005}`);
-            return;
-        }
-
-        if (!slot0_005 || !slot0_030 || !token0_pool005 || !token1_pool005) {
-            console.error(`   ❌ Incomplete data after fetch.`); return;
-        }
-        if (slot0_005.sqrtPriceX96 === 0n || slot0_030.sqrtPriceX96 === 0n) {
-            console.error(`   ❌ sqrtPriceX96 is zero.`); return;
-        }
+        } catch (fetchError) { console.error(`   ❌ Fetch Error: ${fetchError.message}`); return; }
+        if (!slot0_005 || !slot0_030 || !token0_pool005 || !token1_pool005) { console.error(`   ❌ Incomplete data.`); return; }
+        if (slot0_005.sqrtPriceX96 === 0n || slot0_030.sqrtPriceX96 === 0n) { console.error(`   ❌ sqrtPriceX96 is zero.`); return; }
 
         let token0Address, token1Address, decimals0, decimals1;
-        // ... (Token order logic WETH=T0, Native USDC=T1) ...
-        token0Address = WETH_ADDRESS; decimals0 = WETH_DECIMALS;
-        token1Address = USDC_ADDRESS; decimals1 = USDC_DECIMALS;
+        token0Address = WETH_ADDRESS; decimals0 = WETH_DECIMALS; token1Address = USDC_ADDRESS; decimals1 = USDC_DECIMALS;
         if (token0_pool005.toLowerCase() !== token0Address.toLowerCase() || token1_pool005.toLowerCase() !== token1Address.toLowerCase()) {
-            console.error(`❌ Pool ${POOL_WETH_USDC_005} has unexpected token order: T0=${token0_pool005}, T1=${token1_pool005}`); return;
+            console.error(`❌ Pool ${POOL_WETH_USDC_005} T0/T1 mismatch: ${token0_pool005}/${token1_pool005}`); return;
         }
 
         // 2. Calculate Prices
@@ -110,7 +92,6 @@ async function checkArbitrage() {
         // 3. Identify Direction
         const BORROW_TOKEN = WETH_ADDRESS; const INTERMEDIATE_TOKEN = USDC_ADDRESS;
         let poolA, feeA, poolB, feeB, loanPool;
-        // ... (Direction logic) ...
         if (price_030 > price_005) { poolA = POOL_WETH_USDC_030; feeA = 3000; poolB = POOL_WETH_USDC_005; feeB = 500; loanPool = poolA; }
         else if (price_005 > price_030) { poolA = POOL_WETH_USDC_005; feeA = 500; poolB = POOL_WETH_USDC_030; feeB = 3000; loanPool = poolA; }
         else { return; }
@@ -119,26 +100,38 @@ async function checkArbitrage() {
         const amountToBorrow = BORROW_AMOUNT_WETH;
         let simulatedIntermediateFromSwap1, simulatedFinalFromSwap2;
         try {
-            simulatedIntermediateFromSwap1 = (await quoterContract.quoteExactInputSingle.staticCall([ /* Swap 1 Array Params */ ]))[0];
+            simulatedIntermediateFromSwap1 = (await quoterContract.quoteExactInputSingle.staticCall([ [token0Address, token1Address, amountToBorrow, feeA, 0] ]))[0];
             if (simulatedIntermediateFromSwap1 === 0n) { console.warn("   Swap 1 quote is 0."); return; }
-            simulatedFinalFromSwap2 = (await quoterContract.quoteExactInputSingle.staticCall([ /* Swap 2 Array Params */ ]))[0];
+            simulatedFinalFromSwap2 = (await quoterContract.quoteExactInputSingle.staticCall([ [token1Address, token0Address, simulatedIntermediateFromSwap1, feeB, 0] ]))[0];
         } catch (quoteError) { console.error(`   ❌ Quote Error: ${quoteError.message}`); return; }
 
         // Calculate Potential Profit
-        // ... (Profit calculation logic) ...
+        const loanPoolFeeTier = feeA;
+        const flashLoanFee = (amountToBorrow * BigInt(loanPoolFeeTier)) / 1000000n;
+        const totalAmountToRepay = amountToBorrow + flashLoanFee;
+        const potentialProfitWeth = simulatedFinalFromSwap2 - totalAmountToRepay;
         console.log(`   Sim Swap1: ${ethers.formatUnits(simulatedIntermediateFromSwap1, decimals1)} Native USDC | Sim Swap2: ${ethers.formatUnits(simulatedFinalFromSwap2, decimals0)} WETH`);
-        // ... (Log Repay and Potential Profit) ...
+        console.log(`   Repay: ${ethers.formatUnits(totalAmountToRepay, decimals0)} WETH | Pot. Profit: ${ethers.formatUnits(potentialProfitWeth, decimals0)} WETH`);
 
         // --- 5. ESTIMATE GAS COST ---
         let estimatedGasUnits = 0n; let gasPrice = 0n; let estimatedGasCostWeth = 0n;
+        // --- Use amountOutMinimum = 0 ONLY for gas estimation ---
         const gasEstimateAmountOutMinimum1 = 0n; const gasEstimateAmountOutMinimum2 = 0n;
-        const gasEstimateParams = ethers.AbiCoder.defaultAbiCoder().encode( /*...*/ );
+        const gasEstimateParams = ethers.AbiCoder.defaultAbiCoder().encode(
+            ['address', 'address', 'address', 'uint24', 'uint24', 'uint256', 'uint256'],
+            [token1Address, poolA, poolB, feeA, feeB, gasEstimateAmountOutMinimum1, gasEstimateAmountOutMinimum2]
+        );
         let amount0 = 0n; let amount1 = 0n;
         if (BORROW_TOKEN.toLowerCase() === token0Address.toLowerCase()) { amount0 = amountToBorrow; } else { return; }
 
         try {
-            // ... (Gas estimation logic using gasEstimateParams) ...
-             console.log(`   Est. Gas: ${estimatedGasUnits} units | Price: ${ethers.formatUnits(gasPrice, "gwei")} Gwei | Est. Cost: ${ethers.formatUnits(estimatedGasCostWeth, WETH_DECIMALS)} WETH`);
+            const feeData = await provider.getFeeData();
+            gasPrice = feeData.gasPrice;
+            if (!gasPrice || gasPrice === 0n) { gasPrice = ethers.parseUnits("0.1", "gwei"); }
+            estimatedGasUnits = await flashSwapContract.initiateFlashSwap.estimateGas( loanPool, amount0, amount1, gasEstimateParams );
+            const gasUnitsWithBuffer = estimatedGasUnits * BigInt(Math.round(GAS_ESTIMATE_BUFFER * 100)) / 100n;
+            estimatedGasCostWeth = gasUnitsWithBuffer * gasPrice;
+            console.log(`   Est. Gas: ${estimatedGasUnits} units | Price: ${ethers.formatUnits(gasPrice, "gwei")} Gwei | Est. Cost: ${ethers.formatUnits(estimatedGasCostWeth, WETH_DECIMALS)} WETH`);
         } catch (gasEstimateError) {
              console.error(`   ❌ Gas Estimation Failed: ${gasEstimateError.message}`);
              if (gasEstimateError.data && gasEstimateError.data !== '0x') { /* Decode */ } return;
@@ -150,20 +143,37 @@ async function checkArbitrage() {
 
         if (netProfitWeth > MIN_PROFIT_THRESHOLD_WETH) {
             console.log(`✅ PROFITABLE OPPORTUNITY! Est. Net Profit: ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)} WETH`);
-            // --- Construct ACTUAL TX Params ---
-            const actualAmountOutMinimum1 = simulatedIntermediateFromSwap1 * BigInt(/*...*/);
-            const actualAmountOutMinimum2 = /*...*/;
-            const actualArbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode( /*...*/ );
+            // --- Construct ACTUAL TX Params using proper amountOutMinimums ---
+            const actualAmountOutMinimum1 = simulatedIntermediateFromSwap1 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000)) / 10000n;
+            const requiredRepaymentThreshold = totalAmountToRepay + MIN_PROFIT_THRESHOLD_WETH;
+            // --- FIX SYNTAX ERROR HERE ---
+            const actualAmountOutMinimum2 = requiredRepaymentThreshold; // Ensure this line is complete
+            const actualArbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode(
+                 ['address', 'address', 'address', 'uint24', 'uint24', 'uint256', 'uint256'],
+                 [token1Address, poolA, poolB, feeA, feeB, actualAmountOutMinimum1, actualAmountOutMinimum2]
+            );
             console.log(`   Params: MinOut1=${ethers.formatUnits(actualAmountOutMinimum1, decimals1)}, MinOut2=${ethers.formatUnits(actualAmountOutMinimum2, decimals0)}`);
             // 7. Execute Transaction
             console.log(`   Executing initiateFlashSwap... Amount0: ${ethers.formatUnits(amount0, WETH_DECIMALS)} WETH(0)`);
             try {
-                const gasLimitWithBuffer = estimatedGasUnits * BigInt(/*...*/);
-                const tx = await flashSwapContract.initiateFlashSwap( /*...*/ );
-                /* ... Tx logging ... */
-            } catch (executionError) { /* ... Handle execution error ... */ }
+                const gasLimitWithBuffer = estimatedGasUnits * BigInt(Math.round(GAS_ESTIMATE_BUFFER * 100)) / 100n;
+                const tx = await flashSwapContract.initiateFlashSwap(
+                    loanPool, amount0, amount1, actualArbitrageParams,
+                    { gasLimit: gasLimitWithBuffer, gasPrice: gasPrice }
+                );
+                console.log(`   ✅ Transaction Sent: ${tx.hash}`);
+                console.log(`   ⏳ Waiting for confirmation...`);
+                const receipt = await tx.wait(1);
+                console.log(`   ✅ Tx Confirmed! Block: ${receipt.blockNumber}, Gas Used: ${receipt.gasUsed.toString()}`);
+            } catch (executionError) {
+                 console.error(`   ❌ Flash Swap Transaction Failed: ${executionError.message}`);
+                 if (executionError.data && executionError.data !== '0x') { /* Decode */ }
+                 else if (executionError.transactionHash) { console.error("   Tx Hash:", executionError.transactionHash); }
+            }
         } else {
-             if (priceDiffPercent > 0.01) { /* ... Log below threshold ... */ }
+             if (priceDiffPercent > 0.01) {
+                  console.log(`   Opportunity found but below profit threshold. Est. Net: ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)} WETH`);
+             }
         }
     } catch (error) {
         console.error(`❌ Error during arbitrage check cycle: ${error.message}`);
@@ -177,4 +187,6 @@ console.log(`Starting arbitrage check loop: Checking every ${CHECK_INTERVAL_MS /
 checkArbitrage();
 const intervalId = setInterval(checkArbitrage, CHECK_INTERVAL_MS);
 // --- Shutdown handlers ---
-process.on('SIGINT', () => { /* ... */ }); process.on('unhandledRejection', (r, p) => { /* ... */ }); process.on('uncaughtException', (e) => { /* ... */ });
+process.on('SIGINT', () => { console.log("\n🛑 Shutting down..."); clearInterval(intervalId); process.exit(0); });
+process.on('unhandledRejection', (reason, promise) => { console.error('Unhandled Rejection:', reason); });
+process.on('uncaughtException', (error) => { console.error('Uncaught Exception:', error); process.exit(1); });
