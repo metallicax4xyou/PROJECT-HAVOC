@@ -19,7 +19,7 @@ const FLASH_SWAP_CONTRACT_ADDRESS = ethers.getAddress("0x3f7A3f4bb9DCE54684D0606
 const WETH_ADDRESS = ethers.getAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"); // Wrapped Ether
 const USDC_ADDRESS = ethers.getAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"); // Native USDC (usually preferred)
 const POOL_WETH_USDC_005 = ethers.getAddress("0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"); // WETH/USDC 0.05% Fee Pool
-const POOL_WETH_USDC_030 = ethers.getAddress("0x17c14d2c404D167802b16C450d3c99F88F2c4F4d"); // WETH/USDC 0.30% Fee Pool (Can use non-checksummed here too)
+const POOL_WETH_USDC_030 = ethers.getAddress("0x17c14d2c404d167802b16c450d3c99f88f2c4f4d"); // Use fully lowercase // WETH/USDC 0.30% Fee Pool (Can use non-checksummed here too)
 // const ROUTER_ADDRESS = ethers.getAddress("0xE592427A0AEce92De3Edee1F18E0157C05861564"); // Router not directly needed by bot if calling FlashSwap
 
 // Token Decimals
