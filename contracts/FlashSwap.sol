@@ -1,52 +1,35 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+// --- UPDATED PRAGMA ---
+pragma solidity =0.7.6; // Match periphery library version
+pragma abicoder v2; // Explicitly enable ABI Coder v2 (good practice in 0.7.x)
 
 // --- Imports ---
 import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3FlashCallback.sol";
-// --- ADDED Imports for Validation ---
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol"; // Library to compute pool address
-import "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol"; // Library for validation
-// --- End Added Imports ---
+import "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
+import "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+// --- ADDED SAFEMATH for explicit checks below 0.8.0 ---
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "hardhat/console.sol";
 
 // --- Contract Definition ---
-// Consider inheriting PeripheryImmutableState if using more periphery features
 contract FlashSwap is IUniswapV3FlashCallback {
     using SafeERC20 for IERC20;
+    // --- ADDED SAFEMATH ---
+    using SafeMath for uint256;
 
     // --- State Variables ---
     ISwapRouter public immutable SWAP_ROUTER;
     address public immutable owner;
-    // --- ADDED Factory Address (Needed for Validation) ---
-    // Get Factory address for Arbitrum One from Uniswap docs (or pass in constructor)
-    address public immutable V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
-
+    address public immutable V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984; // Arbitrum Factory
 
     // --- Structs ---
-    struct FlashCallbackData { // Data encoded by initiateFlashSwap
-        uint amount0Borrowed;
-        uint amount1Borrowed;
-        address caller;
-        address token0; // Need tokens to reconstruct pool key
-        address token1; // Need tokens to reconstruct pool key
-        uint24 fee;     // Need fee to reconstruct pool key
-        bytes params;   // Arbitrage params
-    }
-
-    struct ArbitrageParams { // Decoded from FlashCallbackData.params
-        address tokenIntermediate;
-        address poolA;
-        address poolB;
-        uint24 feeA;
-        uint24 feeB;
-        uint amountOutMinimum1;
-        uint amountOutMinimum2;
-    }
+    struct FlashCallbackData { /* ... */ }
+    struct ArbitrageParams { /* ... */ }
 
     // --- Events ---
     // ... (Keep existing events) ...
@@ -66,55 +49,52 @@ contract FlashSwap is IUniswapV3FlashCallback {
         uint256 fee0,
         uint256 fee1,
         bytes calldata data
-    ) external override {
+    ) external override { // Note: 'override' keyword is standard
         FlashCallbackData memory internalData = abi.decode(data, (FlashCallbackData));
 
-        // --- ADDED CALLBACK VALIDATION ---
-        // Reconstruct the PoolKey
-        PoolAddress.PoolKey memory poolKey = PoolAddress.PoolKey({
-            token0: internalData.token0,
-            token1: internalData.token1,
-            fee: internalData.fee
-        });
-        // Verify that the caller (msg.sender) is the legitimate pool address for the given key
+        // --- CALLBACK VALIDATION ---
+        PoolAddress.PoolKey memory poolKey = PoolAddress.PoolKey(/* ... */);
         CallbackValidation.verifyCallback(V3_FACTORY, poolKey);
-        // --- END VALIDATION ---
-
-
-        // Original require check is now redundant if verifyCallback passes, but keep for defense-in-depth
-        // require(msg.sender == internalData.poolAddress, "FlashSwap: Callback from unexpected pool"); // Can potentially remove
 
         ArbitrageParams memory arbParams = abi.decode(internalData.params, (ArbitrageParams));
+        IUniswapV3Pool loanPool = IUniswapV3Pool(msg.sender);
+        address tokenBorrowed; uint amountBorrowed; uint totalAmountToRepay; uint feePaid;
 
-        IUniswapV3Pool loanPool = IUniswapV3Pool(msg.sender); // Use msg.sender as it's verified pool address
-        address tokenBorrowed;
-        uint amountBorrowed;
-        uint totalAmountToRepay;
-        uint feePaid;
+        if (internalData.amount1Borrowed > 0) {
+            tokenBorrowed = loanPool.token1(); amountBorrowed = internalData.amount1Borrowed; feePaid = fee1;
+            // --- Using SafeMath ---
+            totalAmountToRepay = amountBorrowed.add(feePaid);
+            require(arbParams.poolA != address(0) && arbParams.poolB != address(0), "Pool addresses invalid");
+        } else {
+            tokenBorrowed = loanPool.token0(); amountBorrowed = internalData.amount0Borrowed; feePaid = fee0;
+            // --- Using SafeMath ---
+            totalAmountToRepay = amountBorrowed.add(feePaid);
+            require(arbParams.poolA != address(0) && arbParams.poolB != address(0), "Pool addresses invalid");
+        }
 
-        // Determine borrow details (no change needed here)
-        if (internalData.amount1Borrowed > 0) { /* ... */ } else { /* ... */ }
-
-        // ... (Logging - No change needed) ...
-
+        // ... (Logging) ...
         emit ArbitrageAttempt(arbParams.poolA, arbParams.poolB, tokenBorrowed, amountBorrowed);
 
-        uint amountIntermediateReceived;
-        uint finalAmountReceived;
+        uint amountIntermediateReceived; uint finalAmountReceived;
 
         // --- Swap 1 ---
-        // ... (Approve, Params, Swap try/catch - No change needed) ...
+        IERC20(tokenBorrowed).safeApprove(address(SWAP_ROUTER), amountBorrowed);
+        ISwapRouter.ExactInputSingleParams memory params1 = ISwapRouter.ExactInputSingleParams({ /* ... */ });
         try SWAP_ROUTER.exactInputSingle(params1) returns (uint amountOut) { /* ... */ } catch Error(string memory reason) { revert("FlashSwap: Swap 1 execution failed"); } catch { revert("FlashSwap: Swap 1 execution failed (low level)"); }
 
         // --- Swap 2 ---
-        // ... (Require, Approve, Params, Swap try/catch - No change needed) ...
+        require(amountIntermediateReceived > 0, "FlashSwap: Swap 1 returned zero amount");
+        IERC20(arbParams.tokenIntermediate).safeApprove(address(SWAP_ROUTER), amountIntermediateReceived);
+        ISwapRouter.ExactInputSingleParams memory params2 = ISwapRouter.ExactInputSingleParams({ /* ... */ });
          try SWAP_ROUTER.exactInputSingle(params2) returns (uint amountOut) { /* ... */ } catch Error(string memory reason) { revert("FlashSwap: Swap 2 execution failed"); } catch { revert("FlashSwap: Swap 2 execution failed (low level)"); }
 
         // --- Repayment ---
-        // ... (Balance check, require, transfer - No change needed) ...
-        IERC20(tokenBorrowed).safeTransfer(msg.sender, totalAmountToRepay); // Repay to msg.sender (verified pool)
+        uint currentBalanceBorrowedToken = IERC20(tokenBorrowed).balanceOf(address(this));
+        require(currentBalanceBorrowedToken >= totalAmountToRepay, "FlashSwap: Insufficient funds post-arbitrage for repayment");
+        IERC20(tokenBorrowed).safeTransfer(msg.sender, totalAmountToRepay);
+        emit RepaymentSuccess(tokenBorrowed, totalAmountToRepay);
 
-        // ... (Profit logging - No change needed) ...
+        // ... (Profit logging) ...
     }
 
 
@@ -123,38 +103,20 @@ contract FlashSwap is IUniswapV3FlashCallback {
         address _poolAddress,
         uint _amount0,
         uint _amount1,
-        bytes calldata _params // Contains encoded ArbitrageParams
+        bytes calldata _params
     ) external { /* onlyOwner? */
         require((_amount0 > 0 && _amount1 == 0) || (_amount1 > 0 && _amount0 == 0), "...");
         require(_params.length > 0, "...");
-
-        // --- ADD Fetching Pool Details for Callback Data ---
         IUniswapV3Pool pool = IUniswapV3Pool(_poolAddress);
-        address token0 = pool.token0();
-        address token1 = pool.token1();
-        uint24 fee = pool.fee();
-        // --- END Fetching Pool Details ---
-
+        address token0 = pool.token0(); address token1 = pool.token1(); uint24 fee = pool.fee();
         emit FlashSwapInitiated(msg.sender, _poolAddress, _amount0, _amount1);
-
-        // Prepare internal data for the callback INCLUDING pool key details
-        FlashCallbackData memory callbackData = FlashCallbackData({
-            amount0Borrowed: _amount0,
-            amount1Borrowed: _amount1,
-            caller: msg.sender,
-            // poolAddress: _poolAddress, // No longer strictly needed in callback if using verifyCallback
-            token0: token0, // Pass token0
-            token1: token1, // Pass token1
-            fee: fee,       // Pass fee
-            params: _params
-        });
-
-        // Trigger the flash loan
+        FlashCallbackData memory callbackData = FlashCallbackData({ /* include token0, token1, fee */ });
         pool.flash( address(this), _amount0, _amount1, abi.encode(callbackData) );
     }
 
     // --- Profit Withdrawal Functions ---
-    // ... (No change needed) ...
+    function withdrawEther() external onlyOwner { /* ... */ }
+    function withdrawToken(address tokenAddress) external onlyOwner { /* ... */ }
 
     // --- Fallback ---
     receive() external payable {}
