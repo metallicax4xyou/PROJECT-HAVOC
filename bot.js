@@ -26,13 +26,14 @@ const USDC_DECIMALS = 6;
 const CHECK_INTERVAL_MS = 15000;
 const MIN_PROFIT_THRESHOLD_WETH = ethers.parseUnits("0.00001", WETH_DECIMALS);
 const SLIPPAGE_TOLERANCE = 0.005; // 0.5%
-const BORROW_AMOUNT_WETH = ethers.parseUnits("0.01", WETH_DECIMALS);
-const GAS_ESTIMATE_BUFFER = 1.2;
+// --- REDUCED BORROW AMOUNT AGAIN ---
+const BORROW_AMOUNT_WETH = ethers.parseUnits("0.001", WETH_DECIMALS); // Reduced amount (0.001 WETH)
+const GAS_ESTIMATE_BUFFER = 1.2; // 20% buffer
 
 // --- ABIs ---
-const UNISWAP_V3_POOL_ABI = [ /* ... */ "function token0() external view returns (address)", "function token1() external view returns (address)", "function fee() external view returns (uint24)", "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)" ];
-const FLASH_SWAP_ABI = [ /* ... */ "function initiateFlashSwap(address,uint256,uint256,bytes) external", /* events */ ];
-const QUOTER_V2_ABI = [ /* ... */ "function quoteExactInputSingle((address,address,uint256,uint24,uint160)) external returns (uint256,uint160,uint32,uint256)" ];
+const UNISWAP_V3_POOL_ABI = [ /* ... pool ABI ... */ "function token0() external view returns (address)", "function token1() external view returns (address)", "function fee() external view returns (uint24)", "function slot0() external view returns (uint160,int24,uint16,uint16,uint16,uint8,bool)" ];
+const FLASH_SWAP_ABI = [ /* ... flash swap ABI ... */ "function initiateFlashSwap(address,uint256,uint256,bytes) external", /* events */ ];
+const QUOTER_V2_ABI = [ /* ... quoter ABI ... */ "function quoteExactInputSingle((address,address,uint256,uint24,uint160)) external returns (uint256,uint160,uint32,uint256)" ];
 
 // =========================================================================
 // == Ethers Setup ==
@@ -46,39 +47,17 @@ const quoterContract = new ethers.Contract(QUOTER_V2_ADDRESS, QUOTER_V2_ABI, pro
 
 console.log(`🤖 Bot Initialized.`); /* ... */ console.log(`   Executor: ${signer.address}`); /* ... */
 console.warn("⚠️ Using USDC.e (Bridged) address:", USDC_ADDRESS);
+console.warn(`⚠️ Borrow amount set to: ${ethers.formatUnits(BORROW_AMOUNT_WETH, WETH_DECIMALS)} WETH`);
+
 
 // =========================================================================
 // == Helper Functions ==
 // =========================================================================
-/**
- * Calculates the price of token1 in terms of token0 from sqrtPriceX96, using BigInt math.
- * @param {bigint} sqrtPriceX96 The sqrtPriceX96 value from pool.slot0().
- * @param {number} decimals0 Decimals of token0.
- * @param {number} decimals1 Decimals of token1.
- * @returns {number} The price of 1 unit of token1 denominated in token0.
- */
-function sqrtPriceX96ToPrice(sqrtPriceX96, decimals0, decimals1) {
-    if (!sqrtPriceX96 || sqrtPriceX96 === 0n) {
-        console.warn("   sqrtPriceX96ToPrice received zero sqrtPriceX96!");
-        return NaN;
-    }
-    const Q96 = 2n**96n;
-    const Q192 = Q96**2n; // 2^192
-
-    // Calculate price * 10^decimals1 / 10^decimals0 = (sqrtPriceX96^2 / 2^192)
-    // price = (sqrtPriceX96 * sqrtPriceX96 * 10^decimals0) / (2^192 * 10^decimals1)
-    const numerator = sqrtPriceX96 * sqrtPriceX96 * (10n**BigInt(decimals0));
-    const denominator = Q192 * (10n**BigInt(decimals1));
-
-    // Use a multiplier to preserve precision during BigInt division
-    const multiplier = 10n**18n; // Use 1e18 for good precision
-
-    const priceBigInt = (numerator * multiplier) / denominator;
-
-    // Convert the final result to a floating-point number for display/comparison
-    return Number(priceBigInt) / Number(multiplier);
+function sqrtPriceX96ToPrice(sqrtPriceX96, decimals0, decimals1) { /* ... */
+    if (!sqrtPriceX96 || sqrtPriceX96 === 0n) { return NaN; } const Q96 = 2n**96n; const Q192 = Q96**2n;
+    const numerator = sqrtPriceX96 * sqrtPriceX96 * (10n**BigInt(decimals0)); const denominator = Q192 * (10n**BigInt(decimals1));
+    const multiplier = 10n**18n; const priceBigInt = (numerator * multiplier) / denominator; return Number(priceBigInt) / Number(multiplier);
 }
-
 
 // =========================================================================
 // == Main Arbitrage Logic ==
@@ -88,25 +67,19 @@ async function checkArbitrage() {
     try {
         // 1. Get Pool Data & Determine Order
         let slot0_005, slot0_030, token0_pool005, token1_pool005;
-        try {
-            [slot0_005, slot0_030, token0_pool005, token1_pool005] = await Promise.all([ /* Fetch data */ ]);
-        } catch (fetchError) { console.error(`   ❌ Fetch Error: ${fetchError.message}`); return; }
-
-        if (!slot0_005 || !slot0_030 || !token0_pool005 || !token1_pool005) { console.error(`   ❌ Incomplete pool data.`); return; }
-        console.log(`   Raw sqrtPriceX96_005: ${slot0_005.sqrtPriceX96?.toString() ?? 'N/A'}`);
-        console.log(`   Raw sqrtPriceX96_030: ${slot0_030.sqrtPriceX96?.toString() ?? 'N/A'}`);
+        try { [slot0_005, slot0_030, token0_pool005, token1_pool005] = await Promise.all([ /* Fetch */ ]); }
+        catch (fetchError) { console.error(`   ❌ Fetch Error: ${fetchError.message}`); return; }
+        if (!slot0_005 || !slot0_030 || !token0_pool005 || !token1_pool005) { console.error(`   ❌ Incomplete data.`); return; }
         if (slot0_005.sqrtPriceX96 === 0n || slot0_030.sqrtPriceX96 === 0n) { console.error(`   ❌ sqrtPriceX96 is zero.`); return; }
 
         let token0Address, token1Address, decimals0, decimals1;
         // ... (Token order logic WETH=T0, USDC.e=T1) ...
-        if (token0_pool005.toLowerCase() === WETH_ADDRESS.toLowerCase()) { token0Address = WETH_ADDRESS; decimals0 = WETH_DECIMALS; token1Address = USDC_ADDRESS; decimals1 = USDC_DECIMALS; if (token1_pool005.toLowerCase() !== USDC_ADDRESS.toLowerCase()) { console.error(`❌ Mismatch T1`); return; } }
-        else if (token0_pool005.toLowerCase() === USDC_ADDRESS.toLowerCase()) { token0Address = USDC_ADDRESS; decimals0 = USDC_DECIMALS; token1Address = WETH_ADDRESS; decimals1 = WETH_DECIMALS; if (token1_pool005.toLowerCase() !== WETH_ADDRESS.toLowerCase()) { console.error(`❌ Mismatch T1`); return; } }
-        else { console.error(`❌ Unexpected T0`); return; }
+        if (token0_pool005.toLowerCase() === WETH_ADDRESS.toLowerCase()) { /* Assign T0=WETH, T1=USDCe */ } else if (token0_pool005.toLowerCase() === USDC_ADDRESS.toLowerCase()) { /* Assign T0=USDCe, T1=WETH */ } else { console.error(`❌ Unexpected T0`); return; }
 
-        // 2. Calculate Prices (Should work now)
+        // 2. Calculate Prices
         const price_005 = sqrtPriceX96ToPrice(slot0_005.sqrtPriceX96, decimals0, decimals1);
         const price_030 = sqrtPriceX96ToPrice(slot0_030.sqrtPriceX96, decimals0, decimals1);
-        if (isNaN(price_005) || isNaN(price_030)) { console.error(`   ❌ Price calculation NaN.`); return; }
+        if (isNaN(price_005) || isNaN(price_030)) { console.error(`   ❌ Price calc NaN.`); return; }
         console.log(`   P_0.05: ${price_005.toFixed(decimals1)} | P_0.30: ${price_030.toFixed(decimals1)} (USDC.e/WETH)`);
         const priceDiffPercent = Math.abs(price_005 - price_030) / Math.min(price_005, price_030) * 100;
 
@@ -119,7 +92,7 @@ async function checkArbitrage() {
         else { return; }
 
         // 4. SIMULATE SWAPS
-        const amountToBorrow = BORROW_AMOUNT_WETH;
+        const amountToBorrow = BORROW_AMOUNT_WETH; // Using the reduced amount
         let simulatedIntermediateFromSwap1, simulatedFinalFromSwap2;
         try {
             simulatedIntermediateFromSwap1 = (await quoterContract.quoteExactInputSingle.staticCall({ /* Swap 1 */ }))[0];
@@ -137,9 +110,7 @@ async function checkArbitrage() {
 
         // --- 5. ESTIMATE GAS COST ---
         let estimatedGasUnits = 0n; let gasPrice = 0n; let estimatedGasCostWeth = 0n;
-        const actualAmountOutMinimum1 = simulatedIntermediateFromSwap1 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000)) / 10000n;
-        const requiredRepaymentThreshold = totalAmountToRepay + MIN_PROFIT_THRESHOLD_WETH;
-        const actualAmountOutMinimum2 = requiredRepaymentThreshold;
+        // --- Use amountOutMinimum = 0 ONLY for gas estimation ---
         const gasEstimateAmountOutMinimum1 = 0n; const gasEstimateAmountOutMinimum2 = 0n;
         const gasEstimateParams = ethers.AbiCoder.defaultAbiCoder().encode( /*...*/ );
         let amount0 = 0n; let amount1 = 0n;
@@ -149,12 +120,13 @@ async function checkArbitrage() {
             const feeData = await provider.getFeeData();
             gasPrice = feeData.gasPrice;
             if (!gasPrice || gasPrice === 0n) { gasPrice = ethers.parseUnits("0.1", "gwei"); }
+            // console.log("   Estimating gas with amountOutMinimums set to 0..."); // Reduce noise
             estimatedGasUnits = await flashSwapContract.initiateFlashSwap.estimateGas( loanPool, amount0, amount1, gasEstimateParams );
             const gasUnitsWithBuffer = estimatedGasUnits * BigInt(Math.round(GAS_ESTIMATE_BUFFER * 100)) / 100n;
             estimatedGasCostWeth = gasUnitsWithBuffer * gasPrice;
             console.log(`   Est. Gas: ${estimatedGasUnits} units | Price: ${ethers.formatUnits(gasPrice, "gwei")} Gwei | Est. Cost: ${ethers.formatUnits(estimatedGasCostWeth, WETH_DECIMALS)} WETH`);
         } catch (gasEstimateError) {
-             console.error(`   ❌ Gas Estimation Failed (with amountOutMin=0): ${gasEstimateError.message}`);
+             console.error(`   ❌ Gas Estimation Failed (Check Amount/Liquidity): ${gasEstimateError.message}`);
              if (gasEstimateError.data && gasEstimateError.data !== '0x') { /* Decode */ } return;
         }
 
@@ -163,7 +135,11 @@ async function checkArbitrage() {
         console.log(`   Net Profit (WETH, after estimated gas): ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)}`);
 
         if (netProfitWeth > MIN_PROFIT_THRESHOLD_WETH) {
-            console.log(`✅ PROFITABLE OPPORTUNITY! Est. Net Profit: ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)} WETH`); /* ... */
+            console.log(`✅ PROFITABLE OPPORTUNITY! Est. Net Profit: ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)} WETH`);
+            // --- Construct ACTUAL TX Params using proper amountOutMinimums ---
+            const actualAmountOutMinimum1 = simulatedIntermediateFromSwap1 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000)) / 10000n;
+            const requiredRepaymentThreshold = totalAmountToRepay + MIN_PROFIT_THRESHOLD_WETH;
+            const actualAmountOutMinimum2 = requiredRepaymentThreshold;
             const actualArbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode( /*...*/ );
             console.log(`   Params: MinOut1=${ethers.formatUnits(actualAmountOutMinimum1, decimals1)}, MinOut2=${ethers.formatUnits(actualAmountOutMinimum2, decimals0)}`);
             // 7. Execute Transaction
