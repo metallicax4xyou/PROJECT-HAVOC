@@ -1,7 +1,7 @@
 // bot.js
 // Monitors Uniswap V3 WETH/NativeUSDC pools on Arbitrum for arbitrage opportunities.
 // Uses QuoterV2 for swap simulation. Includes dynamic gas estimation.
-// Fetches pool data sequentially WITH DELAYS.
+// Fetches pool data sequentially WITH DELAYS. Reverted Quoter ABI/Calls.
 // WARNING: Experimental. Review thresholds, slippage, and execution logic carefully.
 
 require("dotenv").config();
@@ -33,12 +33,8 @@ const GAS_ESTIMATE_BUFFER = 1.2;
 // --- ABIs ---
 const UNISWAP_V3_POOL_ABI = [ "function token0() external view returns (address)", "function token1() external view returns (address)", "function fee() external view returns (uint24)", "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)" ];
 const FLASH_SWAP_ABI = [ "function initiateFlashSwap(address,uint256,uint256,bytes) external", /* events */ ];
-// --- REVERTING QUOTER ABI to simpler version ---
-const QUOTER_V2_ABI = [
-    "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)"
-    // Note: Marking it 'view' in ABI might help ethers, but contract itself might not be explicitly view
-    // "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external view returns (uint256 amountOut)"
-];
+// --- Using simpler Quoter ABI again ---
+const QUOTER_V2_ABI = [ "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)" ];
 
 // =========================================================================
 // == Ethers Setup ==
@@ -88,34 +84,20 @@ async function checkArbitrage() {
         const BORROW_TOKEN = WETH_ADDRESS; const INTERMEDIATE_TOKEN = USDC_ADDRESS;
         let poolA, feeA, poolB, feeB, loanPool;
         // ... (Direction logic) ...
-        if (price_030 > price_005) { poolA = POOL_WETH_USDC_030; feeA = 3000; /*...*/ } else if (price_005 > price_030) { poolA = POOL_WETH_USDC_005; feeA = 500; /*...*/ } else { return; }
+        if (price_030 > price_005) { /* Assign pools/fees */ } else if (price_005 > price_030) { /* Assign pools/fees */ } else { return; }
 
         // 4. SIMULATE SWAPS
         const amountToBorrow = BORROW_AMOUNT_WETH;
         let simulatedIntermediateFromSwap1, simulatedFinalFromSwap2;
         try {
-            // --- Simulate Swap 1 (WETH -> Native USDC) ---
-            // --- REVERTING QUOTER CALL to pass arguments individually ---
+            // --- Using individual arguments again ---
             simulatedIntermediateFromSwap1 = await quoterContract.quoteExactInputSingle.staticCall(
-                 token0Address,      // tokenIn (WETH)
-                 token1Address,      // tokenOut (Native USDC)
-                 feeA,               // fee of Pool A
-                 amountToBorrow,     // amountIn (WETH)
-                 0                   // sqrtPriceLimitX96
+                token0Address, token1Address, feeA, amountToBorrow, 0
             );
-
             if (simulatedIntermediateFromSwap1 === 0n) { console.warn("   Swap 1 quote is 0."); return; }
-
-            // --- Simulate Swap 2 (Native USDC -> WETH) ---
-            // --- REVERTING QUOTER CALL to pass arguments individually ---
-             simulatedFinalFromSwap2 = await quoterContract.quoteExactInputSingle.staticCall(
-                 token1Address,      // tokenIn (Native USDC)
-                 token0Address,      // tokenOut (WETH)
-                 feeB,               // fee of Pool B
-                 simulatedIntermediateFromSwap1, // amountIn (USDC from Swap 1)
-                 0                   // sqrtPriceLimitX96
-             );
-
+            simulatedFinalFromSwap2 = await quoterContract.quoteExactInputSingle.staticCall(
+                token1Address, token0Address, feeB, simulatedIntermediateFromSwap1, 0
+            );
         } catch (quoteError) { console.error(`   ❌ Quote Error: ${quoteError.message}`); return; }
 
         // Calculate Potential Profit
@@ -139,19 +121,26 @@ async function checkArbitrage() {
         }
 
         // 6. Check Profitability
-        // ... (Profit check logic) ...
+        const netProfitWeth = potentialProfitWeth - estimatedGasCostWeth;
         console.log(`   Net Profit (WETH, after estimated gas): ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)}`);
 
         if (netProfitWeth > MIN_PROFIT_THRESHOLD_WETH) {
-            console.log(`✅ PROFITABLE OPPORTUNITY!`);
+            console.log(`✅ PROFITABLE OPPORTUNITY! Est. Net Profit: ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)} WETH`);
             // --- Construct ACTUAL TX Params ---
-            const actualAmountOutMinimum1 = /*...*/; const actualAmountOutMinimum2 = /*...*/;
-            const actualArbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode( /*...*/ );
+            // --- FIXING SYNTAX ERRORS ---
+            const actualAmountOutMinimum1 = simulatedIntermediateFromSwap1 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000)) / 10000n;
+            const requiredRepaymentThreshold = totalAmountToRepay + MIN_PROFIT_THRESHOLD_WETH;
+            const actualAmountOutMinimum2 = requiredRepaymentThreshold; // Restore assignment
+            const actualArbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode(
+                 ['address', 'address', 'address', 'uint24', 'uint24', 'uint256', 'uint256'],
+                 [token1Address, poolA, poolB, feeA, feeB, actualAmountOutMinimum1, actualAmountOutMinimum2]
+            );
+            // --- End Fix ---
             console.log(`   Params: MinOut1=${ethers.formatUnits(actualAmountOutMinimum1, decimals1)}, MinOut2=${ethers.formatUnits(actualAmountOutMinimum2, decimals0)}`);
             // 7. Execute Transaction
-            console.log(`   Executing initiateFlashSwap...`);
+            console.log(`   Executing initiateFlashSwap... Amount0: ${ethers.formatUnits(amount0, WETH_DECIMALS)} WETH(0)`);
             try {
-                const gasLimitWithBuffer = /*...*/;
+                const gasLimitWithBuffer = estimatedGasUnits * BigInt(/*...*/);
                 const tx = await flashSwapContract.initiateFlashSwap( /*...*/ );
                 /* ... Tx logging ... */
             } catch (executionError) { /* ... Handle execution error ... */ }
