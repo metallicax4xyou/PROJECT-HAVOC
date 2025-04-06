@@ -29,8 +29,7 @@ const WETH_ADDRESS = ethers.getAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBa
 const USDC_ADDRESS = ethers.getAddress("0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8"); // USDC.e (Bridged)
 // Pools for WETH / USDC.e
 const POOL_WETH_USDC_005 = ethers.getAddress("0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"); // 0.05%
-// Pool for WETH / USDC.e 0.30% Fee (Verified via Factory)
-const POOL_WETH_USDC_030 = ethers.getAddress("0x17c14D2c404D167802b16C450d3c99F88F2c4F4d");
+const POOL_WETH_USDC_030 = ethers.getAddress("0x17c14D2c404D167802b16C450d3c99F88F2c4F4d"); // 0.30% (Verified via Factory)
 // QuoterV2 Address on Arbitrum
 const QUOTER_V2_ADDRESS = ethers.getAddress("0x61fFE014bA17989E743c5F6cB21bF9697530B21e");
 
@@ -59,8 +58,9 @@ const FLASH_SWAP_ABI = [
     "event RepaymentSuccess(address indexed token, uint256 amountRepaid)"
 ];
 const QUOTER_V2_ABI = [
-    "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)"
-    // Using simpler version that returns only amountOut
+    // Mark function as view/readonly for ethers - should reflect actual contract state
+    // Note: Original QuoterV2 might not explicitly mark it view, but it behaves as such.
+    "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external view returns (uint256 amountOut)"
 ];
 
 // =========================================================================
@@ -81,7 +81,7 @@ console.log(`   Network: Arbitrum One (connected via RPC)`);
 console.log(`   Executor Address: ${signer.address}`);
 console.log(`   FlashSwap Contract: ${FLASH_SWAP_CONTRACT_ADDRESS}`);
 console.log(`   Quoter Contract: ${QUOTER_V2_ADDRESS}`);
-console.warn("⚠️ Using USDC.e (Bridged) address:", USDC_ADDRESS); // Add warning
+console.warn("⚠️ Using USDC.e (Bridged) address:", USDC_ADDRESS);
 
 
 // =========================================================================
@@ -148,77 +148,77 @@ async function checkArbitrage() {
 
         // 3. Identify Potential Arbitrage Direction & Parameters
         // Strategy: Borrow WETH (token0), Sell WETH->USDC.e (Pool A=higher price), Buy WETH<-USDC.e (Pool B=lower price), Repay WETH
-        const BORROW_TOKEN = WETH_ADDRESS; // Borrowing WETH (Token0)
-        const INTERMEDIATE_TOKEN = USDC_ADDRESS; // Swapping through USDC.e (Token1)
+        const BORROW_TOKEN = WETH_ADDRESS;
+        const INTERMEDIATE_TOKEN = USDC_ADDRESS;
 
         let poolA, feeA, poolB, feeB, loanPool;
-        if (price_030 > price_005) { // Sell WETH where price (USDC/WETH) is higher (Pool 0.30)
+        if (price_030 > price_005) {
             poolA = POOL_WETH_USDC_030; feeA = 3000;
             poolB = POOL_WETH_USDC_005; feeB = 500;
             loanPool = poolA;
-        } else if (price_005 > price_030) { // Sell WETH where price is higher (Pool 0.05)
+        } else if (price_005 > price_030) {
             poolA = POOL_WETH_USDC_005; feeA = 500;
             poolB = POOL_WETH_USDC_030; feeB = 3000;
             loanPool = poolA;
         } else {
-             // console.log(`   Prices are equal or too close.`); // Reduce noise
-             return;
+             return; // Exit if prices too close
         }
 
         // 4. === SIMULATE SWAPS using QuoterV2 ===
         const amountToBorrow = BORROW_AMOUNT_WETH;
-        // console.log(`   Simulating borrow of ${ethers.formatUnits(amountToBorrow, WETH_DECIMALS)} WETH (Token0)...`); // Reduce noise
 
         let simulatedIntermediateFromSwap1;
         let simulatedFinalFromSwap2;
 
         try {
             // --- Simulate Swap 1: Borrow Token (WETH/T0) -> Intermediate Token (USDC.e/T1) on Pool A ---
-            // console.log(`   Quoting Swap 1: WETH -> USDC.e on Pool A (${poolA}) fee ${feeA}...`); // Reduce noise
-            simulatedIntermediateFromSwap1 = await quoterContract.quoteExactInputSingle(
+            // Use .staticCall to explicitly make a read-only call
+            simulatedIntermediateFromSwap1 = await quoterContract.quoteExactInputSingle.staticCall(
                 token0Address,      // tokenIn (WETH)
                 token1Address,      // tokenOut (USDC.e)
                 feeA,               // fee of Pool A
                 amountToBorrow,     // amountIn (WETH)
                 0                   // sqrtPriceLimitX96 (0 for no limit)
             );
-            // console.log(`    -> Expected ${ethers.formatUnits(simulatedIntermediateFromSwap1, decimals1)} USDC.e`); // Reduce noise
 
             if (simulatedIntermediateFromSwap1 === 0n) {
                  console.warn("   Swap 1 quote returned 0. Insufficient liquidity?"); return;
             }
 
             // --- Simulate Swap 2: Intermediate Token (USDC.e/T1) -> Borrow Token (WETH/T0) on Pool B ---
-             // console.log(`   Quoting Swap 2: USDC.e -> WETH on Pool B (${poolB}) fee ${feeB}...`); // Reduce noise
-            simulatedFinalFromSwap2 = await quoterContract.quoteExactInputSingle(
+            // Use .staticCall to explicitly make a read-only call
+            simulatedFinalFromSwap2 = await quoterContract.quoteExactInputSingle.staticCall(
                 token1Address,      // tokenIn (USDC.e)
                 token0Address,      // tokenOut (WETH)
                 feeB,               // fee of Pool B
                 simulatedIntermediateFromSwap1, // amountIn (USDC.e from Swap 1)
                 0                   // sqrtPriceLimitX96 (0 for no limit)
             );
-            // console.log(`    -> Expected ${ethers.formatUnits(simulatedFinalFromSwap2, decimals0)} WETH`); // Reduce noise
 
         } catch (quoteError) {
              console.error(`   ❌ Error during swap quoting: ${quoteError.message}`);
+             // Also check if the error message indicates insufficient liquidity
+             if (quoteError.message.includes("Too little received")) { // Or similar message depending on exact revert
+                 console.warn("   Quote failed likely due to insufficient liquidity for the amount.");
+             }
              return; // Cannot proceed without quotes
         }
 
+
         // --- Calculate Profitability using SIMULATED values ---
-        const loanPoolFeeTier = feeA; // Fee of the pool we borrowed from (Pool A)
+        const loanPoolFeeTier = feeA;
         const flashLoanFee = (amountToBorrow * BigInt(loanPoolFeeTier)) / 1000000n;
         const totalAmountToRepay = amountToBorrow + flashLoanFee;
-        const potentialProfitWeth = simulatedFinalFromSwap2 - totalAmountToRepay; // Profit in WETH (Token0)
+        const potentialProfitWeth = simulatedFinalFromSwap2 - totalAmountToRepay;
 
-        // console.log(`   Simulated USDC.e(1) (Swap 1): ${ethers.formatUnits(simulatedIntermediateFromSwap1, decimals1)}`); // Reduce noise
-        // console.log(`   Simulated WETH(0) (Swap 2): ${ethers.formatUnits(simulatedFinalFromSwap2, decimals0)}`);
+        console.log(`   Simulated USDC.e(1) (Swap 1): ${ethers.formatUnits(simulatedIntermediateFromSwap1, decimals1)}`);
+        console.log(`   Simulated WETH(0) (Swap 2): ${ethers.formatUnits(simulatedFinalFromSwap2, decimals0)}`);
         console.log(`   Flash Loan Fee (WETH(0)): ${ethers.formatUnits(flashLoanFee, decimals0)}`);
         console.log(`   Total WETH(0) to Repay: ${ethers.formatUnits(totalAmountToRepay, decimals0)}`);
         console.log(`   Potential Profit (WETH(0), before gas): ${ethers.formatUnits(potentialProfitWeth, decimals0)}`);
 
 
         // 5. Estimate Gas Cost (CRITICAL TODO - Still Placeholder)
-        // TODO: Implement reliable gas estimation
         const estimatedGasCostWei = ethers.parseUnits("0.0001", "ether"); // FIXME: HARDCODED ESTIMATE
         const estimatedGasCostWeth = estimatedGasCostWei;
         console.log(`   Estimated Gas Cost (WETH): ${ethers.formatUnits(estimatedGasCostWeth, WETH_DECIMALS)}`);
@@ -234,22 +234,20 @@ async function checkArbitrage() {
 
             // 7. Construct Arbitrage Parameters using SIMULATED values + slippage
             const amountOutMinimum1 = simulatedIntermediateFromSwap1 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000)) / 10000n; // Min USDC.e(1)
-            const requiredRepaymentThreshold = totalAmountToRepay + MIN_PROFIT_THRESHOLD_WETH; // Target slightly above breakeven
-            const amountOutMinimum2 = requiredRepaymentThreshold; // Set minimum out for swap 2 to just cover repayment+threshold
-            // Note: A more aggressive strategy might apply slippage to the requiredRepaymentThreshold,
-            // but setting it exactly is safer initially to guarantee repayment if the quote holds.
+            const requiredRepaymentThreshold = totalAmountToRepay + MIN_PROFIT_THRESHOLD_WETH;
+            const amountOutMinimum2 = requiredRepaymentThreshold; // Set minimum out for swap 2 to cover repayment+threshold
 
             console.log(`   Setting amountOutMinimum1 (USDC.e(1)): ${ethers.formatUnits(amountOutMinimum1, decimals1)}`);
             console.log(`   Setting amountOutMinimum2 (WETH(0)): ${ethers.formatUnits(amountOutMinimum2, decimals0)}`);
 
             const arbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode(
                 ['address', 'address', 'address', 'uint24', 'uint24', 'uint256', 'uint256'],
-                [token1Address, poolA, poolB, feeA, feeB, amountOutMinimum1, amountOutMinimum2] // token1Address is USDC.e (intermediate)
+                [token1Address, poolA, poolB, feeA, feeB, amountOutMinimum1, amountOutMinimum2] // token1Address is USDC.e
             );
 
-            // Determine amount0/amount1 based on BORROW_TOKEN (WETH) which is token0
+            // Determine amount0/amount1
             let amount0 = 0n; let amount1 = 0n;
-            if (BORROW_TOKEN.toLowerCase() === token0Address.toLowerCase()) { // WETH is token0
+            if (BORROW_TOKEN.toLowerCase() === token0Address.toLowerCase()) {
                  amount0 = amountToBorrow;
             } else {
                  console.error("Error: Borrowing WETH logic assumes it's token0 for this pair."); return;
@@ -280,8 +278,7 @@ async function checkArbitrage() {
             }
 
         } else {
-             // Log only if difference was notable but not profitable enough
-             if (priceDiffPercent > 0.01) { // Example threshold
+             if (priceDiffPercent > 0.01) {
                   console.log(`   Opportunity found but below profit threshold. Est. Net: ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)} WETH`);
              }
         }
