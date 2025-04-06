@@ -108,12 +108,12 @@ contract FlashSwap is IUniswapV3FlashCallback {
 
         console.log("Callback Details:");
         console.log("  Loan Pool:", internalData.poolAddress);
-        console.log("  Borrowed Token:", tokenBorrowed);
+        console.log("  Borrowed Token Addr:", tokenBorrowed); // Changed log
         console.log("  Amount Borrowed:", amountBorrowed);
         console.log("  Fee:", tokenBorrowed == loanPool.token1() ? fee1 : fee0);
         console.log("  Total to Repay:", totalAmountToRepay);
         console.log("Arbitrage Params:");
-        console.log("  Intermediate Token:", arbParams.tokenIntermediate);
+        console.log("  Intermediate Token Addr:", arbParams.tokenIntermediate); // Changed log
         console.log("  Pool A:", arbParams.poolA, "Fee:", arbParams.feeA);
         console.log("  Pool B:", arbParams.poolB, "Fee:", arbParams.feeB);
 
@@ -142,10 +142,12 @@ contract FlashSwap is IUniswapV3FlashCallback {
                 sqrtPriceLimitX96: 0 // No price limit
             });
 
-        console.log("Executing Swap 1 (", IERC20(tokenBorrowed).symbol(), "->", IERC20(arbParams.tokenIntermediate).symbol(), ") on Pool A:", arbParams.poolA);
+        // UPDATED LOG (Removed .symbol())
+        console.log("Executing Swap 1 (Token Addr:", tokenBorrowed, "-> Token Addr:", arbParams.tokenIntermediate, ") on Pool A:", arbParams.poolA);
         try SWAP_ROUTER.exactInputSingle(params1) returns (uint amountOut) {
             amountIntermediateReceived = amountOut;
-            console.log("Swap 1 OK. Received:", amountIntermediateReceived, IERC20(arbParams.tokenIntermediate).symbol());
+            // UPDATED LOG (Removed .symbol())
+            console.log("Swap 1 OK. Received:", amountIntermediateReceived, "of Token Addr:", arbParams.tokenIntermediate);
             emit SwapExecuted(1, tokenBorrowed, arbParams.tokenIntermediate, amountBorrowed, amountIntermediateReceived);
         } catch Error(string memory reason) {
             console.log("!!! Swap 1 FAILED:", reason);
@@ -171,10 +173,12 @@ contract FlashSwap is IUniswapV3FlashCallback {
                 sqrtPriceLimitX96: 0 // No price limit
             });
 
-        console.log("Executing Swap 2 (", IERC20(arbParams.tokenIntermediate).symbol(), "->", IERC20(tokenBorrowed).symbol(), ") on Pool B:", arbParams.poolB);
+        // UPDATED LOG (Removed .symbol())
+        console.log("Executing Swap 2 (Token Addr:", arbParams.tokenIntermediate, "-> Token Addr:", tokenBorrowed, ") on Pool B:", arbParams.poolB);
          try SWAP_ROUTER.exactInputSingle(params2) returns (uint amountOut) {
              finalAmountReceived = amountOut; // Store the final amount received
-             console.log("Swap 2 OK. Received:", finalAmountReceived, IERC20(tokenBorrowed).symbol());
+             // UPDATED LOG (Removed .symbol())
+             console.log("Swap 2 OK. Received:", finalAmountReceived, "of Token Addr:", tokenBorrowed);
              emit SwapExecuted(2, arbParams.tokenIntermediate, tokenBorrowed, amountIntermediateReceived, finalAmountReceived);
         } catch Error(string memory reason) {
              console.log("!!! Swap 2 FAILED:", reason);
@@ -187,8 +191,11 @@ contract FlashSwap is IUniswapV3FlashCallback {
         // --- Repayment ---
         console.log("Checking balance for repayment...");
         uint currentBalanceBorrowedToken = IERC20(tokenBorrowed).balanceOf(address(this));
-        console.log("Current Balance:", currentBalanceBorrowedToken, IERC20(tokenBorrowed).symbol());
-        console.log("Required Repayment:", totalAmountToRepay, IERC20(tokenBorrowed).symbol());
+        // UPDATED LOG (Removed .symbol())
+        console.log("Current Balance:", currentBalanceBorrowedToken, "of Token Addr:", tokenBorrowed);
+        // UPDATED LOG (Removed .symbol())
+        console.log("Required Repayment:", totalAmountToRepay, "of Token Addr:", tokenBorrowed);
+
 
         // THE CRITICAL CHECK: Did the arbitrage yield enough profit to cover the loan + fee?
         // Note: This check implicitly covers gas because the caller pays gas externally.
@@ -203,7 +210,8 @@ contract FlashSwap is IUniswapV3FlashCallback {
         // If we reach here, the flash loan was successful and repaid.
         // Any remaining balance of `tokenBorrowed` is profit (minus external gas costs).
         uint profit = currentBalanceBorrowedToken - totalAmountToRepay;
-        console.log("*** Arbitrage SUCCESSFUL! Profit (before gas):", profit, IERC20(tokenBorrowed).symbol(), " ***");
+        // UPDATED LOG (Removed .symbol())
+        console.log("*** Arbitrage SUCCESSFUL! Profit (before gas):", profit, "of Token Addr:", tokenBorrowed, " ***");
     }
 
 
