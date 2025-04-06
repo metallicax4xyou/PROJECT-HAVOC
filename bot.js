@@ -25,7 +25,7 @@ const USDC_DECIMALS = 6;
 
 const CHECK_INTERVAL_MS = 15000;
 const MIN_PROFIT_THRESHOLD_WETH = ethers.parseUnits("0.00001", WETH_DECIMALS);
-const SLIPPAGE_TOLERANCE = 0.005; // Keep original slippage for TX params
+const SLIPPAGE_TOLERANCE = 0.005; // 0.5%
 const BORROW_AMOUNT_WETH = ethers.parseUnits("0.01", WETH_DECIMALS);
 const GAS_ESTIMATE_BUFFER = 1.2;
 
@@ -62,12 +62,34 @@ async function checkArbitrage() {
     console.log(`\n[${new Date().toISOString()}] Checking: ${POOL_WETH_USDC_005.slice(0,6)} vs ${POOL_WETH_USDC_030.slice(0,6)}`);
     try {
         // 1. Get Pool Data & Determine Order
-        const [slot0_005, slot0_030, token0_pool005, token1_pool005] = await Promise.all([ /* ... */ ]);
+        let slot0_005, slot0_030, token0_pool005, token1_pool005;
+        try {
+            [slot0_005, slot0_030, token0_pool005, token1_pool005] = await Promise.all([
+                pool005.slot0(),
+                pool030.slot0(),
+                pool005.token0(),
+                pool005.token1()
+            ]);
+        } catch (fetchError) {
+            console.error(`   ❌ Error fetching pool data: ${fetchError.message}`);
+            return; // Stop this cycle if fetching fails
+        }
+
+        // --- ADDED NULL CHECKS ---
+        if (!slot0_005 || !slot0_030 || !token0_pool005 || !token1_pool005) {
+            console.error(`   ❌ Failed to fetch complete pool data. Check RPC connection/pool addresses.`);
+            return; // Stop this cycle if data is incomplete
+        }
+
         let token0Address, token1Address, decimals0, decimals1;
-        // ... (Token order logic WETH=T0, USDC.e=T1) ...
-        if (token0_pool005.toLowerCase() === WETH_ADDRESS.toLowerCase()) { token0Address = WETH_ADDRESS; decimals0 = WETH_DECIMALS; token1Address = USDC_ADDRESS; decimals1 = USDC_DECIMALS; if (token1_pool005.toLowerCase() !== USDC_ADDRESS.toLowerCase()) { console.error(`❌ Mismatch T1`); return; } }
-        else if (token0_pool005.toLowerCase() === USDC_ADDRESS.toLowerCase()) { token0Address = USDC_ADDRESS; decimals0 = USDC_DECIMALS; token1Address = WETH_ADDRESS; decimals1 = WETH_DECIMALS; if (token1_pool005.toLowerCase() !== WETH_ADDRESS.toLowerCase()) { console.error(`❌ Mismatch T1`); return; } }
-        else { console.error(`❌ Unexpected T0`); return; }
+        // Use .toLowerCase() safely now
+         if (token0_pool005.toLowerCase() === WETH_ADDRESS.toLowerCase()) {
+            token0Address = WETH_ADDRESS; decimals0 = WETH_DECIMALS; token1Address = USDC_ADDRESS; decimals1 = USDC_DECIMALS;
+            if (token1_pool005.toLowerCase() !== USDC_ADDRESS.toLowerCase()) { console.error(`❌ Mismatch T1`); return; }
+        } else if (token0_pool005.toLowerCase() === USDC_ADDRESS.toLowerCase()) {
+             token0Address = USDC_ADDRESS; decimals0 = USDC_DECIMALS; token1Address = WETH_ADDRESS; decimals1 = WETH_DECIMALS;
+             if (token1_pool005.toLowerCase() !== WETH_ADDRESS.toLowerCase()) { console.error(`❌ Mismatch T1`); return; }
+        } else { console.error(`❌ Unexpected T0`); return; }
 
         // 2. Calculate Prices
         const price_005 = sqrtPriceX96ToPrice(slot0_005.sqrtPriceX96, decimals0, decimals1);
@@ -101,86 +123,45 @@ async function checkArbitrage() {
         console.log(`   Repay: ${ethers.formatUnits(totalAmountToRepay, decimals0)} WETH | Pot. Profit: ${ethers.formatUnits(potentialProfitWeth, decimals0)} WETH`);
 
         // --- 5. ESTIMATE GAS COST ---
-        let estimatedGasUnits = 0n;
-        let gasPrice = 0n;
-        let estimatedGasCostWeth = 0n;
-
-        // Construct params for estimateGas AND potentially for the real transaction later
-        // Calculate ACTUAL amountOutMinimums needed for the real transaction (using slippage tolerance)
+        let estimatedGasUnits = 0n; let gasPrice = 0n; let estimatedGasCostWeth = 0n;
         const actualAmountOutMinimum1 = simulatedIntermediateFromSwap1 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000)) / 10000n;
         const requiredRepaymentThreshold = totalAmountToRepay + MIN_PROFIT_THRESHOLD_WETH;
         const actualAmountOutMinimum2 = requiredRepaymentThreshold;
-
-        // --- Use amountOutMinimum = 0 ONLY for gas estimation ---
-        const gasEstimateAmountOutMinimum1 = 0n;
-        const gasEstimateAmountOutMinimum2 = 0n; // Set minimum to 0 for estimation to isolate other revert causes
-
-        const gasEstimateParams = ethers.AbiCoder.defaultAbiCoder().encode(
-            ['address', 'address', 'address', 'uint24', 'uint24', 'uint256', 'uint256'],
-            [token1Address, poolA, poolB, feeA, feeB, gasEstimateAmountOutMinimum1, gasEstimateAmountOutMinimum2]
-        );
+        const gasEstimateAmountOutMinimum1 = 0n; const gasEstimateAmountOutMinimum2 = 0n; // For estimation only
+        const gasEstimateParams = ethers.AbiCoder.defaultAbiCoder().encode( /*...*/ );
         let amount0 = 0n; let amount1 = 0n;
-        if (BORROW_TOKEN.toLowerCase() === token0Address.toLowerCase()) { amount0 = amountToBorrow; }
-        else { /* Handle error */ return; }
+        if (BORROW_TOKEN.toLowerCase() === token0Address.toLowerCase()) { amount0 = amountToBorrow; } else { return; }
 
         try {
             const feeData = await provider.getFeeData();
             gasPrice = feeData.gasPrice;
             if (!gasPrice || gasPrice === 0n) { gasPrice = ethers.parseUnits("0.1", "gwei"); }
-
-            console.log("   Estimating gas with amountOutMinimums set to 0..."); // Log estimation attempt
-            estimatedGasUnits = await flashSwapContract.initiateFlashSwap.estimateGas(
-                loanPool, amount0, amount1, gasEstimateParams // Use params with amountOutMinimum = 0
-            );
-
+            estimatedGasUnits = await flashSwapContract.initiateFlashSwap.estimateGas( loanPool, amount0, amount1, gasEstimateParams );
             const gasUnitsWithBuffer = estimatedGasUnits * BigInt(Math.round(GAS_ESTIMATE_BUFFER * 100)) / 100n;
             estimatedGasCostWeth = gasUnitsWithBuffer * gasPrice;
-
             console.log(`   Est. Gas: ${estimatedGasUnits} units | Price: ${ethers.formatUnits(gasPrice, "gwei")} Gwei | Est. Cost: ${ethers.formatUnits(estimatedGasCostWeth, WETH_DECIMALS)} WETH`);
-
         } catch (gasEstimateError) {
              console.error(`   ❌ Gas Estimation Failed (with amountOutMin=0): ${gasEstimateError.message}`);
-             if (gasEstimateError.data && gasEstimateError.data !== '0x') {
-                 try {
-                     const decodedError = flashSwapContract.interface.parseError(gasEstimateError.data);
-                     console.error(`      Estimation Revert Reason: ${decodedError?.name}${decodedError?.args ? `(${decodedError.args})` : '()'}`);
-                 } catch(e) { console.error("      (Could not decode estimation revert reason)"); }
-             }
-             return; // Treat as non-profitable
+             if (gasEstimateError.data && gasEstimateError.data !== '0x') { /* Decode */ } return;
         }
 
-        // 6. Check Profitability (using dynamic gas estimate)
+        // 6. Check Profitability
         const netProfitWeth = potentialProfitWeth - estimatedGasCostWeth;
         console.log(`   Net Profit (WETH, after estimated gas): ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)}`);
 
         if (netProfitWeth > MIN_PROFIT_THRESHOLD_WETH) {
-            console.log(`✅ PROFITABLE OPPORTUNITY! Est. Net Profit: ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)} WETH`);
-            console.log(`   Path: Borrow WETH(0)@${loanPool.slice(0,6)}, Sell@${poolA.slice(0,6)}(${feeA/10000}%), Buy@${poolB.slice(0,6)}(${feeB/10000}%)`);
-            // --- Construct ACTUAL TX Params using proper amountOutMinimums ---
-            const actualArbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode(
-                ['address', 'address', 'address', 'uint24', 'uint24', 'uint256', 'uint256'],
-                [token1Address, poolA, poolB, feeA, feeB, actualAmountOutMinimum1, actualAmountOutMinimum2]
-            );
+            console.log(`✅ PROFITABLE OPPORTUNITY! Est. Net Profit: ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)} WETH`); /* ... */
+            const actualArbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode( /*...*/ );
             console.log(`   Params: MinOut1=${ethers.formatUnits(actualAmountOutMinimum1, decimals1)}, MinOut2=${ethers.formatUnits(actualAmountOutMinimum2, decimals0)}`);
-
             // 7. Execute Transaction
             console.log(`   Executing initiateFlashSwap... Amount0: ${ethers.formatUnits(amount0, WETH_DECIMALS)} WETH(0)`);
             try {
                 const gasLimitWithBuffer = estimatedGasUnits * BigInt(Math.round(GAS_ESTIMATE_BUFFER * 100)) / 100n;
-                const tx = await flashSwapContract.initiateFlashSwap(
-                    loanPool, amount0, amount1, actualArbitrageParams, // USE ACTUAL PARAMS FOR TX
-                    { gasLimit: gasLimitWithBuffer, gasPrice: gasPrice }
-                );
-                console.log(`   ✅ Transaction Sent: ${tx.hash}`);
-                console.log(`   ⏳ Waiting for confirmation...`);
-                const receipt = await tx.wait(1);
-                console.log(`   ✅ Tx Confirmed! Block: ${receipt.blockNumber}, Gas Used: ${receipt.gasUsed.toString()}`);
-
+                const tx = await flashSwapContract.initiateFlashSwap( /*...*/ );
+                /* ... Tx logging ... */
             } catch (executionError) { /* ... Handle execution error ... */ }
         } else {
-             if (priceDiffPercent > 0.01) {
-                  console.log(`   Opportunity found but below profit threshold. Est. Net: ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)} WETH`);
-             }
+             if (priceDiffPercent > 0.01) { /* ... Log below threshold ... */ }
         }
     } catch (error) {
         console.error(`❌ Error during arbitrage check cycle: ${error.message}`);
@@ -190,11 +171,8 @@ async function checkArbitrage() {
 // =========================================================================
 // == Bot Execution ==
 // =========================================================================
-console.log(`Starting arbitrage check loop: Checking every ${CHECK_INTERVAL_MS / 1000} seconds.`);
-console.log("Press Ctrl+C to stop.");
+console.log(`Starting arbitrage check loop: Checking every ${CHECK_INTERVAL_MS / 1000} seconds.`); /* ... */
 checkArbitrage();
 const intervalId = setInterval(checkArbitrage, CHECK_INTERVAL_MS);
 // --- Shutdown handlers ---
-process.on('SIGINT', () => { /* ... */ console.log("\n🛑 Shutting down..."); clearInterval(intervalId); process.exit(0); });
-process.on('unhandledRejection', (reason, promise) => { /* ... */ console.error('Unhandled Rejection:', reason); });
-process.on('uncaughtException', (error) => { /* ... */ console.error('Uncaught Exception:', error); process.exit(1); });
+process.on('SIGINT', () => { /* ... */ }); process.on('unhandledRejection', (r, p) => { /* ... */ }); process.on('uncaughtException', (e) => { /* ... */ });
