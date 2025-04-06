@@ -63,59 +63,37 @@ async function checkArbitrage() {
     try {
         // 1. Get Pool Data & Determine Order
         let slot0_005, slot0_030, token0_pool005, token1_pool005;
-        try { /* Sequential Fetch */ } catch (fetchError) { console.error(`   ❌ Fetch Error: ${fetchError.message}`); return; }
-        if (!slot0_005 || !slot0_030 || !token0_pool005 || !token1_pool005) { console.error(`   ❌ Incomplete data.`); return; }
-        if (slot0_005.sqrtPriceX96 === 0n || slot0_030.sqrtPriceX96 === 0n) { console.error(`   ❌ sqrtPriceX96 is zero.`); return; }
+        try { /* Sequential Fetch */ } catch (fetchError) { /* Handle */ return; }
+        if (!slot0_005 || !slot0_030 || !token0_pool005 || !token1_pool005) { /* Handle */ return; }
+        if (slot0_005.sqrtPriceX96 === 0n || slot0_030.sqrtPriceX96 === 0n) { /* Handle */ return; }
 
-        // --- ADDED TOKEN ADDRESS LOGGING ---
         console.log(`   Pool 005 reported: T0=${token0_pool005}, T1=${token1_pool005}`);
         console.log(`   Expecting        : T0=${WETH_ADDRESS}, T1=${USDC_ADDRESS}`);
-        // --- END LOGGING ---
 
         let token0Address, token1Address, decimals0, decimals1;
-        // Check the actual reported token order
-         if (token0_pool005.toLowerCase() === WETH_ADDRESS.toLowerCase()) {
-             token0Address = WETH_ADDRESS; decimals0 = WETH_DECIMALS;
-             token1Address = USDC_ADDRESS; decimals1 = USDC_DECIMALS;
-             if (token1_pool005.toLowerCase() !== USDC_ADDRESS.toLowerCase()) {
-                 console.error(`❌ Mismatch T1 Pool005! Expected Native USDC (${USDC_ADDRESS}), got ${token1_pool005}. Aborting.`);
-                 return; // Exit if token1 doesn't match expectation
-             }
+        if (token0_pool005.toLowerCase() === WETH_ADDRESS.toLowerCase()) {
+             token0Address = WETH_ADDRESS; decimals0 = WETH_DECIMALS; token1Address = USDC_ADDRESS; decimals1 = USDC_DECIMALS;
+             if (token1_pool005.toLowerCase() !== USDC_ADDRESS.toLowerCase()) { console.error(`❌ Mismatch T1 Pool005!`); return; }
              console.log("   Order Confirmed: WETH/USDC");
          } else if (token0_pool005.toLowerCase() === USDC_ADDRESS.toLowerCase()) {
-             token0Address = USDC_ADDRESS; decimals0 = USDC_DECIMALS;
-             token1Address = WETH_ADDRESS; decimals1 = WETH_DECIMALS;
-              if (token1_pool005.toLowerCase() !== WETH_ADDRESS.toLowerCase()) {
-                  console.error(`❌ Mismatch T1 Pool005! Expected WETH (${WETH_ADDRESS}), got ${token1_pool005}. Aborting.`);
-                  return; // Exit if token1 doesn't match expectation
-              }
+             token0Address = USDC_ADDRESS; decimals0 = USDC_DECIMALS; token1Address = WETH_ADDRESS; decimals1 = WETH_DECIMALS;
+              if (token1_pool005.toLowerCase() !== WETH_ADDRESS.toLowerCase()) { console.error(`❌ Mismatch T1 Pool005!`); return; }
               console.log("   Order Confirmed: USDC/WETH");
-         } else {
-              console.error(`❌ Unexpected T0 ${token0_pool005} in Pool ${POOL_WETH_USDC_005}. Aborting.`);
-              return; // Exit if token0 is neither WETH nor USDC
-         }
+         } else { console.error(`❌ Unexpected T0 ${token0_pool005}`); return; }
 
         // 2. Calculate Prices
         const price_005 = sqrtPriceX96ToPrice(slot0_005.sqrtPriceX96, decimals0, decimals1);
         const price_030 = sqrtPriceX96ToPrice(slot0_030.sqrtPriceX96, decimals0, decimals1);
-        if (isNaN(price_005) || isNaN(price_030)) { console.error(`   ❌ Price calc NaN.`); return; }
-        console.log(`   P_0.05: ${price_005.toFixed(decimals1)} | P_0.30: ${price_030.toFixed(decimals1)} (T1/T0)`); // Generic T1/T0 label
+        if (isNaN(price_005) || isNaN(price_030)) { /* Handle */ return; }
+        console.log(`   P_0.05: ${price_005.toFixed(decimals1)} | P_0.30: ${price_030.toFixed(decimals1)} (T1/T0)`);
         const priceDiffPercent = Math.abs(price_005 - price_030) / Math.min(price_005, price_030) * 100;
 
         // 3. Identify Direction
         const BORROW_TOKEN = WETH_ADDRESS; const INTERMEDIATE_TOKEN = USDC_ADDRESS;
         let poolA, feeA, poolB, feeB, loanPool;
-        // ... (Direction logic - assumes price is USDC/WETH, needs update if order flips) ...
-        // This logic needs refinement if token order can actually be USDC/WETH
-        if (token0Address === WETH_ADDRESS) { // Standard WETH/USDC case
-             if (price_030 > price_005) { poolA = POOL_WETH_USDC_030; feeA = 3000; poolB = POOL_WETH_USDC_005; feeB = 500; loanPool = poolA; }
-             else if (price_005 > price_030) { poolA = POOL_WETH_USDC_005; feeA = 500; poolB = POOL_WETH_USDC_030; feeB = 3000; loanPool = poolA; }
-             else { return; }
-        } else { // USDC/WETH case (less likely for this pair, needs reversed price logic)
-             console.error("   Arbitrage logic for USDC/WETH order not fully implemented yet.");
-             return; // Exit for now if order is reversed
-        }
-
+        // ... (Direction logic - needs update if order flips) ...
+        if (token0Address === WETH_ADDRESS) { /* Standard WETH/USDC case */ }
+        else { console.error("   Arbitrage logic for USDC/WETH order not implemented."); return; }
 
         // 4. SIMULATE SWAPS
         const amountToBorrow = BORROW_AMOUNT_WETH;
@@ -133,27 +111,40 @@ async function checkArbitrage() {
         const gasEstimateAmountOutMinimum1 = 0n; const gasEstimateAmountOutMinimum2 = 0n;
         const gasEstimateParams = ethers.AbiCoder.defaultAbiCoder().encode( /*...*/ );
         let amount0 = 0n; let amount1 = 0n;
-        if (BORROW_TOKEN.toLowerCase() === token0Address.toLowerCase()) { amount0 = amountToBorrow; } // Borrowing T0 (WETH)
-        else if (BORROW_TOKEN.toLowerCase() === token1Address.toLowerCase()) { amount1 = amountToBorrow; } // Borrowing T1 (USDC)
-        else { console.error("Borrow token doesn't match pool tokens"); return; } // Should not happen
+        if (BORROW_TOKEN.toLowerCase() === token0Address.toLowerCase()) { amount0 = amountToBorrow; }
+        else if (BORROW_TOKEN.toLowerCase() === token1Address.toLowerCase()) { amount1 = amountToBorrow; }
+        else { return; }
 
         try { /* ... Gas estimation logic ... */ }
         catch (gasEstimateError) { /* ... Handle gas estimation error ... */ return; }
 
         // 6. Check Profitability
-        // ... (Profit check logic) ...
+        const netProfitWeth = potentialProfitWeth - estimatedGasCostWeth;
+        console.log(`   Net Profit (WETH, after estimated gas): ${ethers.formatUnits(netProfitWeth, WETH_DECIMALS)}`);
+
         if (netProfitWeth > MIN_PROFIT_THRESHOLD_WETH) {
             console.log(`✅ PROFITABLE OPPORTUNITY!`);
             // --- Construct ACTUAL TX Params ---
-            const actualAmountOutMinimum1 = /*...*/; const actualAmountOutMinimum2 = /*...*/;
-            const actualArbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode( /*...*/ );
+            // --- FIXING SYNTAX ERRORS ---
+            const actualAmountOutMinimum1 = simulatedIntermediateFromSwap1 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000)) / 10000n;
+            const requiredRepaymentThreshold = totalAmountToRepay + MIN_PROFIT_THRESHOLD_WETH;
+            const actualAmountOutMinimum2 = requiredRepaymentThreshold; // Restore assignment
+            const actualArbitrageParams = ethers.AbiCoder.defaultAbiCoder().encode(
+                 ['address', 'address', 'address', 'uint24', 'uint24', 'uint256', 'uint256'],
+                 [token1Address, poolA, poolB, feeA, feeB, actualAmountOutMinimum1, actualAmountOutMinimum2]
+            );
+             // --- End Fix ---
             console.log(`   Params: MinOut1=${ethers.formatUnits(actualAmountOutMinimum1, decimals1)}, MinOut2=${ethers.formatUnits(actualAmountOutMinimum2, decimals0)}`);
             // 7. Execute Transaction
             console.log(`   Executing initiateFlashSwap...`);
-            try { /* ... Execute Tx ... */ }
-            catch (executionError) { /* ... Handle execution error ... */ }
-        } else { /* ... Log below threshold ... */ }
-
+            try {
+                const gasLimitWithBuffer = estimatedGasUnits * BigInt(/*...*/);
+                const tx = await flashSwapContract.initiateFlashSwap( /*...*/ );
+                /* ... Tx logging ... */
+            } catch (executionError) { /* ... Handle execution error ... */ }
+        } else {
+             if (priceDiffPercent > 0.01) { /* ... Log below threshold ... */ }
+        }
     } catch (error) {
         console.error(`❌ Error during arbitrage check cycle: ${error.message}`);
     }
