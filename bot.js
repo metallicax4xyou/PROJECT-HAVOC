@@ -29,7 +29,8 @@ const WETH_ADDRESS = ethers.getAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBa
 const USDC_ADDRESS = ethers.getAddress("0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8"); // USDC.e (Bridged)
 // Pools for WETH / USDC.e
 const POOL_WETH_USDC_005 = ethers.getAddress("0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"); // 0.05%
-const POOL_WETH_USDC_030 = ethers.getAddress("0x8ad599c3a0b1a56aad039ddac6837db27b2f64c5");
+// Pool for WETH / USDC.e 0.30% Fee (Verified via Factory)
+const POOL_WETH_USDC_030 = ethers.getAddress("0x17c14D2c404D167802b16C450d3c99F88F2c4F4d");
 // QuoterV2 Address on Arbitrum
 const QUOTER_V2_ADDRESS = ethers.getAddress("0x61fFE014bA17989E743c5F6cB21bF9697530B21e");
 
