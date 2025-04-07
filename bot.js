@@ -14,8 +14,8 @@ const USDC_ADDRESS = ethers.getAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e58
 
 // Use lowercase for potentially problematic addresses
 const QUOTER_V2_ADDRESS = "0x61ffe014ba17989e743c5f6d790181c0603c3996"; // Lowercase
-const POOL_A_ADDRESS = "0xc31e54c7a869b9fcbecc14363cf510d1c41fa441"; // Lowercase (WETH/USDC 0.05%)
-const POOL_B_ADDRESS = "0x17c14d2c404d167802b16c450d3c99f88f2c4f4d"; // Lowercase (WETH/USDC 0.30%)
+const POOL_A_ADDRESS = "0xc31e54c7a869b9fcbecc14363cf510d1c41fa441"; // Lowercase (WETH/USDC 0.05%) - VERIFIED
+const POOL_B_ADDRESS = "0x17c14d2c404d167802b16c450d3c99f88f2c4f4d"; // Lowercase (WETH/USDC 0.30%) - VERIFIED
 
 const POOL_A_FEE_BPS = 500; const POOL_A_FEE_PERCENT = 0.05;
 const POOL_B_FEE_BPS = 3000; const POOL_B_FEE_PERCENT = 0.30;
@@ -23,7 +23,7 @@ const WETH_DECIMALS = 18; const USDC_DECIMALS = 6;
 
 // --- ABIs ---
 
-// --- PASTED YOUR FlashSwapABI HERE ---
+// --- YOUR PASTED FlashSwapABI ---
 const FlashSwapABI = [
     {
       "inputs": [
@@ -434,12 +434,61 @@ async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, qu
 async function attemptArbitrage(opportunity) {
     console.log("\n========= Arbitrage Opportunity Detected =========");
     // ... Inside attemptArbitrage ...
-    // Find the line where initiateFlashSwapArgs is defined
+    // Determine parameters based on the detected opportunity direction
+    let flashLoanPoolAddress;
+    let borrowAmount0 = 0n; let borrowAmount1 = 0n;
+    let tokenBorrowedAddress; let tokenIntermediateAddress;
+    let poolAForSwap; let poolBForSwap;
+    let feeAForSwap; let feeBForSwap;
+    let amountToBorrowWei;
+
+    if (opportunity.borrowTokenSymbol === 'WETH') {
+        tokenBorrowedAddress = WETH_ADDRESS; tokenIntermediateAddress = USDC_ADDRESS;
+        amountToBorrowWei = BORROW_AMOUNT_WETH_WEI;
+        borrowAmount0 = amountToBorrowWei; borrowAmount1 = 0n;
+        if (opportunity.startPool === 'A') {
+            flashLoanPoolAddress = opportunity.poolA.address; poolAForSwap = opportunity.poolA.address;
+            feeAForSwap = opportunity.poolA.feeBps; poolBForSwap = opportunity.poolB.address;
+            feeBForSwap = opportunity.poolB.feeBps;
+        } else {
+            flashLoanPoolAddress = opportunity.poolB.address; poolAForSwap = opportunity.poolB.address;
+            feeAForSwap = opportunity.poolB.feeBps; poolBForSwap = opportunity.poolA.address;
+            feeBForSwap = opportunity.poolA.feeBps;
+        }
+    } else { console.error("USDC Borrow NYI"); return; }
+
+    console.log(`  Executing Path: Borrow ${ethers.formatUnits(amountToBorrowWei, tokenBorrowedAddress === WETH_ADDRESS ? WETH_DECIMALS : USDC_DECIMALS)} ${opportunity.borrowTokenSymbol} from ${flashLoanPoolAddress}`);
+    console.log(`    -> Swap 1 on ${poolAForSwap} (Fee: ${feeAForSwap}bps)`);
+    console.log(`    -> Swap 2 on ${poolBForSwap} (Fee: ${feeBForSwap}bps)`);
+
+    // --- Check Flash Loan Pool State ---
+    try {
+        const flashLoanPoolContract = flashLoanPoolAddress.toLowerCase() === POOL_A_ADDRESS.toLowerCase() ? poolAContract : poolBContract;
+        const [slot0, liquidity] = await Promise.all([ flashLoanPoolContract.slot0(), flashLoanPoolContract.liquidity() ]);
+        console.log(`  Flash Loan Pool Status (${flashLoanPoolAddress}):`);
+        console.log(`    Current Tick: ${slot0.tick}, Liquidity: ${liquidity.toString()}`);
+        if (liquidity === 0n) console.warn(`    WARNING: Flash loan pool has ZERO active liquidity!`);
+    } catch (err) { console.error(`  Error fetching state for pool ${flashLoanPoolAddress}:`, err.message); }
+
+    // --- Construct Callback Params ---
+    const arbitrageParams = {
+        tokenIntermediate: tokenIntermediateAddress, poolA: poolAForSwap, poolB: poolBForSwap,
+        feeA: feeAForSwap, feeB: feeBForSwap,
+        amountOutMinimum1: 0n, amountOutMinimum2: 0n
+    };
+    const encodedParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ['tuple(address tokenIntermediate, address poolA, address poolB, uint24 feeA, uint24 feeB, uint amountOutMinimum1, uint amountOutMinimum2)'],
+        [arbitrageParams]
+    );
+    console.log("  Callback Parameters (Decoded):", { /* ... maybe log individual params ... */ });
+    console.log("  Callback Parameters (Encoded):", encodedParams);
+
+    // --- initiateFlashSwap Args ---
     const initiateFlashSwapArgs = [ flashLoanPoolAddress, borrowAmount0, borrowAmount1, encodedParams ];
 
+    // --- Simulation & Estimation ---
     try {
         console.log("  [1/3] Attempting staticCall simulation...");
-        // Ensure the ABI includes initiateFlashSwap
         await flashSwapContract.initiateFlashSwap.staticCall( ...initiateFlashSwapArgs, { gasLimit: 3_000_000 });
         console.log("  ✅ [1/3] staticCall successful.");
 
@@ -454,18 +503,11 @@ async function attemptArbitrage(opportunity) {
         }
     } catch (staticCallError) {
         console.error(`  ❌ [1/3] staticCall failed:`, staticCallError.reason || staticCallError.message || staticCallError);
-         if (staticCallError.data) {
-             console.error(`     Revert Data: ${staticCallError.data}`);
-             // Optional: Try decoding custom error data if reason is generic
-             // try {
-             //     const iface = new ethers.Interface(FlashSwapABI);
-             //     const decodedError = iface.parseError(staticCallError.data);
-             //     console.error(`     Decoded Error: ${decodedError.name}(${decodedError.args})`);
-             // } catch (decodeErr) { /* Ignore if not a known custom error */ }
-         }
+         if (staticCallError.data) console.error(`     Revert Data: ${staticCallError.data}`);
     }
     console.log("========= Arbitrage Attempt Complete =========");
  } // End attemptArbitrage
+
 
 // --- Main Monitoring Loop ---
 // (Keep existing monitorPools function - includes detailed logging)
@@ -475,10 +517,10 @@ async function monitorPools() {
         console.log("  [Monitor] Fetching pool states...");
         console.log(`  [Monitor] Calling Promise.all for pool states... (A: ${POOL_A_ADDRESS}, B: ${POOL_B_ADDRESS})`);
         const poolStatePromises = [
-            poolAContract.slot0().catch(e => { console.error(`[Monitor] Error fetching slot0 for Pool A (${POOL_A_ADDRESS}): ${e.message || e}`); return null; }), // Log full error
-            poolAContract.liquidity().catch(e => { console.error(`[Monitor] Error fetching liquidity for Pool A (${POOL_A_ADDRESS}): ${e.message || e}`); return null; }), // Log full error
-            poolBContract.slot0().catch(e => { console.error(`[Monitor] Error fetching slot0 for Pool B (${POOL_B_ADDRESS}): ${e.message || e}`); return null; }), // Log full error
-            poolBContract.liquidity().catch(e => { console.error(`[Monitor] Error fetching liquidity for Pool B (${POOL_B_ADDRESS}): ${e.message || e}`); return null; }) // Log full error
+            poolAContract.slot0().catch(e => { console.error(`[Monitor] Error fetching slot0 for Pool A (${POOL_A_ADDRESS}): ${e.message || e}`); return null; }),
+            poolAContract.liquidity().catch(e => { console.error(`[Monitor] Error fetching liquidity for Pool A (${POOL_A_ADDRESS}): ${e.message || e}`); return null; }),
+            poolBContract.slot0().catch(e => { console.error(`[Monitor] Error fetching slot0 for Pool B (${POOL_B_ADDRESS}): ${e.message || e}`); return null; }),
+            poolBContract.liquidity().catch(e => { console.error(`[Monitor] Error fetching liquidity for Pool B (${POOL_B_ADDRESS}): ${e.message || e}`); return null; })
         ];
         const [slotA, liqA, slotB, liqB] = await Promise.all(poolStatePromises);
         console.log("  [Monitor] Promise.all for pool states resolved.");
@@ -501,26 +543,92 @@ async function monitorPools() {
             return;
         }
 
-        // ... rest of monitorPools logic (simulations, price checks, opportunity detection) ...
+        const simulateAmountWeth = ethers.parseUnits("0.1", WETH_DECIMALS);
+        console.log("  [Monitor] Simulating swaps with QuoterV2...");
+        const quotePromises = [
+            simulateSwap("Pool A", WETH_ADDRESS, USDC_ADDRESS, simulateAmountWeth, POOL_A_FEE_BPS, quoterContract),
+            simulateSwap("Pool B", WETH_ADDRESS, USDC_ADDRESS, simulateAmountWeth, POOL_B_FEE_BPS, quoterContract)
+        ];
+        const [amountOutA, amountOutB] = await Promise.all(quotePromises);
+        console.log(`  [Monitor] Quoter simulations complete. OutA: ${amountOutA}, OutB: ${amountOutB}`);
+
+        if (amountOutA === 0n || amountOutB === 0n) {
+             console.log("  [Monitor] Failed to get valid quotes for one or both pools. Skipping cycle.");
+             console.log("[Monitor] END (Early exit due to quote failure)");
+             return;
+        }
+
+        const priceA = parseFloat(ethers.formatUnits(amountOutA, USDC_DECIMALS)) / 0.1;
+        const priceB = parseFloat(ethers.formatUnits(amountOutB, USDC_DECIMALS)) / 0.1;
+        console.log(`  [Monitor] Pool A Price (USDC/WETH): ${priceA.toFixed(6)}`);
+        console.log(`  [Monitor] Pool B Price (USDC/WETH): ${priceB.toFixed(6)}`);
+
+        let opportunity = null;
+        let estimatedProfitUsd = 0; // Very rough estimate
+        const priceDiffThreshold = 0.0001; // Minimum difference ratio
+
+        if (Math.abs(priceA - priceB) / Math.max(priceA, priceB) > priceDiffThreshold) {
+             estimatedProfitUsd = Math.abs(priceA - priceB) * parseFloat(ethers.formatUnits(BORROW_AMOUNT_WETH_WEI, WETH_DECIMALS));
+            if (priceA > priceB) {
+                 console.log(`  [Monitor] Potential Opportunity: Sell WETH on A ($${priceA.toFixed(4)}), Buy on B ($${priceB.toFixed(4)})`);
+                 opportunity = {
+                     poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: priceA },
+                     poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: priceB },
+                     startPool: "A", borrowTokenSymbol: "WETH", estimatedProfitUsd: estimatedProfitUsd
+                 };
+             } else {
+                console.log(`  [Monitor] Potential Opportunity: Sell WETH on B ($${priceB.toFixed(4)}), Buy on A ($${priceA.toFixed(4)})`);
+                 opportunity = {
+                     poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: priceA },
+                     poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: priceB },
+                     startPool: "B", borrowTokenSymbol: "WETH", estimatedProfitUsd: estimatedProfitUsd
+                 };
+             }
+
+            if (estimatedProfitUsd > PROFIT_THRESHOLD_USD) {
+                await attemptArbitrage(opportunity); // Call the attempt function
+            } else {
+                console.log(`  [Monitor] Price difference detected, but estimated profit ($${estimatedProfitUsd.toFixed(4)}) below threshold ($${PROFIT_THRESHOLD_USD}).`);
+            }
+        } else {
+            console.log("  [Monitor] No significant price difference detected.");
+        }
 
     } catch (error) {
-        console.error(`[Monitor] Error in monitoring loop:`, error);
+       console.error(`[Monitor] Error in monitoring loop:`, error);
     } finally {
         console.log(`[Monitor] END - ${new Date().toISOString()}`);
     }
 } // End monitorPools function
 
-
 // --- Start the Bot ---
-// (Keep existing startup IIFE - includes detailed logging)
 (async () => {
     console.log("\n>>> Entering startup async IIFE...");
-    // ... startup checks ...
-    console.log(">>> Attempting first monitorPools() run...");
-    await monitorPools();
-    console.log(">>> First monitorPools() run complete.");
-    console.log(">>> Setting up setInterval...");
-    setInterval(monitorPools, POLLING_INTERVAL_MS);
-    console.log(`\nMonitoring started. Will check every ${POLLING_INTERVAL_MS / 1000} seconds.`);
-    // ... catch block ...
+    try {
+        console.log(">>> Checking signer balance (as connectivity test)...");
+        const balance = await provider.getBalance(signer.address);
+        console.log(`>>> Signer balance: ${ethers.formatEther(balance)} ETH`);
+        console.log(">>> Attempting to fetch contract owner...");
+        const contractOwner = await flashSwapContract.owner(); // Uses the full ABI now
+        console.log(`>>> Successfully fetched owner: ${contractOwner}`);
+        if (contractOwner.toLowerCase() === signer.address.toLowerCase()) {
+             console.log(`Signer matches contract owner. 'onlyOwner' calls should succeed.\n`);
+        } else { console.warn("Warning: Signer does not match owner!") }
+
+        console.log(">>> Attempting first monitorPools() run...");
+        await monitorPools();
+        console.log(">>> First monitorPools() run complete.");
+
+        console.log(">>> Setting up setInterval...");
+        setInterval(monitorPools, POLLING_INTERVAL_MS);
+        console.log(`\nMonitoring started. Will check every ${POLLING_INTERVAL_MS / 1000} seconds.`);
+
+    } catch (initError) {
+        console.error("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        console.error("Initialization Error / Startup Error:");
+        console.error("Check RPC connection, ABIs, Private Key, and Initial Contract Calls.");
+        console.error(initError);
+        console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        process.exit(1);
+    }
 })();
