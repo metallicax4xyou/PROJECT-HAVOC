@@ -3,6 +3,13 @@ pragma solidity =0.7.6; // Match periphery library version
 pragma abicoder v2;
 
 // --- Imports ---
+// --- Corrected OpenZeppelin Imports (Removed @version from path) ---
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import "@openzeppelin/contracts/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+// --- Uniswap Imports ---
 import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3FlashCallback.sol";
@@ -11,10 +18,7 @@ import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 // If compilation fails, you might need to adjust path or copy library source
 import "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
 import "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol";
-import "@openzeppelin/contracts@3.4.0/token/ERC20/IERC20.sol"; // Specify OZ version for clarity
-import "@openzeppelin/contracts@3.4.0/token/ERC20/SafeERC20.sol";
-import "@openzeppelin/contracts@3.4.0/math/SafeMath.sol";
-import "@openzeppelin/contracts@3.4.0/utils/ReentrancyGuard.sol";
+
 
 // Optional: Only if you need console.log during Hardhat tests
 // import "hardhat/console.sol";
@@ -34,7 +38,7 @@ contract FlashSwap is IUniswapV3FlashCallback, ReentrancyGuard {
     address public immutable owner;
     // Using immutable reference for Arbitrum One Uniswap V3 Factory
     address public immutable V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
-    uint constant DEADLINE_OFFSET = 60; // Seconds after block timestamp for swap deadline (Increased slightly)
+    uint constant DEADLINE_OFFSET = 60; // Seconds after block timestamp for swap deadline
 
     // --- Structs ---
     // Data passed into the flash callback, encoded
