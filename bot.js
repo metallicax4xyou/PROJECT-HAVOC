@@ -14,7 +14,7 @@ const USDC_ADDRESS = ethers.getAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e58
 
 // Use lowercase for potentially problematic addresses
 const QUOTER_V2_ADDRESS = "0x61ffe014ba17989e743c5f6d790181c0603c3996"; // Lowercase
-const POOL_A_ADDRESS = "0xc31e54c7a869b9fcbecc14363cf510d1c41fa441"; // Lowercase (WETH/USDC 0.05%) - VERIFIED
+const POOL_A_ADDRESS = "0xC6962004f452bE9203591991D15f6b388e09E8D0"; // Lowercase (WETH/USDC 0.05%) - VERIFIED
 const POOL_B_ADDRESS = "0x17c14d2c404d167802b16c450d3c99f88f2c4f4d"; // Lowercase (WETH/USDC 0.30%) - VERIFIED
 
 const POOL_A_FEE_BPS = 500; const POOL_A_FEE_PERCENT = 0.05;
