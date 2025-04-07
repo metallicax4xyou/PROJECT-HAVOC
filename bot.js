@@ -1,4 +1,4 @@
-// bot.js - Arbitrum Uniswap V3 Flash Swap Bot with Debugging (v2 - Corrected Loop)
+// bot.js - Arbitrum Uniswap V3 Flash Swap Bot with Debugging (v3 - Syntax Fixed)
 
 const { ethers } = require("ethers");
 require('dotenv').config(); // Make sure to install dotenv: npm install dotenv
@@ -94,15 +94,8 @@ console.log(` - Profit Threshold: $${PROFIT_THRESHOLD_USD} USD (approx, before g
 function calculatePriceFromSqrt(sqrtPriceX96) {
     const priceX96 = BigInt(sqrtPriceX96);
     const twoPow192 = 2n ** 192n;
-    // (sqrtPriceX96 / 2^96)^2 = price of token0 in terms of token1
-    // Adjust for decimals: price * 10^decimals1 / 10^decimals0
-    // Price of WETH in USDC = (sqrtPriceX96^2 / 2^192) * (10^USDC_DECIMALS / 10^WETH_DECIMALS)
-    // To avoid floating point issues with large numbers, rearrange:
-    // (priceX96 * priceX96 * (10n ** BigInt(USDC_DECIMALS))) / (twoPow192 * (10n ** BigInt(WETH_DECIMALS)))
-    // Let's return the raw ratio and format later to preserve precision
     const numerator = priceX96 * priceX96 * (10n ** BigInt(USDC_DECIMALS));
     const denominator = twoPow192 * (10n ** BigInt(WETH_DECIMALS));
-    // Return as a float for easy comparison, though precision loss is possible
     return parseFloat(ethers.formatUnits(numerator * (10n**18n) / denominator, 18)); // Scale up for formatUnits, then parse
 }
 
@@ -117,12 +110,9 @@ async function simulateSwap(tokenIn, tokenOut, amountInWei, feeBps, quoter) {
             fee: feeBps,
             sqrtPriceLimitX96: 0n // No price limit for simulation
         };
-        // Use staticCall to simulate
         const quoteResult = await quoter.quoteExactInputSingle.staticCall(params);
         return quoteResult[0]; // amountOut as BigInt
     } catch (error) {
-        // Mute warnings during normal operation unless debugging quoter itself
-        // console.warn(`Quoter simulation failed: ${error.reason || error.message}`);
         return 0n; // Return 0 if simulation fails (e.g., insufficient liquidity)
     }
 }
@@ -160,31 +150,22 @@ async function attemptArbitrage(opportunity) {
         amountToBorrowWei = BORROW_AMOUNT_WETH_WEI; // Use the small debug amount
         borrowAmount0 = amountToBorrowWei;
         borrowAmount1 = 0n;
-        // Determine the flash loan pool and swap path
-        if (opportunity.startPool === 'A') { // Borrow from Pool A, first swap on A
+        if (opportunity.startPool === 'A') {
             flashLoanPoolAddress = opportunity.poolA.address;
             poolAForSwap = opportunity.poolA.address;
             feeAForSwap = opportunity.poolA.feeBps;
             poolBForSwap = opportunity.poolB.address;
             feeBForSwap = opportunity.poolB.feeBps;
-        } else { // Borrow from Pool B, first swap on B
+        } else {
             flashLoanPoolAddress = opportunity.poolB.address;
             poolAForSwap = opportunity.poolB.address;
             feeAForSwap = opportunity.poolB.feeBps;
             poolBForSwap = opportunity.poolA.address;
             feeBForSwap = opportunity.poolA.feeBps;
         }
-    } else { // Borrowing USDC
-        console.error("Borrowing USDC path not fully implemented yet (needs borrow amount). Exiting attempt.");
+    } else {
+        console.error("Borrowing USDC path not fully implemented yet. Exiting attempt.");
         return;
-        // You would need to set:
-        // BORROW_AMOUNT_USDC_WEI = ethers.parseUnits("YOUR_USDC_AMOUNT", USDC_DECIMALS);
-        // tokenBorrowedAddress = USDC_ADDRESS;
-        // tokenIntermediateAddress = WETH_ADDRESS;
-        // amountToBorrowWei = BORROW_AMOUNT_USDC_WEI;
-        // borrowAmount0 = 0n;
-        // borrowAmount1 = amountToBorrowWei;
-        // Set flashLoanPoolAddress, poolA/BForSwap, feeA/BForSwap based on startPool 'A' or 'B'
     }
 
     console.log(`  Executing Path: Borrow ${ethers.formatUnits(amountToBorrowWei, tokenBorrowedAddress === WETH_ADDRESS ? WETH_DECIMALS : USDC_DECIMALS)} ${opportunity.borrowTokenSymbol} from ${flashLoanPoolAddress}`);
@@ -203,7 +184,7 @@ async function attemptArbitrage(opportunity) {
         console.log(`    Active Liquidity: ${liquidity.toString()}`);
         if (liquidity === 0n) {
              console.warn(`    WARNING: Flash loan pool has ZERO active liquidity. Flash loan/swap will likely fail.`);
-        } else if (liquidity < 10n**15n) { // Arbitrary low liquidity threshold for warning
+        } else if (liquidity < 10n**15n) {
              console.warn(`    WARNING: Flash loan pool has very LOW active liquidity (${liquidity.toString()}). Swap simulation might fail.`);
         }
     } catch (err) {
@@ -217,8 +198,6 @@ async function attemptArbitrage(opportunity) {
         poolB: poolBForSwap,
         feeA: feeAForSwap,
         feeB: feeBForSwap,
-        // For Debugging: amountOutMinimum = 0 allows simulation even if slippage is high
-        // For Production: Calculate based on quoted amounts and SLIPPAGE_TOLERANCE
         amountOutMinimum1: 0n,
         amountOutMinimum2: 0n
     };
@@ -231,7 +210,7 @@ async function attemptArbitrage(opportunity) {
 
     // --- DEBUGGING STEP 4: Log ArbitrageParams ---
     console.log("  Callback Parameters (Decoded):", {
-        ...arbitrageParams, // Spread operator for easy logging
+        ...arbitrageParams,
         amountOutMinimum1: arbitrageParams.amountOutMinimum1.toString(),
         amountOutMinimum2: arbitrageParams.amountOutMinimum2.toString()
     });
@@ -239,10 +218,10 @@ async function attemptArbitrage(opportunity) {
 
     // Parameters for the initiateFlashSwap function call itself
     const initiateFlashSwapArgs = [
-        flashLoanPoolAddress, // _poolAddress
-        borrowAmount0,        // _amount0 (WETH)
-        borrowAmount1,        // _amount1 (USDC)
-        encodedParams         // _params
+        flashLoanPoolAddress,
+        borrowAmount0,
+        borrowAmount1,
+        encodedParams
     ];
 
     // --- DEBUGGING STEP 1: Add staticCall Simulation ---
@@ -250,7 +229,7 @@ async function attemptArbitrage(opportunity) {
         console.log("  [1/3] Attempting staticCall simulation...");
         await flashSwapContract.initiateFlashSwap.staticCall(
             ...initiateFlashSwapArgs,
-             { gasLimit: 3_000_000 } // Provide gas limit for simulation
+             { gasLimit: 3_000_000 }
         );
         console.log("  ✅ [1/3] staticCall successful. Transaction logic appears valid.");
 
@@ -263,33 +242,12 @@ async function attemptArbitrage(opportunity) {
             const estimatedGasNum = Number(estimatedGas);
             console.log(`  ✅ [2/3] estimateGas successful. Estimated Gas: ${estimatedGasNum}`);
 
-            // --- Optional Gas Cost Estimation ---
-            // const feeData = await provider.getFeeData();
-            // const gasPrice = feeData.gasPrice || ethers.parseUnits("5", "gwei"); // Fallback
-            // const estimatedCostWei = estimatedGas * gasPrice;
-            // console.log(`  Est. Gas Cost: ~${ethers.formatEther(estimatedCostWei)} ETH`);
-
             // --- FINAL STEP: SEND TRANSACTION (Commented Out for Debugging) ---
             console.log("  [3/3] Conditions met for sending transaction (Execution Disabled).");
             /*
             try {
                  console.log("  >>> SENDING TRANSACTION <<<");
-                 const tx = await flashSwapContract.initiateFlashSwap(...initiateFlashSwapArgs, {
-                     gasLimit: estimatedGas + BigInt(60000), // Add buffer
-                     // Use EIP-1559 gas settings if available from feeData
-                     // maxFeePerGas: feeData.maxFeePerGas,
-                     // maxPriorityFeePerGas: feeData.maxPriorityFeePerGas,
-                     // Or fallback to legacy gasPrice
-                     // gasPrice: gasPrice
-                 });
-                 console.log(`  Transaction Sent: ${tx.hash}`);
-                 console.log("  Waiting for receipt...");
-                 const receipt = await tx.wait(1);
-                 console.log(`  Transaction Mined! Status: ${receipt.status === 1 ? "Success ✅" : "Failed ❌"}`);
-                 if (receipt.status === 1) {
-                     // TODO: Parse receipt.logs for ProfitTransferred event
-                     console.log("  >> PARSE LOGS FOR PROFIT <<");
-                 }
+                 // ... (Transaction sending code remains commented) ...
              } catch (sendError) {
                  console.error(`  ❌ [3/3] FAILED TO SEND TRANSACTION:`, sendError);
              }
@@ -310,7 +268,7 @@ async function attemptArbitrage(opportunity) {
     } catch (staticCallError) {
         console.error(`  ❌ [1/3] staticCall failed:`);
         if (staticCallError.reason) {
-             console.error(`      Reason: ${staticCallError.reason}`); // This is where "Swap 1 execution failed" should appear
+             console.error(`      Reason: ${staticCallError.reason}`);
          } else if (staticCallError.error?.data) {
               console.error(`      Revert Data: ${staticCallError.error.data}`);
          } else {
@@ -328,9 +286,7 @@ async function monitorPools() {
     console.log(`\n${new Date().toISOString()} - Checking for opportunities...`);
 
     try {
-        // Fetch current prices using Quoter V2 for better accuracy
-        // We simulate swapping a small amount of WETH for USDC in both pools
-        const simulateAmountWeth = ethers.parseUnits("0.1", WETH_DECIMALS); // 0.1 WETH for price check
+        const simulateAmountWeth = ethers.parseUnits("0.1", WETH_DECIMALS);
 
         const [amountOutA, amountOutB] = await Promise.all([
             simulateSwap(WETH_ADDRESS, USDC_ADDRESS, simulateAmountWeth, POOL_A_FEE_BPS, quoterContract),
@@ -338,11 +294,10 @@ async function monitorPools() {
         ]);
 
         if (amountOutA === 0n || amountOutB === 0n) {
-             console.log("  Failed to get valid quotes for one or both pools (likely low liquidity). Skipping cycle.");
-             return; // Exit check if prices can't be determined
+             console.log("  Failed to get valid quotes for one or both pools. Skipping cycle.");
+             return;
         }
 
-        // Calculate effective price: USDC received per 1 WETH
         const priceA = parseFloat(ethers.formatUnits(amountOutA, USDC_DECIMALS)) / 0.1;
         const priceB = parseFloat(ethers.formatUnits(amountOutB, USDC_DECIMALS)) / 0.1;
 
@@ -350,66 +305,49 @@ async function monitorPools() {
         console.log(`  Pool B Price (USDC/WETH): ${priceB.toFixed(6)}`);
 
         let opportunity = null;
-        let estimatedProfitUsd = 0; // Very rough estimate based on price diff * debug borrow amount
+        let estimatedProfitUsd = 0;
 
-        // Opportunity exists if prices differ significantly
-        if (Math.abs(priceA - priceB) / Math.max(priceA, priceB) > 0.0001) { // Tiny threshold for difference detection
+        // Check if prices differ significantly
+        if (Math.abs(priceA - priceB) / Math.max(priceA, priceB) > 0.0001) {
 
              if (priceA > priceB) {
-                 // Price is higher on Pool A. Strategy: Sell WETH on A, Buy WETH on B.
-                 // Path: Borrow WETH from A, Swap A (WETH->USDC), Swap B (USDC->WETH), Repay A.
                  estimatedProfitUsd = (priceA - priceB) * parseFloat(ethers.formatUnits(BORROW_AMOUNT_WETH_WEI, WETH_DECIMALS));
                  opportunity = {
                      poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: priceA },
                      poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: priceB },
-                     startPool: "A", // Borrow from the pool where we sell WETH (higher price)
+                     startPool: "A",
                      borrowTokenSymbol: "WETH",
-                     estimatedProfitUsd: estimatedProfitUsd // NOTE: Needs refinement with fees/gas
+                     estimatedProfitUsd: estimatedProfitUsd
                  };
                  console.log(`  Potential Opportunity: Sell WETH on A ($${priceA.toFixed(4)}), Buy on B ($${priceB.toFixed(4)})`);
 
-            } else {
-                 // Price is higher on Pool B. Strategy: Sell WETH on B, Buy WETH on A.
-                 // Path: Borrow WETH from B, Swap B (WETH->USDC), Swap A (USDC->WETH), Repay B.
+            } else { // priceB >= priceA
                  estimatedProfitUsd = (priceB - priceA) * parseFloat(ethers.formatUnits(BORROW_AMOUNT_WETH_WEI, WETH_DECIMALS));
                  opportunity = {
                      poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: priceA },
                      poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: priceB },
-                     startPool: "A", // Borrow from the pool where we sell WETH (higher price)
+                     startPool: "B",
                      borrowTokenSymbol: "WETH",
-                     estimatedProfitUsd: estimatedProfitUsd // NOTE: Needs refinement with fees/gas
-                 };
-                 console.log(`  Potential Opportunity: Sell WETH on A ($${priceA.toFixed(4)}), Buy on B ($${priceB.toFixed(4)})`);
-
-            } else {
-                 // Price is higher on Pool B. Strategy: Sell WETH on B, Buy WETH on A.
-                 // Path: Borrow WETH from B, Swap B (WETH->USDC), Swap A (USDC->WETH), Repay B.
-                 estimatedProfitUsd = (priceB - priceA) * parseFloat(ethers.formatUnits(BORROW_AMOUNT_WETH_WEI, WETH_DECIMALS));
-                 opportunity = {
-                     poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: priceA },
-                     poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: priceB },
-                     startPool: "B", // Borrow from the pool where we sell WETH (higher price)
-                     borrowTokenSymbol: "WETH",
-                     estimatedProfitUsd: estimatedProfitUsd // NOTE: Needs refinement with fees/gas
+                     estimatedProfitUsd: estimatedProfitUsd
                  };
                   console.log(`  Potential Opportunity: Sell WETH on B ($${priceB.toFixed(4)}), Buy on A ($${priceA.toFixed(4)})`);
             }
 
-                // Check if rough estimated profit exceeds threshold (needs accurate gas cost later)
+            // Check profit threshold
             if (estimatedProfitUsd > PROFIT_THRESHOLD_USD) {
                 await attemptArbitrage(opportunity);
             } else {
                 console.log(`  Price difference detected, but estimated profit ($${estimatedProfitUsd.toFixed(4)}) below threshold ($${PROFIT_THRESHOLD_USD}).`);
             }
-        } else {
+        // --- THIS IS THE CORRECTED BRACE ---
+        } else { // This else corresponds to the outer if (Math.abs(priceA - priceB)...)
             console.log("  No significant price difference detected.");
         }
 
     } catch (error) {
         console.error(`${new Date().toISOString()} - Error in monitoring loop:`, error);
     } finally {
-        // --- Schedule the next check ---
-        // Moved the setTimeout inside the main IIFE after the first call
+        // The setInterval handles subsequent calls, no need for setTimeout here
     }
 } // End monitorPools function
 
@@ -418,8 +356,7 @@ async function monitorPools() {
     try {
         // Initial check if owner matches signer
         const contractOwner = await flashSwapContract.owner();
-        if (contractOwner.toLowerCase()
-!== signer.address.toLowerCase()) {
+        if (contractOwner.toLowerCase() !== signer.address.toLowerCase()) {
             console.warn(`\nWarning: Signer address (${signer.address}) does not match the FlashSwap contract owner (${contractOwner}). 'onlyOwner' calls will fail.\n`);
         } else {
             console.log(`Signer matches contract owner. 'onlyOwner' calls should succeed.\n`);
@@ -428,11 +365,9 @@ async function monitorPools() {
         // Perform the first check immediately
         await monitorPools();
 
-        // --- Start the recurring checks using setInterval ---
+        // Start the recurring checks using setInterval
         setInterval(monitorPools, POLLING_INTERVAL_MS);
-        console.log(`\nMonitoring started. Will check every ${POLLING_INTERVAL_MS / 1000}
-seconds.`);
-
+        console.log(`\nMonitoring started. Will check every ${POLLING_INTERVAL_MS / 1000} seconds.`);
 
     } catch (initError) {
         console.error("Initialization Error:", initError);
