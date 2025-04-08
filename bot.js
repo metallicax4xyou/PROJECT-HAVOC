@@ -1,4 +1,4 @@
-// bot.js - Arbitrum Uniswap V3 Flash Swap Bot with Debugging (v15 - Quoter Debugging)
+// bot.js - Arbitrum Uniswap V3 Flash Swap Bot with Debugging (v16 - Full QuoterV2 ABI)
 
 const { ethers } = require("ethers");
 require('dotenv').config();
@@ -22,8 +22,8 @@ const POOL_B_FEE_BPS = 3000; const POOL_B_FEE_PERCENT = 0.30;
 const WETH_DECIMALS = 18; const USDC_DECIMALS = 6;
 
 // --- ABIs ---
-// --- Ensure your Full FlashSwapABI is pasted here ---
-const FlashSwapABI = [{"inputs":[{"internalType":"address","name":"_swapRouter","type":"address"}],"stateMutability":"nonpayable","type":"constructor"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"poolA","type":"address"},{"indexed":true,"internalType":"address","name":"poolB","type":"address"},{"indexed":false,"internalType":"address","name":"tokenBorrowed","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountBorrowed","type":"uint256"}],"name":"ArbitrageAttempt","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"token","type":"address"},{"indexed":true,"internalType":"address","name":"recipient","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount","type":"uint256"}],"name":"EmergencyWithdrawal","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"caller","type":"address"},{"indexed":true,"internalType":"address","name":"pool","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"amount1","type":"uint256"}],"name":"FlashSwapInitiated","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"token","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountRepaid","type":"uint256"}],"name":"RepaymentSuccess","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"swapNumber","type":"uint256"},{"indexed":true,"internalType":"address","name":"tokenIn","type":"address"},{"indexed":true,"internalType":"address","name":"tokenOut","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountIn","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"amountOut","type":"uint256"}],"name":"SwapExecuted","type":"event"},{"inputs":[],"name":"SWAP_ROUTER","outputs":[{"internalType":"contract ISwapRouter","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"V3_FACTORY","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"_poolAddress","type":"address"},{"internalType":"uint256","name":"_amount0","type":"uint256"},{"internalType":"uint256","name":"_amount1","type":"uint256"},{"internalType":"bytes","name":"_params","type":"bytes"}],"name":"initiateFlashSwap","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"owner","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"fee0","type":"uint256"},{"internalType":"uint256","name":"fee1","type":"uint256"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"uniswapV3FlashCallback","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"withdrawEther","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"tokenAddress","type":"address"}],"name":"withdrawToken","outputs":[],"stateMutability":"nonpayable","type":"function"},{"stateMutability":"payable","type":"receive"}];
+// --- CRITICAL: Paste your Full FlashSwapABI array here, replacing the comment ---
+const FlashSwapABI = [ /* PASTE YOUR FULL FlashSwap ABI HERE */ ];
 if (!FlashSwapABI || FlashSwapABI.length === 0 || FlashSwapABI[0] === ' PASTE YOUR FULL FlashSwap ABI HERE ') {
     console.error("FATAL: FlashSwapABI is missing or placeholder! Paste the actual ABI from your build artifacts.");
     process.exit(1);
@@ -35,10 +35,11 @@ const IUniswapV3PoolABI = [
     "function liquidity() external view returns (uint128)"
 ];
 
-// --- MODIFIED: Simplified IQuoterV2ABI - Only expecting amountOut ---
+// --- CORRECTED: Full IQuoterV2 ABI definition ---
 const IQuoterV2ABI = [
     "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external view returns (uint256 amountOut, uint160 sqrtPriceNextX96, uint32 ticksCrossed, uint256 gasEstimate)"
 ];
+
 
 // --- Bot Settings ---
 const POLLING_INTERVAL_MS = 10000;
@@ -56,7 +57,7 @@ console.log("[Init] Instantiating Contracts...");
 let flashSwapContract, quoterContract, poolAContract, poolBContract;
 try {
     flashSwapContract = new ethers.Contract(FLASH_SWAP_CONTRACT_ADDRESS, FlashSwapABI, signer);
-    // Use the simplified Quoter ABI
+    // Use the full Quoter ABI
     quoterContract = new ethers.Contract(QUOTER_V2_ADDRESS, IQuoterV2ABI, provider);
     poolAContract = new ethers.Contract(POOL_A_ADDRESS, IUniswapV3PoolABI, provider);
     poolBContract = new ethers.Contract(POOL_B_ADDRESS, IUniswapV3PoolABI, provider);
@@ -84,10 +85,7 @@ console.log(` - Polling Interval: ${POLLING_INTERVAL_MS / 1000} seconds`);
 console.log(` - Profit Threshold: $${PROFIT_THRESHOLD_USD} USD (approx, before gas)`);
 
 // --- Helper Functions ---
-// MODIFIED: Added logging of params
-async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, quoter) {
-// --- Helper Functions ---
-// MODIFIED: Handle full return tuple from Quoter // <<< REPLACE WITH THIS FUNCTION
+// MODIFIED: Handle full return tuple from Quoter
 async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, quoter) {
     const params = {
         tokenIn: tokenIn,
@@ -112,7 +110,7 @@ async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, qu
          if (error.data && error.data !== '0x') console.warn(`     Raw Revert Data: ${error.data}`);
         return 0n;
     }
-}
+} // <<< Closing brace for simulateSwap function
 
 // (Keep existing attemptArbitrage function)
 async function attemptArbitrage(opportunity) {
@@ -198,7 +196,8 @@ async function attemptArbitrage(opportunity) {
          if (staticCallError.data && staticCallError.data !== '0x') console.error(`     Revert Data: ${staticCallError.data}`);
     }
     console.log("========= Arbitrage Attempt Complete =========");
- } // End attemptArbitrage
+ } // <<< Closing brace for attemptArbitrage function
+
 
 // --- Main Monitoring Loop ---
 // MODIFIED: Increased simulation amount
@@ -266,10 +265,10 @@ async function monitorPools() {
              estimatedProfitUsd = Math.abs(priceA - priceB) * parseFloat(ethers.formatUnits(BORROW_AMOUNT_WETH_WEI, WETH_DECIMALS));
              if (priceA > priceB) {
                  console.log(`  [Monitor] Potential Opportunity: Sell WETH on A ($${priceA.toFixed(4)}), Buy on B ($${priceB.toFixed(4)})`);
-                 opportunity = { /* ... setup struct ... */ };
+                 // opportunity = { /* ... setup struct ... */ }; // Correct structuring below
              } else {
                   console.log(`  [Monitor] Potential Opportunity: Sell WETH on B ($${priceB.toFixed(4)}), Buy on A ($${priceA.toFixed(4)})`);
-                 opportunity = { /* ... setup struct ... */ };
+                 // opportunity = { /* ... setup struct ... */ }; // Correct structuring below
              }
              // Correctly structure the opportunity object before passing
              opportunity = {
@@ -294,21 +293,17 @@ async function monitorPools() {
     } finally {
         console.log(`[Monitor] END - ${new Date().toISOString()}`);
     }
-} // End monitorPools function
-
-// ... (monitorPools function definition ends here with its closing '}') ...
+} // <<< Closing brace for monitorPools function
 
 // --- Start the Bot ---
 (async () => {
     console.log("\n>>> Entering startup async IIFE...");
     try {
-        // --- All the startup steps inside the try block ---
         console.log(">>> Checking signer balance (as connectivity test)...");
         const balance = await provider.getBalance(signer.address);
         console.log(`>>> Signer balance: ${ethers.formatEther(balance)} ETH`);
-
         console.log(">>> Attempting to fetch contract owner...");
-        const contractOwner = await flashSwapContract.owner(); // Uses the full ABI now
+        const contractOwner = await flashSwapContract.owner();
         console.log(`>>> Successfully fetched owner: ${contractOwner}`);
         if (contractOwner.toLowerCase() === signer.address.toLowerCase()) {
              console.log(`Signer matches contract owner. 'onlyOwner' calls should succeed.\n`);
@@ -322,12 +317,12 @@ async function monitorPools() {
         setInterval(monitorPools, POLLING_INTERVAL_MS);
         console.log(`\nMonitoring started. Will check every ${POLLING_INTERVAL_MS / 1000} seconds.`);
 
-    } catch (initError) { // <<< Make sure this CATCH block exists
+    } catch (initError) {
         console.error("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         console.error("Initialization Error / Startup Error:");
         console.error("Check RPC connection, ABIs, Private Key, and Initial Contract Calls.");
         console.error(initError);
         console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         process.exit(1);
-    } // <<< Make sure this brace closing the CATCH block exists
-})(); // <<< Make sure this final parenthesis and semicolon exist
+    }
+})(); // <<< Closing characters for IIFE
