@@ -327,4 +327,4 @@ async function monitorPools() {
         console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         process.exit(1);
     }
-})();
+})()
