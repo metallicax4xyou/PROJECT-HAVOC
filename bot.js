@@ -35,11 +35,10 @@ const IUniswapV3PoolABI = [
     "function liquidity() external view returns (uint128)"
 ];
 
-// --- CORRECTED: Full IQuoterV2 ABI definition ---
+// --- MODIFIED: IQuoterV2ABI with Individual Parameters ---
 const IQuoterV2ABI = [
-    "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external view returns (uint256 amountOut, uint160 sqrtPriceNextX96, uint32 ticksCrossed, uint256 gasEstimate)"
+    "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external view returns (uint256 amountOut, uint160 sqrtPriceNextX96, uint32 ticksCrossed, uint256 gasEstimate)"
 ];
-
 
 // --- Bot Settings ---
 const POLLING_INTERVAL_MS = 10000;
@@ -99,8 +98,14 @@ async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, qu
         fee: params.fee, sqrtPriceLimitX96: params.sqrtPriceLimitX96.toString()
      }); // Log params
     try {
-        // Call using the full ABI, expecting multiple return values
-        const quoteResult = await quoter.quoteExactInputSingle.staticCall(params);
+                // Call with individual arguments - ORDER MATTERS!
+        const quoteResult = await quoter.quoteExactInputSingle.staticCall(
+            params.tokenIn,          // Argument 1: address tokenIn
+            params.tokenOut,         // Argument 2: address tokenOut
+            params.fee,              // Argument 3: uint24 fee
+            params.amountIn,         // Argument 4: uint256 amountIn
+            params.sqrtPriceLimitX96 // Argument 5: uint160 sqrtPriceLimitX96
+        );
         // quoteResult is an array/tuple: [amountOut, sqrtPriceNextX96, ticksCrossed, gasEstimate]
         const amountOut = quoteResult[0]; // Extract amountOut
         console.log(`  [Quoter Call - ${poolDesc}] Success. AmountOut: ${amountOut.toString()}`);
