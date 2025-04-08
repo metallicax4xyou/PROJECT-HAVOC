@@ -115,6 +115,7 @@ async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, qu
         return 0n;
     }
 }
+
 // (Keep existing attemptArbitrage function)
 async function attemptArbitrage(opportunity) {
     console.log("\n========= Arbitrage Opportunity Detected =========");
