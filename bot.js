@@ -200,7 +200,6 @@ async function attemptArbitrage(opportunity) {
     console.log("========= Arbitrage Attempt Complete =========");
  } // End attemptArbitrage
 
-
 // --- Main Monitoring Loop ---
 // MODIFIED: Increased simulation amount
 async function monitorPools() {
