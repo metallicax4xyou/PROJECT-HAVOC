@@ -176,56 +176,6 @@ async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, qu
 }
 
 
-// --- SIMPLIFIED attemptArbitrage function for logging ---
-async function attemptArbitrage(state) { // Accept state
-    console.log("\n========= Arbitrage Opportunity Detected (Simplified Test) =========");
-    console.log(">>> Entering attemptArbitrage (Simplified)...");
-
-     const { flashSwapContract, poolAContract, poolBContract } = state.contracts;
-     const { config } = state;
-
-     if (!flashSwapContract || !poolAContract || !poolBContract) { console.error("... Contract instances missing ..."); return; }
-
-    // Minimal setup just for the call
-    let flashLoanPoolAddress; let borrowAmount0 = 0n; let borrowAmount1 = 0n;
-    let encodedParams = "0x";
-    let tokenBorrowedAddress, tokenIntermediateAddress, poolAForSwap, poolBForSwap, feeAForSwap, feeBForSwap, amountToBorrowWei;
-
-    try {
-        console.log(">>> Setting up simplified params...");
-        // Use config values passed via state
-        flashLoanPoolAddress = config.POOL_A_ADDRESS;
-        amountToBorrowWei = config.BORROW_AMOUNT_WETH_WEI; // Use config value
-        borrowAmount0 = amountToBorrowWei; borrowAmount1 = 0n;
-        tokenBorrowedAddress = config.WETH_ADDRESS; tokenIntermediateAddress = config.USDC_ADDRESS;
-        poolAForSwap = config.POOL_A_ADDRESS; feeAForSwap = config.POOL_A_FEE_BPS;
-        poolBForSwap = config.POOL_B_ADDRESS; feeBForSwap = config.POOL_B_FEE_BPS;
-
-        const arbitrageParams = { tokenIntermediate: tokenIntermediateAddress, poolA: poolAForSwap, poolB: poolBForSwap, feeA: feeAForSwap, feeB: feeBForSwap, amountOutMinimum1: 0n, amountOutMinimum2: 0n };
-        encodedParams = ethers.AbiCoder.defaultAbiCoder().encode(
-            ['tuple(address tokenIntermediate, address poolA, address poolB, uint24 feeA, uint24 feeB, uint amountOutMinimum1, uint amountOutMinimum2)'],
-            [arbitrageParams]
-        );
-        console.log(">>> Simplified Params Set. Encoded:", encodedParams.substring(0, 100) + "...");
-
-        const initiateFlashSwapArgs = [ flashLoanPoolAddress, borrowAmount0, borrowAmount1, encodedParams ];
-
-        console.log(">>> Entering TRY block for staticCall...");
-        if (!flashSwapContract.initiateFlashSwap) { throw new Error("Fetched FlashSwap ABI does not contain 'initiateFlashSwap' function."); }
-        await flashSwapContract.initiateFlashSwap.staticCall( ...initiateFlashSwapArgs, { gasLimit: 3_000_000 });
-        console.log(">>> STATIC CALL SUCCEEDED (Simplified Test) <<<");
-
-    } catch (error) {
-        console.error(">>> STATIC CALL FAILED (Simplified Test) <<<");
-        console.error("Error Reason:", error.reason || error.message || error);
-        if (error.data && error.data !== '0x') console.error("Revert Data:", error.data);
-        if (error.stack) { console.error("Stack Trace:", error.stack); }
-        else { console.error("Full Error Obj:", JSON.stringify(error, Object.getOwnPropertyNames(error))); }
-    }
-    console.log("========= Arbitrage Attempt Complete (Simplified) =========");
-} // <<< Closing brace for attemptArbitrage function
-
-
 // --- Main Monitoring Loop ---
 async function monitorPools(state) { // Accept state
     console.log(`\n[Monitor] START - ${new Date().toISOString()}`);
