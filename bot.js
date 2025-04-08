@@ -36,8 +36,8 @@ const IUniswapV3PoolABI = [
 ];
 
 // --- MODIFIED: Simplified IQuoterV2ABI - Only expecting amountOut ---
- const IQuoterV2ABI = [
-    "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external view returns (uint256 amountOut)"
+const IQuoterV2ABI = [
+    "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external view returns (uint256 amountOut, uint160 sqrtPriceNextX96, uint32 ticksCrossed, uint256 gasEstimate)"
 ];
 
 // --- Bot Settings ---
@@ -86,6 +86,9 @@ console.log(` - Profit Threshold: $${PROFIT_THRESHOLD_USD} USD (approx, before g
 // --- Helper Functions ---
 // MODIFIED: Added logging of params
 async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, quoter) {
+// --- Helper Functions ---
+// MODIFIED: Handle full return tuple from Quoter // <<< REPLACE WITH THIS FUNCTION
+async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, quoter) {
     const params = {
         tokenIn: tokenIn,
         tokenOut: tokenOut,
@@ -93,23 +96,20 @@ async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, qu
         fee: feeBps,
         sqrtPriceLimitX96: 0n
     };
-    // --- ADDED LOG ---
     console.log(`  [Quoter Call - ${poolDesc}] Params:`, {
-        tokenIn: params.tokenIn,
-        tokenOut: params.tokenOut,
-        amountIn: params.amountIn.toString(), // Log BigInt as string
-        fee: params.fee,
-        sqrtPriceLimitX96: params.sqrtPriceLimitX96.toString()
-    });
+        tokenIn: params.tokenIn, tokenOut: params.tokenOut, amountIn: params.amountIn.toString(),
+        fee: params.fee, sqrtPriceLimitX96: params.sqrtPriceLimitX96.toString()
+     }); // Log params
     try {
-        // Now using ABI expecting only amountOut
-        const amountOut = await quoter.quoteExactInputSingle.staticCall(params);
-        // --- ADDED LOG ---
+        // Call using the full ABI, expecting multiple return values
+        const quoteResult = await quoter.quoteExactInputSingle.staticCall(params);
+        // quoteResult is an array/tuple: [amountOut, sqrtPriceNextX96, ticksCrossed, gasEstimate]
+        const amountOut = quoteResult[0]; // Extract amountOut
         console.log(`  [Quoter Call - ${poolDesc}] Success. AmountOut: ${amountOut.toString()}`);
-        return amountOut; // Return the single expected value
+        return amountOut; // Return only amountOut for price calculation
     } catch (error) {
         console.warn(`  [Quoter Call - ${poolDesc}] Failed (Fee: ${feeBps}bps): ${error.reason || error.message || error}`);
-         if (error.data && error.data !== '0x') console.warn(`     Raw Revert Data: ${error.data}`); // Log raw data if present and not empty
+         if (error.data && error.data !== '0x') console.warn(`     Raw Revert Data: ${error.data}`);
         return 0n;
     }
 }
