@@ -1,4 +1,4 @@
-// bot.js - Arbitrum Uniswap V3 Flash Swap Bot with Debugging (v16 - Full QuoterV2 ABI)
+// bot.js - Arbitrum Uniswap V3 Flash Swap Bot with Debugging (v19 - Simplified attemptArbitrage)
 
 const { ethers } = require("ethers");
 require('dotenv').config();
@@ -24,7 +24,7 @@ const WETH_DECIMALS = 18; const USDC_DECIMALS = 6;
 // --- ABIs ---
 // --- CRITICAL: Paste your Full FlashSwapABI array here, replacing the comment ---
 const FlashSwapABI = [{"inputs":[{"internalType":"address","name":"_swapRouter","type":"address"}],"stateMutability":"nonpayable","type":"constructor"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"poolA","type":"address"},{"indexed":true,"internalType":"address","name":"poolB","type":"address"},{"indexed":false,"internalType":"address","name":"tokenBorrowed","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountBorrowed","type":"uint256"}],"name":"ArbitrageAttempt","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"token","type":"address"},{"indexed":true,"internalType":"address","name":"recipient","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount","type":"uint256"}],"name":"EmergencyWithdrawal","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"caller","type":"address"},{"indexed":true,"internalType":"address","name":"pool","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"amount1","type":"uint256"}],"name":"FlashSwapInitiated","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"token","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountRepaid","type":"uint256"}],"name":"RepaymentSuccess","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"swapNumber","type":"uint256"},{"indexed":true,"internalType":"address","name":"tokenIn","type":"address"},{"indexed":true,"internalType":"address","name":"tokenOut","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountIn","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"amountOut","type":"uint256"}],"name":"SwapExecuted","type":"event"},{"inputs":[],"name":"SWAP_ROUTER","outputs":[{"internalType":"contract ISwapRouter","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"V3_FACTORY","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"_poolAddress","type":"address"},{"internalType":"uint256","name":"_amount0","type":"uint256"},{"internalType":"uint256","name":"_amount1","type":"uint256"},{"internalType":"bytes","name":"_params","type":"bytes"}],"name":"initiateFlashSwap","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"owner","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"fee0","type":"uint256"},{"internalType":"uint256","name":"fee1","type":"uint256"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"uniswapV3FlashCallback","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"withdrawEther","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"tokenAddress","type":"address"}],"name":"withdrawToken","outputs":[],"stateMutability":"nonpayable","type":"function"},{"stateMutability":"payable","type":"receive"}];
-if (!FlashSwapABI || FlashSwapABI.length === 0 || FlashSwapABI[0] === ' PASTE YOUR FULL FlashSwap ABI HERE ') {
+if (!FlashSwapABI || FlashSwapABI.length === 0 || (typeof FlashSwapABI[0] === 'string' && FlashSwapABI[0].includes('PASTE YOUR FULL FlashSwap ABI HERE'))) {
     console.error("FATAL: FlashSwapABI is missing or placeholder! Paste the actual ABI from your build artifacts.");
     process.exit(1);
 }
@@ -35,31 +35,23 @@ const IUniswapV3PoolABI = [
     "function liquidity() external view returns (uint128)"
 ];
 
-// --- Use the Full QuoterV2 ABI You Provided ---
+// --- Use the Full QuoterV2 ABI You Provided (marked nonpayable) ---
 const IQuoterV2ABI = [
-    {
-        "type": "constructor", "inputs": [ { "name": "_factory", "type": "address", "internalType": "address" }, { "name": "_WETH9", "type": "address", "internalType": "address" } ], "stateMutability": "nonpayable"
-    }, {
-        "name": "WETH9", "type": "function", "inputs": [], "outputs": [ { "name": "", "type": "address", "internalType": "address" } ], "stateMutability": "view"
-    }, {
-        "name": "factory", "type": "function", "inputs": [], "outputs": [ { "name": "", "type": "address", "internalType": "address" } ], "stateMutability": "view"
-    }, {
-        "name": "quoteExactInput", "type": "function", "inputs": [ { "name": "path", "type": "bytes", "internalType": "bytes" }, { "name": "amountIn", "type": "uint256", "internalType": "uint256" } ], "outputs": [ { "name": "amountOut", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96AfterList", "type": "uint160[]", "internalType": "uint160[]" }, { "name": "initializedTicksCrossedList", "type": "uint32[]", "internalType": "uint32[]" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable"
-    }, {
-        "name": "quoteExactInputSingle", "type": "function", "inputs": [ { "name": "params", "type": "tuple", "components": [ { "name": "tokenIn", "type": "address", "internalType": "address" }, { "name": "tokenOut", "type": "address", "internalType": "address" }, { "name": "amountIn", "type": "uint256", "internalType": "uint256" }, { "name": "fee", "type": "uint24", "internalType": "uint24" }, { "name": "sqrtPriceLimitX96", "type": "uint160", "internalType": "uint160" } ], "internalType": "struct IQuoterV2.QuoteExactInputSingleParams" } ], "outputs": [ { "name": "amountOut", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96After", "type": "uint160", "internalType": "uint160" }, { "name": "initializedTicksCrossed", "type": "uint32", "internalType": "uint32" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable"
-    }, {
-        "name": "quoteExactOutput", "type": "function", "inputs": [ { "name": "path", "type": "bytes", "internalType": "bytes" }, { "name": "amountOut", "type": "uint256", "internalType": "uint256" } ], "outputs": [ { "name": "amountIn", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96AfterList", "type": "uint160[]", "internalType": "uint160[]" }, { "name": "initializedTicksCrossedList", "type": "uint32[]", "internalType": "uint32[]" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable"
-    }, {
-        "name": "quoteExactOutputSingle", "type": "function", "inputs": [ { "name": "params", "type": "tuple", "components": [ { "name": "tokenIn", "type": "address", "internalType": "address" }, { "name": "tokenOut", "type": "address", "internalType": "address" }, { "name": "amount", "type": "uint256", "internalType": "uint256" }, { "name": "fee", "type": "uint24", "internalType": "uint24" }, { "name": "sqrtPriceLimitX96", "type": "uint160", "internalType": "uint160" } ], "internalType": "struct IQuoterV2.QuoteExactOutputSingleParams" } ], "outputs": [ { "name": "amountIn", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96After", "type": "uint160", "internalType": "uint160" }, { "name": "initializedTicksCrossed", "type": "uint32", "internalType": "uint32" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable"
-    }, {
-        "name": "uniswapV3SwapCallback", "type": "function", "inputs": [ { "name": "amount0Delta", "type": "int256", "internalType": "int256" }, { "name": "amount1Delta", "type": "int256", "internalType": "int256" }, { "name": "path", "type": "bytes", "internalType": "bytes" } ], "outputs": [], "stateMutability": "view"
-    }
+    { "type": "constructor", "inputs": [ { "name": "_factory", "type": "address", "internalType": "address" }, { "name": "_WETH9", "type": "address", "internalType": "address" } ], "stateMutability": "nonpayable" },
+    { "name": "WETH9", "type": "function", "inputs": [], "outputs": [ { "name": "", "type": "address", "internalType": "address" } ], "stateMutability": "view" },
+    { "name": "factory", "type": "function", "inputs": [], "outputs": [ { "name": "", "type": "address", "internalType": "address" } ], "stateMutability": "view" },
+    { "name": "quoteExactInput", "type": "function", "inputs": [ { "name": "path", "type": "bytes", "internalType": "bytes" }, { "name": "amountIn", "type": "uint256", "internalType": "uint256" } ], "outputs": [ { "name": "amountOut", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96AfterList", "type": "uint160[]", "internalType": "uint160[]" }, { "name": "initializedTicksCrossedList", "type": "uint32[]", "internalType": "uint32[]" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable" },
+    { "name": "quoteExactInputSingle", "type": "function", "inputs": [ { "name": "params", "type": "tuple", "components": [ { "name": "tokenIn", "type": "address", "internalType": "address" }, { "name": "tokenOut", "type": "address", "internalType": "address" }, { "name": "amountIn", "type": "uint256", "internalType": "uint256" }, { "name": "fee", "type": "uint24", "internalType": "uint24" }, { "name": "sqrtPriceLimitX96", "type": "uint160", "internalType": "uint160" } ], "internalType": "struct IQuoterV2.QuoteExactInputSingleParams" } ], "outputs": [ { "name": "amountOut", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96After", "type": "uint160", "internalType": "uint160" }, { "name": "initializedTicksCrossed", "type": "uint32", "internalType": "uint32" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable" },
+    { "name": "quoteExactOutput", "type": "function", "inputs": [ { "name": "path", "type": "bytes", "internalType": "bytes" }, { "name": "amountOut", "type": "uint256", "internalType": "uint256" } ], "outputs": [ { "name": "amountIn", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96AfterList", "type": "uint160[]", "internalType": "uint160[]" }, { "name": "initializedTicksCrossedList", "type": "uint32[]", "internalType": "uint32[]" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable" },
+    { "name": "quoteExactOutputSingle", "type": "function", "inputs": [ { "name": "params", "type": "tuple", "components": [ { "name": "tokenIn", "type": "address", "internalType": "address" }, { "name": "tokenOut", "type": "address", "internalType": "address" }, { "name": "amount", "type": "uint256", "internalType": "uint256" }, { "name": "fee", "type": "uint24", "internalType": "uint24" }, { "name": "sqrtPriceLimitX96", "type": "uint160", "internalType": "uint160" } ], "internalType": "struct IQuoterV2.QuoteExactOutputSingleParams" } ], "outputs": [ { "name": "amountIn", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96After", "type": "uint160", "internalType": "uint160" }, { "name": "initializedTicksCrossed", "type": "uint32", "internalType": "uint32" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable" },
+    { "name": "uniswapV3SwapCallback", "type": "function", "inputs": [ { "name": "amount0Delta", "type": "int256", "internalType": "int256" }, { "name": "amount1Delta", "type": "int256", "internalType": "int256" }, { "name": "path", "type": "bytes", "internalType": "bytes" } ], "outputs": [], "stateMutability": "view" }
 ];
+
 
 // --- Bot Settings ---
 const POLLING_INTERVAL_MS = 10000;
 const PROFIT_THRESHOLD_USD = 0.05;
-let BORROW_AMOUNT_WETH_WEI = ethers.parseUnits("0.00005", WETH_DECIMALS);
+let BORROW_AMOUNT_WETH_WEI = ethers.parseUnits("0.00005", WETH_DECIMALS); // Small amount for FLASH SWAP
 
 // --- Initialization ---
 if (!RPC_URL || !PRIVATE_KEY) { console.error("ENV VAR MISSING"); process.exit(1); }
@@ -72,7 +64,6 @@ console.log("[Init] Instantiating Contracts...");
 let flashSwapContract, quoterContract, poolAContract, poolBContract;
 try {
     flashSwapContract = new ethers.Contract(FLASH_SWAP_CONTRACT_ADDRESS, FlashSwapABI, signer);
-    // Use the full Quoter ABI
     quoterContract = new ethers.Contract(QUOTER_V2_ADDRESS, IQuoterV2ABI, provider);
     poolAContract = new ethers.Contract(POOL_A_ADDRESS, IUniswapV3PoolABI, provider);
     poolBContract = new ethers.Contract(POOL_B_ADDRESS, IUniswapV3PoolABI, provider);
@@ -93,12 +84,15 @@ console.log(` - Signer Address: ${signer.address}`);
 console.log(` - FlashSwap Contract: ${FLASH_SWAP_CONTRACT_ADDRESS}`);
 console.log(` - Quoter V2 Contract: ${QUOTER_V2_ADDRESS}`);
 console.log(` - Monitoring Pools:`);
-console.log(`   - Pool A (WETH/USDC ${POOL_A_FEE_PERCENT}%): ${POOL_A_ADDRESS}`); // Updated
+console.log(`   - Pool A (WETH/USDC ${POOL_A_FEE_PERCENT}%): ${POOL_A_ADDRESS}`);
 console.log(`   - Pool B (WETH/USDC ${POOL_B_FEE_PERCENT}%): ${POOL_B_ADDRESS}`);
 console.log(` - Debug Borrow Amount: ${ethers.formatUnits(BORROW_AMOUNT_WETH_WEI, WETH_DECIMALS)} WETH`);
 console.log(` - Polling Interval: ${POLLING_INTERVAL_MS / 1000} seconds`);
 console.log(` - Profit Threshold: $${PROFIT_THRESHOLD_USD} USD (approx, before gas)`);
 
+// --- Helper Functions ---
+
+// Simulates Quoter call via estimateGas
 async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, quoter) {
     const params = {
         tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountInWei,
@@ -107,92 +101,38 @@ async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, qu
     console.log(`  [Quoter Sim using estimateGas - ${poolDesc}] Params:`, {
         tokenIn: params.tokenIn, tokenOut: params.tokenOut, amountIn: params.amountIn.toString(),
         fee: params.fee, sqrtPriceLimitX96: params.sqrtPriceLimitX96.toString()
-     }); // Log params
+     });
     try {
-        // --- Use estimateGas for simulation because ABI says nonpayable ---
         await quoter.quoteExactInputSingle.estimateGas(params);
         console.log(`  [Quoter Sim using estimateGas - ${poolDesc}] SUCCESS (Simulation likely ok)`);
         return true; // Indicate simulation didn't revert
     } catch (error) {
-        // If estimateGas fails, the simulation likely reverted internally
         console.warn(`  [Quoter Sim using estimateGas - ${poolDesc}] FAILED (Fee: ${feeBps}bps): ${error.reason || error.message || error}`);
          if (error.data && error.data !== '0x') console.warn(`     Raw Revert Data: ${error.data}`);
         return false; // Indicate simulation failed
     }
 }
 
-// MODIFIED: Added Granular Logging Inside
+
+// --- SIMPLIFIED attemptArbitrage function for logging ---
 async function attemptArbitrage(opportunity) {
-    // Keep the initial logs identifying the opportunity
-    console.log("\n========= Arbitrage Opportunity Detected =========");
-    // Check if opportunity data is valid before proceeding (basic check)
-    if (!opportunity || !opportunity.poolA || !opportunity.poolB) {
-        console.error("  [Attempt] Invalid opportunity structure received.");
-        return;
-    }
-    console.log(`  Pool A (${opportunity.poolA.address}, ${opportunity.poolA.feeBps}bps): Price ${opportunity.poolA.price?.toFixed(6) ?? 'N/A'} USDC/WETH`);
-    console.log(`  Pool B (${opportunity.poolB.address}, ${opportunity.poolB.feeBps}bps): Price ${opportunity.poolB.price?.toFixed(6) ?? 'N/A'} USDC/WETH`);
-    console.log(`  Direction: Borrow ${opportunity.borrowTokenSymbol} from Pool ${opportunity.startPool === 'A' ? 'A' : 'B'}`);
-    console.log(`  Simulated Profit (Before Gas/Fees): ~$${opportunity.estimatedProfitUsd?.toFixed(4) ?? 'N/A'} USD`);
-
-    // Determine parameters
-    let flashLoanPoolAddress;
-    let borrowAmount0 = 0n; let borrowAmount1 = 0n;
-    let tokenBorrowedAddress; let tokenIntermediateAddress;
-    let poolAForSwap; let poolBForSwap;
-    let feeAForSwap; let feeBForSwap;
-    let amountToBorrowWei;
-
-    // Ensure required opportunity properties exist
-     if (!opportunity.borrowTokenSymbol || !opportunity.startPool) {
-         console.error("  [Attempt] Missing borrowTokenSymbol or startPool in opportunity data.");
-         return;
-     }
-
-    if (opportunity.borrowTokenSymbol === 'WETH') {
-        tokenBorrowedAddress = WETH_ADDRESS; tokenIntermediateAddress = USDC_ADDRESS;
-        amountToBorrowWei = BORROW_AMOUNT_WETH_WEI; // Using the small debug amount defined globally
-        borrowAmount0 = amountToBorrowWei; borrowAmount1 = 0n;
-        if (opportunity.startPool === 'A') {
-            flashLoanPoolAddress = opportunity.poolA.address; poolAForSwap = opportunity.poolA.address;
-            feeAForSwap = opportunity.poolA.feeBps; poolBForSwap = opportunity.poolB.address;
-            feeBForSwap = opportunity.poolB.feeBps;
-        } else { // Start Pool B
-            flashLoanPoolAddress = opportunity.poolB.address; poolAForSwap = opportunity.poolB.address;
-            feeAForSwap = opportunity.poolB.feeBps; poolBForSwap = opportunity.poolA.address;
-            feeBForSwap = opportunity.poolA.feeBps;
-        }
-    } else {
-        console.error("  [Attempt] USDC Borrow NYI"); return;
-    }
-
-    // Ensure all needed parameters were set
-    if (!flashLoanPoolAddress || !tokenBorrowedAddress || !tokenIntermediateAddress || !poolAForSwap || !poolBForSwap || feeAForSwap === undefined || feeBForSwap === undefined || amountToBorrowWei === undefined) {
-        console.error("  [Attempt] Failed to determine all necessary parameters from opportunity.");
-        return;
-    }
-
-    console.log(`  Executing Path: Borrow ${ethers.formatUnits(amountToBorrowWei, tokenBorrowedAddress === WETH_ADDRESS ? WETH_DECIMALS : USDC_DECIMALS)} ${opportunity.borrowTokenSymbol} from ${flashLoanPoolAddress}`);
-    console.log(`    -> Swap 1 on ${poolAForSwap} (Fee: ${feeAForSwap}bps)`);
-    console.log(`    -> Swap 2 on ${poolBForSwap} (Fee: ${feeBForSwap}bps)`);
-
-// SIMPLIFIED version for extreme logging debug
-async function attemptArbitrage(opportunity) {
-    console.log("\n========= Arbitrage Opportunity Detected (Simplified) =========");
-    console.log(">>> Entering attemptArbitrage...");
+    console.log("\n========= Arbitrage Opportunity Detected (Simplified Test) =========");
+    console.log(">>> Entering attemptArbitrage (Simplified)...");
 
     // Minimal setup just for the call
     let flashLoanPoolAddress;
     let borrowAmount0 = 0n;
     let borrowAmount1 = 0n;
     let encodedParams = "0x"; // Placeholder - will be replaced
+    let tokenBorrowedAddress, tokenIntermediateAddress, poolAForSwap, poolBForSwap, feeAForSwap, feeBForSwap, amountToBorrowWei; // Declare variables
 
     // Hardcode path for this test: Borrow 0.00005 WETH from Pool A (0.05%)
     // Using the global BORROW_AMOUNT_WETH_WEI
     try {
         console.log(">>> Setting up simplified params...");
         flashLoanPoolAddress = POOL_A_ADDRESS; // Borrow from 0.05% pool
-        borrowAmount0 = BORROW_AMOUNT_WETH_WEI; // Use small global debug amount
+        amountToBorrowWei = BORROW_AMOUNT_WETH_WEI; // Use small global debug amount
+        borrowAmount0 = amountToBorrowWei;
         borrowAmount1 = 0n;
         tokenBorrowedAddress = WETH_ADDRESS;
         tokenIntermediateAddress = USDC_ADDRESS;
@@ -215,21 +155,30 @@ async function attemptArbitrage(opportunity) {
         const initiateFlashSwapArgs = [ flashLoanPoolAddress, borrowAmount0, borrowAmount1, encodedParams ];
 
         console.log(">>> Entering TRY block for staticCall...");
+        // Ensure flashSwapContract is initialized
+        if (!flashSwapContract) {
+            console.error("  [Attempt] FlashSwap contract instance not initialized inside try block.");
+            throw new Error("FlashSwap contract instance missing"); // Throw error to be caught
+        }
         await flashSwapContract.initiateFlashSwap.staticCall( ...initiateFlashSwapArgs, { gasLimit: 3_000_000 });
         console.log(">>> STATIC CALL SUCCEEDED (Simplified Test) <<<");
 
-    } catch (error) {
+        // If staticCall succeeds, we don't proceed to estimateGas in this simplified version
+
+    } catch (error) { // Changed variable name to 'error' for clarity
         console.error(">>> STATIC CALL FAILED (Simplified Test) <<<");
         console.error("Error Reason:", error.reason || error.message || error);
         if (error.data && error.data !== '0x') console.error("Revert Data:", error.data);
-        console.error("Full Error Obj:", JSON.stringify(error, null, 2)); // Log full error object
+        // Adding more robust error logging
+        if (error.stack) { console.error("Stack Trace:", error.stack); }
+        else { console.error("Full Error Obj:", JSON.stringify(error, Object.getOwnPropertyNames(error))); } // Log all properties
     }
 
     console.log("========= Arbitrage Attempt Complete (Simplified) =========");
-}
+} // <<< Closing brace for attemptArbitrage function
+
 
 // --- Main Monitoring Loop ---
-// MODIFIED: Increased simulation amount
 async function monitorPools() {
     console.log(`\n[Monitor] START - ${new Date().toISOString()}`);
     try {
@@ -274,12 +223,9 @@ async function monitorPools() {
         console.log(`  [Monitor] Quoter simulations results. Sim A Success: ${simASuccess}, Sim B Success: ${simBSuccess}`);
 
         // If BOTH simulations succeeded, we assume pools are usable and proceed to attempt the actual flash swap arb
-        // We don't have exact prices from the quote anymore, so we skip that check for now
         if (simASuccess && simBSuccess) {
              console.log("  [Monitor] Both Quoter simulations succeeded via estimateGas. Proceeding to attemptArbitrage.");
-             // We need a placeholder or simplified 'opportunity' struct as we didn't calculate price/profit
-             // We'll just try one direction for now: Borrow WETH from Pool A (0.05%)
-             // IN A REAL BOT: You'd need a different price discovery mechanism if Quoter doesn't return amountOut
+             // Create placeholder opportunity
              const pseudoOpportunity = {
                  poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: 0 }, // Price unknown
                  poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: 0 }, // Price unknown
@@ -287,89 +233,7 @@ async function monitorPools() {
                  borrowTokenSymbol: "WETH",
                  estimatedProfitUsd: 999 // Assume profitable for debug
              };
-            await attemptArbitrage(pseudoOpportunity); // Call attemptArbitrage
-
-        } else {
-             console.log("  [Monitor] One or both Quoter simulations failed. Skipping arbitrage attempt.");
-             console.log("[Monitor] END (Early exit due to quote simulation failure)");
-             // No return here, let finally block run
-        }
-
-    } catch (error) {
-        console.error(`[Monitor] Error in monitoring loop:`, error);
-    } finally {
-        console.log(`[Monitor] END - ${new Date().toISOString()}`);
-    }
-} // <<< Make sure this closing brace is present                 
-
-// (Keep existing attemptArbitrage function)
-async function attemptArbitrage(opportunity) {
-    console.log("\n========= Arbitrage Opportunity Detected =========");
-    // ... (Rest of the function body is unchanged from previous versions) ...
-    console.log("========= Arbitrage Attempt Complete =========");
- } // <<< Closing brace for attemptArbitrage function
-
-
-// --- Main Monitoring Loop ---
-// MODIFIED: Check simulateSwap success, use placeholder opportunity
-async function monitorPools() {
-    console.log(`\n[Monitor] START - ${new Date().toISOString()}`);
-    try {
-        console.log("  [Monitor] Fetching pool states...");
-        console.log(`  [Monitor] Calling Promise.all for pool states... (A: ${POOL_A_ADDRESS}, B: ${POOL_B_ADDRESS})`);
-        const poolStatePromises = [
-            poolAContract.slot0().catch(e => { console.error(`[Monitor] Error fetching slot0 for Pool A (${POOL_A_ADDRESS}): ${e.message || e}`); return null; }),
-            poolAContract.liquidity().catch(e => { console.error(`[Monitor] Error fetching liquidity for Pool A (${POOL_A_ADDRESS}): ${e.message || e}`); return null; }),
-            poolBContract.slot0().catch(e => { console.error(`[Monitor] Error fetching slot0 for Pool B (${POOL_B_ADDRESS}): ${e.message || e}`); return null; }),
-            poolBContract.liquidity().catch(e => { console.error(`[Monitor] Error fetching liquidity for Pool B (${POOL_B_ADDRESS}): ${e.message || e}`); return null; })
-        ];
-        const [slotA, liqA, slotB, liqB] = await Promise.all(poolStatePromises);
-        console.log("  [Monitor] Promise.all for pool states resolved.");
-
-        let poolAStateFetched = false; let poolBStateFetched = false;
-        if (slotA && liqA !== null) {
-             console.log(`  [Monitor] Pool A State: Tick=${slotA.tick}, Liquidity=${liqA.toString()}`);
-             if (liqA === 0n) console.warn("    [Monitor] WARNING: Pool A has ZERO active liquidity!");
-             poolAStateFetched = true;
-        } else { console.log(`  [Monitor] Pool A State: Failed to fetch.`); }
-        if (slotB && liqB !== null) {
-             console.log(`  [Monitor] Pool B State: Tick=${slotB.tick}, Liquidity=${liqB.toString()}`);
-              if (liqB === 0n) console.warn("    [Monitor] WARNING: Pool B has ZERO active liquidity!");
-              poolBStateFetched = true;
-        } else { console.log(`  [Monitor] Pool B State: Failed to fetch.`); }
-
-        if (!poolAStateFetched || !poolBStateFetched) {
-            console.log("  [Monitor] Could not fetch state for both pools. Skipping simulation cycle.");
-            console.log("[Monitor] END (Early exit due to fetch failure)");
-            return;
-        }
-
-        // Simulate using estimateGas - we won't get amountOut here
-        const simulateAmountWeth = ethers.parseUnits("0.001", WETH_DECIMALS); // Keep it small
-        console.log(`  [Monitor] Simulating Quoter calls via estimateGas using ${ethers.formatUnits(simulateAmountWeth, WETH_DECIMALS)} WETH...`);
-        const quotePromises = [
-            simulateSwap("Pool A", WETH_ADDRESS, USDC_ADDRESS, simulateAmountWeth, POOL_A_FEE_BPS, quoterContract),
-            simulateSwap("Pool B", WETH_ADDRESS, USDC_ADDRESS, simulateAmountWeth, POOL_B_FEE_BPS, quoterContract)
-        ];
-        // Result is now [true/false, true/false] indicating success/failure
-        const [simASuccess, simBSuccess] = await Promise.all(quotePromises);
-        console.log(`  [Monitor] Quoter simulations results. Sim A Success: ${simASuccess}, Sim B Success: ${simBSuccess}`);
-
-        // If BOTH simulations succeeded, we assume pools are usable and proceed to attempt the actual flash swap arb
-        // We don't have exact prices from the quote anymore, so we skip that check for now
-        if (simASuccess && simBSuccess) {
-             console.log("  [Monitor] Both Quoter simulations succeeded via estimateGas. Proceeding to attemptArbitrage.");
-             // We need a placeholder or simplified 'opportunity' struct as we didn't calculate price/profit
-             // We'll just try one direction for now: Borrow WETH from Pool A (0.05%)
-             // IN A REAL BOT: You'd need a different price discovery mechanism if Quoter doesn't return amountOut
-             const pseudoOpportunity = {
-                 poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: 0 }, // Price unknown
-                 poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: 0 }, // Price unknown
-                 startPool: "A", // Arbitrarily try starting with Pool A (Sell on A, Buy on B)
-                 borrowTokenSymbol: "WETH",
-                 estimatedProfitUsd: 999 // Assume profitable for debug
-             };
-            await attemptArbitrage(pseudoOpportunity); // Call attemptArbitrage
+            await attemptArbitrage(pseudoOpportunity); // Call simplified attemptArbitrage
 
         } else {
              console.log("  [Monitor] One or both Quoter simulations failed. Skipping arbitrage attempt.");
@@ -383,6 +247,7 @@ async function monitorPools() {
         console.log(`[Monitor] END - ${new Date().toISOString()}`);
     }
 } // <<< Closing brace for monitorPools function
+
 
 // --- Start the Bot ---
 (async () => {
