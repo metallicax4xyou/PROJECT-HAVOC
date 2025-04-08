@@ -297,15 +297,19 @@ async function monitorPools() {
     }
 } // End monitorPools function
 
+// ... (monitorPools function definition ends here with its closing '}') ...
+
 // --- Start the Bot ---
 (async () => {
     console.log("\n>>> Entering startup async IIFE...");
     try {
+        // --- All the startup steps inside the try block ---
         console.log(">>> Checking signer balance (as connectivity test)...");
         const balance = await provider.getBalance(signer.address);
         console.log(`>>> Signer balance: ${ethers.formatEther(balance)} ETH`);
+
         console.log(">>> Attempting to fetch contract owner...");
-        const contractOwner = await flashSwapContract.owner();
+        const contractOwner = await flashSwapContract.owner(); // Uses the full ABI now
         console.log(`>>> Successfully fetched owner: ${contractOwner}`);
         if (contractOwner.toLowerCase() === signer.address.toLowerCase()) {
              console.log(`Signer matches contract owner. 'onlyOwner' calls should succeed.\n`);
@@ -319,12 +323,12 @@ async function monitorPools() {
         setInterval(monitorPools, POLLING_INTERVAL_MS);
         console.log(`\nMonitoring started. Will check every ${POLLING_INTERVAL_MS / 1000} seconds.`);
 
-    } catch (initError) {
+    } catch (initError) { // <<< Make sure this CATCH block exists
         console.error("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         console.error("Initialization Error / Startup Error:");
         console.error("Check RPC connection, ABIs, Private Key, and Initial Contract Calls.");
         console.error(initError);
         console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         process.exit(1);
-    }
-})();
+    } // <<< Make sure this brace closing the CATCH block exists
+})(); // <<< Make sure this final parenthesis and semicolon exist
