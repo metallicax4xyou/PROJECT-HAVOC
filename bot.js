@@ -36,11 +36,9 @@ const IUniswapV3PoolABI = [
 ];
 
 // --- MODIFIED: Simplified IQuoterV2ABI - Only expecting amountOut ---
-const IQuoterV2ABI = [
+ const IQuoterV2ABI = [
     "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external view returns (uint256 amountOut)"
-    // Removed other return values for debugging decoding
 ];
-
 
 // --- Bot Settings ---
 const POLLING_INTERVAL_MS = 10000;
