@@ -35,9 +35,25 @@ const IUniswapV3PoolABI = [
     "function liquidity() external view returns (uint128)"
 ];
 
-// --- MODIFIED: IQuoterV2ABI with Individual Parameters ---
+// --- Use the Full QuoterV2 ABI You Provided ---
 const IQuoterV2ABI = [
-    "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external view returns (uint256 amountOut, uint160 sqrtPriceNextX96, uint32 ticksCrossed, uint256 gasEstimate)"
+    {
+        "type": "constructor", "inputs": [ { "name": "_factory", "type": "address", "internalType": "address" }, { "name": "_WETH9", "type": "address", "internalType": "address" } ], "stateMutability": "nonpayable"
+    }, {
+        "name": "WETH9", "type": "function", "inputs": [], "outputs": [ { "name": "", "type": "address", "internalType": "address" } ], "stateMutability": "view"
+    }, {
+        "name": "factory", "type": "function", "inputs": [], "outputs": [ { "name": "", "type": "address", "internalType": "address" } ], "stateMutability": "view"
+    }, {
+        "name": "quoteExactInput", "type": "function", "inputs": [ { "name": "path", "type": "bytes", "internalType": "bytes" }, { "name": "amountIn", "type": "uint256", "internalType": "uint256" } ], "outputs": [ { "name": "amountOut", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96AfterList", "type": "uint160[]", "internalType": "uint160[]" }, { "name": "initializedTicksCrossedList", "type": "uint32[]", "internalType": "uint32[]" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable"
+    }, {
+        "name": "quoteExactInputSingle", "type": "function", "inputs": [ { "name": "params", "type": "tuple", "components": [ { "name": "tokenIn", "type": "address", "internalType": "address" }, { "name": "tokenOut", "type": "address", "internalType": "address" }, { "name": "amountIn", "type": "uint256", "internalType": "uint256" }, { "name": "fee", "type": "uint24", "internalType": "uint24" }, { "name": "sqrtPriceLimitX96", "type": "uint160", "internalType": "uint160" } ], "internalType": "struct IQuoterV2.QuoteExactInputSingleParams" } ], "outputs": [ { "name": "amountOut", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96After", "type": "uint160", "internalType": "uint160" }, { "name": "initializedTicksCrossed", "type": "uint32", "internalType": "uint32" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable"
+    }, {
+        "name": "quoteExactOutput", "type": "function", "inputs": [ { "name": "path", "type": "bytes", "internalType": "bytes" }, { "name": "amountOut", "type": "uint256", "internalType": "uint256" } ], "outputs": [ { "name": "amountIn", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96AfterList", "type": "uint160[]", "internalType": "uint160[]" }, { "name": "initializedTicksCrossedList", "type": "uint32[]", "internalType": "uint32[]" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable"
+    }, {
+        "name": "quoteExactOutputSingle", "type": "function", "inputs": [ { "name": "params", "type": "tuple", "components": [ { "name": "tokenIn", "type": "address", "internalType": "address" }, { "name": "tokenOut", "type": "address", "internalType": "address" }, { "name": "amount", "type": "uint256", "internalType": "uint256" }, { "name": "fee", "type": "uint24", "internalType": "uint24" }, { "name": "sqrtPriceLimitX96", "type": "uint160", "internalType": "uint160" } ], "internalType": "struct IQuoterV2.QuoteExactOutputSingleParams" } ], "outputs": [ { "name": "amountIn", "type": "uint256", "internalType": "uint256" }, { "name": "sqrtPriceX96After", "type": "uint160", "internalType": "uint160" }, { "name": "initializedTicksCrossed", "type": "uint32", "internalType": "uint32" }, { "name": "gasEstimate", "type": "uint256", "internalType": "uint256" } ], "stateMutability": "nonpayable"
+    }, {
+        "name": "uniswapV3SwapCallback", "type": "function", "inputs": [ { "name": "amount0Delta", "type": "int256", "internalType": "int256" }, { "name": "amount1Delta", "type": "int256", "internalType": "int256" }, { "name": "path", "type": "bytes", "internalType": "bytes" } ], "outputs": [], "stateMutability": "view"
+    }
 ];
 
 // --- Bot Settings ---
@@ -83,39 +99,27 @@ console.log(` - Debug Borrow Amount: ${ethers.formatUnits(BORROW_AMOUNT_WETH_WEI
 console.log(` - Polling Interval: ${POLLING_INTERVAL_MS / 1000} seconds`);
 console.log(` - Profit Threshold: $${PROFIT_THRESHOLD_USD} USD (approx, before gas)`);
 
-// --- Helper Functions ---
-// MODIFIED: Handle full return tuple from Quoter
 async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, quoter) {
     const params = {
-        tokenIn: tokenIn,
-        tokenOut: tokenOut,
-        amountIn: amountInWei,
-        fee: feeBps,
-        sqrtPriceLimitX96: 0n
+        tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountInWei,
+        fee: feeBps, sqrtPriceLimitX96: 0n
     };
-    console.log(`  [Quoter Call - ${poolDesc}] Params:`, {
+    console.log(`  [Quoter Sim using estimateGas - ${poolDesc}] Params:`, {
         tokenIn: params.tokenIn, tokenOut: params.tokenOut, amountIn: params.amountIn.toString(),
         fee: params.fee, sqrtPriceLimitX96: params.sqrtPriceLimitX96.toString()
      }); // Log params
     try {
-                // Call with individual arguments - ORDER MATTERS!
-        const quoteResult = await quoter.quoteExactInputSingle.staticCall(
-            params.tokenIn,          // Argument 1: address tokenIn
-            params.tokenOut,         // Argument 2: address tokenOut
-            params.fee,              // Argument 3: uint24 fee
-            params.amountIn,         // Argument 4: uint256 amountIn
-            params.sqrtPriceLimitX96 // Argument 5: uint160 sqrtPriceLimitX96
-        );
-        // quoteResult is an array/tuple: [amountOut, sqrtPriceNextX96, ticksCrossed, gasEstimate]
-        const amountOut = quoteResult[0]; // Extract amountOut
-        console.log(`  [Quoter Call - ${poolDesc}] Success. AmountOut: ${amountOut.toString()}`);
-        return amountOut; // Return only amountOut for price calculation
+        // --- Use estimateGas for simulation because ABI says nonpayable ---
+        await quoter.quoteExactInputSingle.estimateGas(params);
+        console.log(`  [Quoter Sim using estimateGas - ${poolDesc}] SUCCESS (Simulation likely ok)`);
+        return true; // Indicate simulation didn't revert
     } catch (error) {
-        console.warn(`  [Quoter Call - ${poolDesc}] Failed (Fee: ${feeBps}bps): ${error.reason || error.message || error}`);
+        // If estimateGas fails, the simulation likely reverted internally
+        console.warn(`  [Quoter Sim using estimateGas - ${poolDesc}] FAILED (Fee: ${feeBps}bps): ${error.reason || error.message || error}`);
          if (error.data && error.data !== '0x') console.warn(`     Raw Revert Data: ${error.data}`);
-        return 0n;
+        return false; // Indicate simulation failed
     }
-} // <<< Closing brace for simulateSwap function
+}
 
 // (Keep existing attemptArbitrage function)
 async function attemptArbitrage(opportunity) {
@@ -238,59 +242,37 @@ async function monitorPools() {
             return;
         }
 
-        // --- MODIFIED: Simulate with 1 WETH ---
-        const simulateAmountWeth = ethers.parseUnits("1", WETH_DECIMALS); // Increased from 0.1
-        console.log(`  [Monitor] Simulating swaps with QuoterV2 using ${ethers.formatUnits(simulateAmountWeth, WETH_DECIMALS)} WETH...`);
+        // Simulate using estimateGas - we won't get amountOut here
+        const simulateAmountWeth = ethers.parseUnits("0.001", WETH_DECIMALS); // Keep it small
+        console.log(`  [Monitor] Simulating Quoter calls via estimateGas using ${ethers.formatUnits(simulateAmountWeth, WETH_DECIMALS)} WETH...`);
         const quotePromises = [
             simulateSwap("Pool A", WETH_ADDRESS, USDC_ADDRESS, simulateAmountWeth, POOL_A_FEE_BPS, quoterContract),
             simulateSwap("Pool B", WETH_ADDRESS, USDC_ADDRESS, simulateAmountWeth, POOL_B_FEE_BPS, quoterContract)
         ];
-        const [amountOutA, amountOutB] = await Promise.all(quotePromises);
-        // --- ADDED LOG ---
-        console.log(`  [Monitor] Quoter simulations results. AmountOutA: ${amountOutA.toString()}, AmountOutB: ${amountOutB.toString()}`);
+        // Result is now [true/false, true/false] indicating success/failure
+        const [simASuccess, simBSuccess] = await Promise.all(quotePromises);
+        console.log(`  [Monitor] Quoter simulations results. Sim A Success: ${simASuccess}, Sim B Success: ${simBSuccess}`);
 
-
-        if (amountOutA === 0n || amountOutB === 0n) {
-             console.log("  [Monitor] Failed to get valid quotes for one or both pools (AmountOut is 0). Skipping cycle.");
-             console.log("[Monitor] END (Early exit due to quote failure)");
-             return;
-        }
-
-        // --- Price calculation based on 1 WETH input ---
-        const priceA = parseFloat(ethers.formatUnits(amountOutA, USDC_DECIMALS)); // amountOut is directly the price per 1 WETH
-        const priceB = parseFloat(ethers.formatUnits(amountOutB, USDC_DECIMALS));
-        console.log(`  [Monitor] Pool A Price (USDC/WETH): ${priceA.toFixed(6)}`);
-        console.log(`  [Monitor] Pool B Price (USDC/WETH): ${priceB.toFixed(6)}`);
-
-        let opportunity = null;
-        let estimatedProfitUsd = 0; // Very rough estimate
-        const priceDiffThreshold = 0.0001; // Minimum difference ratio
-
-        if (Math.abs(priceA - priceB) / Math.max(priceA, priceB) > priceDiffThreshold) {
-             estimatedProfitUsd = Math.abs(priceA - priceB) * parseFloat(ethers.formatUnits(BORROW_AMOUNT_WETH_WEI, WETH_DECIMALS));
-             if (priceA > priceB) {
-                 console.log(`  [Monitor] Potential Opportunity: Sell WETH on A ($${priceA.toFixed(4)}), Buy on B ($${priceB.toFixed(4)})`);
-                 // opportunity = { /* ... setup struct ... */ }; // Correct structuring below
-             } else {
-                  console.log(`  [Monitor] Potential Opportunity: Sell WETH on B ($${priceB.toFixed(4)}), Buy on A ($${priceA.toFixed(4)})`);
-                 // opportunity = { /* ... setup struct ... */ }; // Correct structuring below
-             }
-             // Correctly structure the opportunity object before passing
-             opportunity = {
-                 poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: priceA },
-                 poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: priceB },
-                 startPool: priceA > priceB ? "A" : "B", // Borrow from the higher priced pool for this simple logic
+        // If BOTH simulations succeeded, we assume pools are usable and proceed to attempt the actual flash swap arb
+        // We don't have exact prices from the quote anymore, so we skip that check for now
+        if (simASuccess && simBSuccess) {
+             console.log("  [Monitor] Both Quoter simulations succeeded via estimateGas. Proceeding to attemptArbitrage.");
+             // We need a placeholder or simplified 'opportunity' struct as we didn't calculate price/profit
+             // We'll just try one direction for now: Borrow WETH from Pool A (0.05%)
+             // IN A REAL BOT: You'd need a different price discovery mechanism if Quoter doesn't return amountOut
+             const pseudoOpportunity = {
+                 poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: 0 }, // Price unknown
+                 poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: 0 }, // Price unknown
+                 startPool: "A", // Arbitrarily try starting with Pool A (Sell on A, Buy on B)
                  borrowTokenSymbol: "WETH",
-                 estimatedProfitUsd: estimatedProfitUsd
+                 estimatedProfitUsd: 999 // Assume profitable for debug
              };
+            await attemptArbitrage(pseudoOpportunity); // Call attemptArbitrage
 
-            if (estimatedProfitUsd > PROFIT_THRESHOLD_USD) {
-                await attemptArbitrage(opportunity); // Call the attempt function
-            } else {
-                console.log(`  [Monitor] Price difference detected, but estimated profit ($${estimatedProfitUsd.toFixed(4)}) below threshold ($${PROFIT_THRESHOLD_USD}).`);
-            }
         } else {
-            console.log("  [Monitor] No significant price difference detected.");
+             console.log("  [Monitor] One or both Quoter simulations failed. Skipping arbitrage attempt.");
+             console.log("[Monitor] END (Early exit due to quote simulation failure)");
+             // No return here, let finally block run
         }
 
     } catch (error) {
@@ -298,36 +280,4 @@ async function monitorPools() {
     } finally {
         console.log(`[Monitor] END - ${new Date().toISOString()}`);
     }
-} // <<< Closing brace for monitorPools function
-
-// --- Start the Bot ---
-(async () => {
-    console.log("\n>>> Entering startup async IIFE...");
-    try {
-        console.log(">>> Checking signer balance (as connectivity test)...");
-        const balance = await provider.getBalance(signer.address);
-        console.log(`>>> Signer balance: ${ethers.formatEther(balance)} ETH`);
-        console.log(">>> Attempting to fetch contract owner...");
-        const contractOwner = await flashSwapContract.owner();
-        console.log(`>>> Successfully fetched owner: ${contractOwner}`);
-        if (contractOwner.toLowerCase() === signer.address.toLowerCase()) {
-             console.log(`Signer matches contract owner. 'onlyOwner' calls should succeed.\n`);
-        } else { console.warn("Warning: Signer does not match owner!") }
-
-        console.log(">>> Attempting first monitorPools() run...");
-        await monitorPools();
-        console.log(">>> First monitorPools() run complete.");
-
-        console.log(">>> Setting up setInterval...");
-        setInterval(monitorPools, POLLING_INTERVAL_MS);
-        console.log(`\nMonitoring started. Will check every ${POLLING_INTERVAL_MS / 1000} seconds.`);
-
-    } catch (initError) {
-        console.error("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-        console.error("Initialization Error / Startup Error:");
-        console.error("Check RPC connection, ABIs, Private Key, and Initial Contract Calls.");
-        console.error(initError);
-        console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-        process.exit(1);
-    }
-})(); // <<< Closing characters for IIFE
+} // <<< Make sure this closing brace is present                 
