@@ -281,3 +281,117 @@ async function monitorPools() {
         console.log(`[Monitor] END - ${new Date().toISOString()}`);
     }
 } // <<< Make sure this closing brace is present                 
+
+// (Keep existing attemptArbitrage function)
+async function attemptArbitrage(opportunity) {
+    console.log("\n========= Arbitrage Opportunity Detected =========");
+    // ... (Rest of the function body is unchanged from previous versions) ...
+    console.log("========= Arbitrage Attempt Complete =========");
+ } // <<< Closing brace for attemptArbitrage function
+
+
+// --- Main Monitoring Loop ---
+// MODIFIED: Check simulateSwap success, use placeholder opportunity
+async function monitorPools() {
+    console.log(`\n[Monitor] START - ${new Date().toISOString()}`);
+    try {
+        console.log("  [Monitor] Fetching pool states...");
+        console.log(`  [Monitor] Calling Promise.all for pool states... (A: ${POOL_A_ADDRESS}, B: ${POOL_B_ADDRESS})`);
+        const poolStatePromises = [
+            poolAContract.slot0().catch(e => { console.error(`[Monitor] Error fetching slot0 for Pool A (${POOL_A_ADDRESS}): ${e.message || e}`); return null; }),
+            poolAContract.liquidity().catch(e => { console.error(`[Monitor] Error fetching liquidity for Pool A (${POOL_A_ADDRESS}): ${e.message || e}`); return null; }),
+            poolBContract.slot0().catch(e => { console.error(`[Monitor] Error fetching slot0 for Pool B (${POOL_B_ADDRESS}): ${e.message || e}`); return null; }),
+            poolBContract.liquidity().catch(e => { console.error(`[Monitor] Error fetching liquidity for Pool B (${POOL_B_ADDRESS}): ${e.message || e}`); return null; })
+        ];
+        const [slotA, liqA, slotB, liqB] = await Promise.all(poolStatePromises);
+        console.log("  [Monitor] Promise.all for pool states resolved.");
+
+        let poolAStateFetched = false; let poolBStateFetched = false;
+        if (slotA && liqA !== null) {
+             console.log(`  [Monitor] Pool A State: Tick=${slotA.tick}, Liquidity=${liqA.toString()}`);
+             if (liqA === 0n) console.warn("    [Monitor] WARNING: Pool A has ZERO active liquidity!");
+             poolAStateFetched = true;
+        } else { console.log(`  [Monitor] Pool A State: Failed to fetch.`); }
+        if (slotB && liqB !== null) {
+             console.log(`  [Monitor] Pool B State: Tick=${slotB.tick}, Liquidity=${liqB.toString()}`);
+              if (liqB === 0n) console.warn("    [Monitor] WARNING: Pool B has ZERO active liquidity!");
+              poolBStateFetched = true;
+        } else { console.log(`  [Monitor] Pool B State: Failed to fetch.`); }
+
+        if (!poolAStateFetched || !poolBStateFetched) {
+            console.log("  [Monitor] Could not fetch state for both pools. Skipping simulation cycle.");
+            console.log("[Monitor] END (Early exit due to fetch failure)");
+            return;
+        }
+
+        // Simulate using estimateGas - we won't get amountOut here
+        const simulateAmountWeth = ethers.parseUnits("0.001", WETH_DECIMALS); // Keep it small
+        console.log(`  [Monitor] Simulating Quoter calls via estimateGas using ${ethers.formatUnits(simulateAmountWeth, WETH_DECIMALS)} WETH...`);
+        const quotePromises = [
+            simulateSwap("Pool A", WETH_ADDRESS, USDC_ADDRESS, simulateAmountWeth, POOL_A_FEE_BPS, quoterContract),
+            simulateSwap("Pool B", WETH_ADDRESS, USDC_ADDRESS, simulateAmountWeth, POOL_B_FEE_BPS, quoterContract)
+        ];
+        // Result is now [true/false, true/false] indicating success/failure
+        const [simASuccess, simBSuccess] = await Promise.all(quotePromises);
+        console.log(`  [Monitor] Quoter simulations results. Sim A Success: ${simASuccess}, Sim B Success: ${simBSuccess}`);
+
+        // If BOTH simulations succeeded, we assume pools are usable and proceed to attempt the actual flash swap arb
+        // We don't have exact prices from the quote anymore, so we skip that check for now
+        if (simASuccess && simBSuccess) {
+             console.log("  [Monitor] Both Quoter simulations succeeded via estimateGas. Proceeding to attemptArbitrage.");
+             // We need a placeholder or simplified 'opportunity' struct as we didn't calculate price/profit
+             // We'll just try one direction for now: Borrow WETH from Pool A (0.05%)
+             // IN A REAL BOT: You'd need a different price discovery mechanism if Quoter doesn't return amountOut
+             const pseudoOpportunity = {
+                 poolA: { address: POOL_A_ADDRESS, feeBps: POOL_A_FEE_BPS, price: 0 }, // Price unknown
+                 poolB: { address: POOL_B_ADDRESS, feeBps: POOL_B_FEE_BPS, price: 0 }, // Price unknown
+                 startPool: "A", // Arbitrarily try starting with Pool A (Sell on A, Buy on B)
+                 borrowTokenSymbol: "WETH",
+                 estimatedProfitUsd: 999 // Assume profitable for debug
+             };
+            await attemptArbitrage(pseudoOpportunity); // Call attemptArbitrage
+
+        } else {
+             console.log("  [Monitor] One or both Quoter simulations failed. Skipping arbitrage attempt.");
+             console.log("[Monitor] END (Early exit due to quote simulation failure)");
+             // No return here, let finally block run
+        }
+
+    } catch (error) {
+        console.error(`[Monitor] Error in monitoring loop:`, error);
+    } finally {
+        console.log(`[Monitor] END - ${new Date().toISOString()}`);
+    }
+} // <<< Closing brace for monitorPools function
+
+// --- Start the Bot ---
+(async () => {
+    console.log("\n>>> Entering startup async IIFE...");
+    try {
+        console.log(">>> Checking signer balance (as connectivity test)...");
+        const balance = await provider.getBalance(signer.address);
+        console.log(`>>> Signer balance: ${ethers.formatEther(balance)} ETH`);
+        console.log(">>> Attempting to fetch contract owner...");
+        const contractOwner = await flashSwapContract.owner();
+        console.log(`>>> Successfully fetched owner: ${contractOwner}`);
+        if (contractOwner.toLowerCase() === signer.address.toLowerCase()) {
+             console.log(`Signer matches contract owner. 'onlyOwner' calls should succeed.\n`);
+        } else { console.warn("Warning: Signer does not match owner!") }
+
+        console.log(">>> Attempting first monitorPools() run...");
+        await monitorPools();
+        console.log(">>> First monitorPools() run complete.");
+
+        console.log(">>> Setting up setInterval...");
+        setInterval(monitorPools, POLLING_INTERVAL_MS);
+        console.log(`\nMonitoring started. Will check every ${POLLING_INTERVAL_MS / 1000} seconds.`);
+
+    } catch (initError) {
+        console.error("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        console.error("Initialization Error / Startup Error:");
+        console.error("Check RPC connection, ABIs, Private Key, and Initial Contract Calls.");
+        console.error(initError);
+        console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        process.exit(1);
+    }
+})(); // <<< Closing characters for IIFE
