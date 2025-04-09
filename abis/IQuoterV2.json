@@ -24,7 +24,6 @@
         "stateMutability": "nonpayable",
         "type": "function"
     },
-    // <<< --- ADD THIS FUNCTION DEFINITION --- >>>
     {
         "inputs": [
             { "internalType": "bytes", "name": "path", "type": "bytes" },
@@ -40,5 +39,4 @@
         "stateMutability": "nonpayable",
         "type": "function"
     }
-    // <<< --- END ADDED FUNCTION DEFINITION --- >>>
 ]
