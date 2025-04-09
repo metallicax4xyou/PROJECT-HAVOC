@@ -1,5 +1,5 @@
 // helpers/simulateSwap.js
-const { ethers } = require('ethers'); // For formatUnits if needed in logging
+const { ethers } = require('ethers'); // Keep ethers if needed for other helpers potentially
 
 // Simulates Quoter call via estimateGas
 async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, quoterContract) {
@@ -13,26 +13,24 @@ async function simulateSwap(poolDesc, tokenIn, tokenOut, amountInWei, feeBps, qu
         tokenOut: tokenOut,
         amountIn: amountInWei,
         fee: feeBps,
-        sqrtPriceLimitX96: 0n // 0n for BigInt zero literal in ethers v6
+        sqrtPriceLimitX96: 0n // Use BigInt literal 0n
     };
 
-    // Use minimal logging inside this helper
-    // console.log(`  [Quoter Sim - ${poolDesc}] Params:`, JSON.stringify(params, (key, value) =>
-    //     typeof value === 'bigint' ? value.toString() : value // Convert BigInts for logging
-    // ));
+    // console.log(`  [Quoter Sim DEBUG - ${poolDesc}] Params:`, JSON.stringify(params, (k, v) => typeof v === 'bigint' ? v.toString() : v));
 
     try {
-        // estimateGas does not return a value on success, it just doesn't throw.
-        // We need to provide overrides if the function is payable, but QuoterV2 isn't typically.
-        // We add a gasLimit override just in case, to prevent infinite loops on reverts.
-        await quoterContract.quoteExactInputSingle.estimateGas(params, { gasLimit: 1_000_000 }); // Set a reasonable gas limit for simulation
-        // console.log(`  [Quoter Sim - ${poolDesc}] SUCCESS (Simulation likely ok)`);
+        // estimateGas only succeeds or throws, doesn't return value.
+        await quoterContract.quoteExactInputSingle.estimateGas(params, { gasLimit: 1_000_000 }); // Reasonable limit for simulation
+        // <<< UPDATED SUCCESS LOG >>>
+        console.log(`  [Quoter Sim - ${poolDesc}] ✅ SUCCESS (estimateGas ok)`);
         return true; // Simulation succeeded
     } catch (error) {
-        // Log the error reason concisely
-        // console.error(`  [Quoter Sim - ${poolDesc}] FAILED: ${error.reason || error.message}`);
-        // Optional: More detailed logging for debugging specific simulation failures
-        // if (error.data) console.error(`    Data: ${error.data}`);
+        // <<< UPDATED FAILURE LOG >>>
+        // Log concise reason first
+        console.error(`  [Quoter Sim - ${poolDesc}] ❌ FAILED: ${error.reason || error.message}`);
+        // Optional: Log more details if available, useful for debugging reverts
+        // if (error.data && error.data !== '0x') console.error(`    Data: ${error.data}`);
+        // if (error.stack) console.error(`    Stack: ${error.stack}`); // Might be too verbose
         return false; // Simulation failed
     }
 }
