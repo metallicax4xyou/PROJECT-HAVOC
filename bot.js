@@ -137,24 +137,82 @@ async function attemptArbitrage(state) {
     console.log("========= Arbitrage Attempt Complete (Simplified) =========");
 }
 
-
-// --- Main Monitoring Loop ---
-async function monitorPools(state) {
+// --- Main Monitoring Loop --- CORRECTED using Promise.allSettled ---
+async function monitorPools(state) { // Accept state
     console.log(`\n[Monitor] START - ${new Date().toISOString()}`);
+
     const { poolAContract, poolBContract, quoterContract } = state.contracts;
     const { config } = state;
-     if (!poolAContract || !poolBContract || !quoterContract) { /* ... check ... */ return; }
+
+    if (!poolAContract || !poolBContract || !quoterContract) {
+        console.error("[Monitor] Contract instances not available in state. Skipping cycle.");
+        console.log(`[Monitor] END (Early exit due to uninitialized contracts) - ${new Date().toISOString()}`);
+        return;
+     }
+
     try {
         console.log("  [Monitor] Fetching pool states...");
-        const poolStatePromises = [ /* ... */ ]; // Fetch states
-        const [slotA, liqA, slotB, liqB] = await Promise.all(poolStatePromises);
-        console.log("  [Monitor] Promise.all for pool states resolved.");
+        console.log(`  [Monitor] Calling Promise.allSettled for pool states... (A: ${config.POOL_A_ADDRESS}, B: ${config.POOL_B_ADDRESS})`);
 
-        let poolAStateFetched = slotA && liqA !== null; let poolBStateFetched = slotB && liqB !== null;
-        if (slotA && liqA !== null) { /* log state A */ } else { /* log fail A */ }
-        if (slotB && liqB !== null) { /* log state B */ } else { /* log fail B */ }
-        if (!poolAStateFetched || !poolBStateFetched) { /* ... handle failure ... */ return; }
+        // Use Promise.allSettled to handle potential errors gracefully
+        const results = await Promise.allSettled([
+            poolAContract.slot0(),
+            poolAContract.liquidity(),
+            poolBContract.slot0(),
+            poolBContract.liquidity()
+        ]);
+        console.log("  [Monitor] Promise.allSettled for pool states finished.");
 
+        // Process results - Check status of each promise
+        const slotAResult = results[0];
+        const liqAResult = results[1];
+        const slotBResult = results[2];
+        const liqBResult = results[3];
+
+        let slotA = null, liqA = null, slotB = null, liqB = null;
+        let poolAStateFetched = false, poolBStateFetched = false;
+
+        if (slotAResult.status === 'fulfilled') {
+            slotA = slotAResult.value;
+        } else {
+            console.error(`[Monitor] Error fetching slot0 for Pool A: ${slotAResult.reason?.message || slotAResult.reason}`);
+        }
+        if (liqAResult.status === 'fulfilled') {
+            liqA = liqAResult.value;
+        } else {
+            console.error(`[Monitor] Error fetching liquidity for Pool A: ${liqAResult.reason?.message || liqAResult.reason}`);
+        }
+        if (slotBResult.status === 'fulfilled') {
+            slotB = slotBResult.value;
+        } else {
+            console.error(`[Monitor] Error fetching slot0 for Pool B: ${slotBResult.reason?.message || slotBResult.reason}`);
+        }
+        if (liqBResult.status === 'fulfilled') {
+            liqB = liqBResult.value;
+        } else {
+            console.error(`[Monitor] Error fetching liquidity for Pool B: ${liqBResult.reason?.message || liqBResult.reason}`);
+        }
+
+        // Log fetched states
+        if (slotA && liqA !== null) {
+             console.log(`  [Monitor] Pool A State: Tick=${slotA.tick}, Liquidity=${liqA.toString()}`);
+             if (liqA === 0n) console.warn("    [Monitor] WARNING: Pool A has ZERO active liquidity!");
+             poolAStateFetched = true;
+        } else { console.log(`  [Monitor] Pool A State: Failed to fetch completely.`); }
+        if (slotB && liqB !== null) {
+             console.log(`  [Monitor] Pool B State: Tick=${slotB.tick}, Liquidity=${liqB.toString()}`);
+              if (liqB === 0n) console.warn("    [Monitor] WARNING: Pool B has ZERO active liquidity!");
+              poolBStateFetched = true;
+        } else { console.log(`  [Monitor] Pool B State: Failed to fetch completely.`); }
+
+        // --- EXIT IF STATES NOT FETCHED ---
+        if (!poolAStateFetched || !poolBStateFetched) {
+            console.log("  [Monitor] Could not fetch complete state for both pools. Skipping simulation cycle.");
+            console.log("[Monitor] END (Early exit due to fetch failure)");
+            return; // Exit the function
+        }
+
+        // --- CONTINUE IF STATES FETCHED ---
         // Simulate using estimateGas
         const simulateAmountWeth = ethers.parseUnits("0.001", config.WETH_DECIMALS);
         console.log(`  [Monitor] Simulating Quoter calls via estimateGas using ${ethers.formatUnits(simulateAmountWeth, config.WETH_DECIMALS)} WETH...`);
@@ -171,26 +229,28 @@ async function monitorPools(state) {
              const tickA = Number(slotA.tick);
              const tickB = Number(slotB.tick);
              let opportunity = null;
-             const TICK_DIFF_THRESHOLD = 1; // Require > 1 tick difference
+             const TICK_DIFF_THRESHOLD = 1;
 
              console.log(`  [Monitor] Pool A Tick: ${tickA}, Pool B Tick: ${tickB}`);
 
              if (tickA > tickB + TICK_DIFF_THRESHOLD) {
                  console.log(`  [Monitor] Potential Opportunity: Pool A tick higher.`);
-                 opportunity = { startPool: "A", borrowTokenSymbol: "WETH", estimatedProfitUsd: 999 }; // Simplified
+                 opportunity = { startPool: "A", /* ... other fields ... */ };
              } else if (tickB > tickA + TICK_DIFF_THRESHOLD) {
                   console.log(`  [Monitor] Potential Opportunity: Pool B tick higher.`);
-                  opportunity = { startPool: "B", borrowTokenSymbol: "WETH", estimatedProfitUsd: 999 }; // Simplified
+                  opportunity = { startPool: "B", /* ... other fields ... */ };
              }
 
              if (opportunity) {
-                 // Check threshold (always passes with forced profit)
+                 // Add estimated profit logic later if needed
+                 opportunity.borrowTokenSymbol = "WETH"; // Assuming WETH for now
+                 opportunity.estimatedProfitUsd = 999; // Force trigger for debug
+
                  if (opportunity.estimatedProfitUsd > config.PROFIT_THRESHOLD_USD) {
                       console.log(`  [Monitor] Triggering attemptArbitrage with startPool: ${opportunity.startPool}`);
-                      state.opportunity = opportunity; // Add opportunity data to state
-                      await attemptArbitrage(state); // Pass updated state
+                      state.opportunity = opportunity;
+                      await attemptArbitrage(state);
                  } else {
-                      // Should not be hit with current logic
                       console.log(`  [Monitor] Price difference detected (by tick), but profit below threshold.`);
                  }
              } else {
@@ -199,6 +259,7 @@ async function monitorPools(state) {
         } else {
              console.log("  [Monitor] One or both Quoter simulations failed. Skipping arbitrage attempt.");
              console.log("[Monitor] END (Early exit due to quote simulation failure)");
+             // No return, let finally run
         }
 
     } catch (error) {
@@ -206,7 +267,7 @@ async function monitorPools(state) {
     } finally {
         console.log(`[Monitor] END - ${new Date().toISOString()}`);
     }
-}
+} // <<< Closing brace for monitorPools function
 
 // --- Start the Bot --- Only ONE of these IIFE blocks should exist ---
 (async () => {
