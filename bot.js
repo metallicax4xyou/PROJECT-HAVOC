@@ -494,4 +494,3 @@ async function monitorPools(state) { // Accept state
 
 
         // --- Startup Checks ---
-        console.log(">>> Checking signer balance (as connectivity test)...");
