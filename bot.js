@@ -493,4 +493,17 @@ async function monitorPools(state) { // Accept state
         console.log(` - Profit Threshold: $${PROFIT_THRESHOLD_USD} USD (approx, before gas)`);
 
 
-        // --- Startup Checks ---
+                // --- Startup Checks ---
+        console.log(">>> Checking signer balance (as connectivity test)..."); // Correctly quoted string
+        const balance = await provider.getBalance(signer.address);
+        console.log(`>>> Signer balance: ${ethers.formatEther(balance)} ETH`);
+        // ... (The owner check logic should follow here inside the try block) ...
+
+    } catch (initError) { // <<< The catch block needs its content
+        console.error("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        console.error("Initialization Error / Startup Error:");
+        // ... (rest of error logging) ...
+        process.exit(1);
+    } // <<< Closing brace for catch
+})(); // <<< Final closing elements
+        
