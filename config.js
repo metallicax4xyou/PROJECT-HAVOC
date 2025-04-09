@@ -13,7 +13,7 @@ if (!RPC_URL || !PRIVATE_KEY) {
 
 // --- Contract Addresses ---
 // Use ethers.getAddress to ensure checksum format
-const FLASH_SWAP_CONTRACT_ADDRESS = ethers.getAddress("0x7a00Ec5b64e662425Bbaa0dD78972570C326210f");
+const FLASH_SWAP_CONTRACT_ADDRESS = ethers.getAddress("0x675BCDd612973C75cA682f9B8b0e27032A4B3FB6");
 const WETH_ADDRESS = ethers.getAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1");
 const USDC_ADDRESS = ethers.getAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"); // Native USDC
 const QUOTER_V2_ADDRESS = ethers.getAddress("0x61ffe014ba17989e743c5f6d790181c0603c3996");
