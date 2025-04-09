@@ -6,7 +6,12 @@ const { ethers } = require("ethers");
 const RPC_URL = process.env.ARBITRUM_RPC_URL;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const ARBISCAN_API_KEY = process.env.ARBISCAN_API_KEY;
+const FLASH_SWAP_CONTRACT_ADDRESS_FROM_ENV = process.env.FLASH_SWAP_CONTRACT_ADDRESS;
 
+if (!FLASH_SWAP_CONTRACT_ADDRESS_FROM_ENV) {
+    throw new Error("FLASH_SWAP_CONTRACT_ADDRESS missing in .env file");
+}
+const FLASH_SWAP_CONTRACT_ADDRESS = ethers.getAddress(FLASH_SWAP_CONTRACT_ADDRESS_FROM_ENV);
 if (!RPC_URL || !PRIVATE_KEY) {
     throw new Error("Missing RPC_URL or PRIVATE_KEY in .env file");
 }
