@@ -20,8 +20,37 @@ const POOL_B_FEE_BPS = 3000; const POOL_B_FEE_PERCENT = 0.30;
 const WETH_DECIMALS = 18; const USDC_DECIMALS = 6;
 
 // --- ABIs ---
-const IUniswapV3PoolABI = [ /* ... (keep existing ABI) ... */ ];
-const IQuoterV2ABI = [ /* ... (keep existing ABI) ... */ ];
+const IUniswapV3PoolABI = [
+    "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
+    "function liquidity() external view returns (uint128)"
+];
+const IQuoterV2ABI = [ // Minimal ABI containing only quoteExactInputSingle
+    {
+        "inputs": [
+            {
+                "components": [
+                    { "internalType": "address", "name": "tokenIn", "type": "address" },
+                    { "internalType": "address", "name": "tokenOut", "type": "address" },
+                    { "internalType": "uint256", "name": "amountIn", "type": "uint256" },
+                    { "internalType": "uint24", "name": "fee", "type": "uint24" },
+                    { "internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160" }
+                ],
+                "internalType": "struct IQuoterV2.QuoteExactInputSingleParams",
+                "name": "params",
+                "type": "tuple"
+            }
+        ],
+        "name": "quoteExactInputSingle",
+        "outputs": [
+            { "internalType": "uint256", "name": "amountOut", "type": "uint256" },
+            { "internalType": "uint160", "name": "sqrtPriceX96After", "type": "uint160" },
+            { "internalType": "uint32", "name": "initializedTicksCrossed", "type": "uint32" },
+            { "internalType": "uint256", "name": "gasEstimate", "type": "uint256" }
+        ],
+        "stateMutability": "nonpayable", // Needs to be nonpayable or nonpayable for estimateGas
+        "type": "function"
+    }
+];
 
 // --- Bot Settings ---
 const POLLING_INTERVAL_MS = 10000;
