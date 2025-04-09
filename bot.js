@@ -125,35 +125,37 @@ async function attemptArbitrage(state) { // Accept state object
     console.log(`    -> Swap 1 on ${poolAForSwap} (Fee: ${feeAForSwap}bps)`);
     console.log(`    -> Swap 2 on ${poolBForSwap} (Fee: ${feeBForSwap}bps)`);
 
-    // --- Check Flash Loan Pool State ---
-    try { /* ... Keep pool state check ... */ } catch (err) { /* ... */ return; }
+        // --- Check Flash Loan Pool State ---
+    try { /* ... code to check pool state ... */ } catch (err) { /* ... */ return; }
 
-    // --- Construct Callback Params ---
-    const arbitrageParams = { tokenIntermediate: tokenIntermediateAddress, poolA: poolAForSwap, poolB: poolBForSwap, feeA: feeAForSwap, feeB: feeBForSwap, amountOutMinimum1: 0n, amountOutMinimum2: 0n };
-    let encodedParams;
-     try { /* ... Keep encoding logic ... */ } catch (encodeError) { /* ... */ return; }
-        // --- Construct Callback Params ---
-    const arbitrageParams = { /* ... define params ... */ };
-    let encodedParams; // Declare outside try block
 
+    // --- Construct Callback Params - SINGLE DECLARATION --- <<< KEEP THIS BLOCK
+    const arbitrageParams = {
+        tokenIntermediate: tokenIntermediateAddress, poolA: poolAForSwap, poolB: poolBForSwap,
+        feeA: feeAForSwap, feeB: feeBForSwap,
+        amountOutMinimum1: 0n, amountOutMinimum2: 0n
+    };
+    // --- End of single declaration ---
+
+    let encodedParams; // Declare outside try block <<< KEEP THIS LINE
     try {
-        console.log("  Attempting to encode parameters..."); // Add log
-        encodedParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        console.log("  Attempting to encode parameters...");
+        // Encode the 'arbitrageParams' object defined above
+        encodedParams = ethers.AbiCoder.defaultAbiCoder().encode( // <<< KEEP THIS ASSIGNMENT
             ['tuple(address tokenIntermediate, address poolA, address poolB, uint24 feeA, uint24 feeB, uint amountOutMinimum1, uint amountOutMinimum2)'],
-            [arbitrageParams]
+            [arbitrageParams] // Use the existing variable
         );
         console.log("  Callback Parameters (Decoded):", { /* Minimal logging */ });
-        // --- MOVED the encoded log inside the try block AFTER successful encoding ---
         console.log("  Callback Parameters (Encoded):", encodedParams.substring(0,100)+"...");
 
     } catch (encodeError) {
         console.error("  ❌ [Attempt] Error encoding arbitrage parameters:", encodeError);
-        console.log("========= Arbitrage Attempt Complete (Encode Error) ========="); // Add specific end log
+        console.log("========= Arbitrage Attempt Complete (Encode Error) =========");
         return; // Explicitly return on error
     }
 
     // --- initiateFlashSwap Args ---
-    const initiateFlashSwapArgs = [ flashLoanPoolAddress, borrowAmount0, borrowAmount1, encodedParams ]; // Use encodedParams
+    const initiateFlashSwapArgs = [ flashLoanPoolAddress, borrowAmount0, borrowAmount1, encodedParams ];
 
     // --- Simulation & Estimation ---
     console.log("  >>> Entering Simulation & Estimation block <<<");
