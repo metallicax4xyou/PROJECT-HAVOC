@@ -32,7 +32,7 @@ const USDC_DECIMALS = 6;
 
 // --- Bot Settings ---
 const POLLING_INTERVAL_MS = 10000; // 10 seconds
-const BORROW_AMOUNT_WETH_STR = "0.1"; // Borrow amount as string
+const BORROW_AMOUNT_WETH_STR = "0.01"; // Borrow amount as string
 const BORROW_AMOUNT_WETH_WEI = ethers.parseUnits(BORROW_AMOUNT_WETH_STR, WETH_DECIMALS);
 
 // Threshold for potential gross profit (in WETH Wei) BEFORE fees/slippage. TUNABLE.
