@@ -16,14 +16,12 @@ if (!RPC_URL || !PRIVATE_KEY) {
 // ** Read Flash Swap address from .env **
 const FLASH_SWAP_CONTRACT_ADDRESS_FROM_ENV = process.env.FLASH_SWAP_CONTRACT_ADDRESS;
 if (!FLASH_SWAP_CONTRACT_ADDRESS_FROM_ENV) {
-    // Throw an error if the variable is missing in the .env file
     throw new Error("FLASH_SWAP_CONTRACT_ADDRESS missing in .env file. Please add it.");
 }
-// Use ethers.getAddress to ensure checksum format and assign to the constant
 const FLASH_SWAP_CONTRACT_ADDRESS = ethers.getAddress(FLASH_SWAP_CONTRACT_ADDRESS_FROM_ENV);
 
 
-// Other addresses (assuming these are relatively stable)
+// Other addresses
 const WETH_ADDRESS = ethers.getAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1");
 const USDC_ADDRESS = ethers.getAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"); // Native USDC
 const QUOTER_V2_ADDRESS = ethers.getAddress("0x61ffe014ba17989e743c5f6d790181c0603c3996");
@@ -44,23 +42,31 @@ const USDC_DECIMALS = 6;
 
 // --- Bot Settings ---
 const POLLING_INTERVAL_MS = 10000; // 10 seconds
-const BORROW_AMOUNT_WETH_STR = "0.1"; // Borrow amount as string
+
+// Intended borrow amount for arbitrage execution
+const BORROW_AMOUNT_WETH_STR = "0.1";
 const BORROW_AMOUNT_WETH_WEI = ethers.parseUnits(BORROW_AMOUNT_WETH_STR, WETH_DECIMALS);
 
-// Threshold for potential gross profit (in WETH Wei) BEFORE fees/slippage. TUNABLE.
+// Rough profit threshold based on ticks (can be removed or refined)
 const MIN_POTENTIAL_GROSS_PROFIT_WETH_STR = "0.00005";
 const MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI = ethers.parseUnits(MIN_POTENTIAL_GROSS_PROFIT_WETH_STR, WETH_DECIMALS);
 
-// Simulation amount for Quoter checks
+// Simulation amount for basic Quoter health check (used in simulateSwap helper)
 const QUOTER_SIM_AMOUNT_WETH_STR = "0.001";
 const QUOTER_SIM_AMOUNT_WETH_WEI = ethers.parseUnits(QUOTER_SIM_AMOUNT_WETH_STR, WETH_DECIMALS);
+
+// <<< NEW: Amount for Multi-Quote Static Call Simulation in monitor.js >>>
+// Use a small amount unlikely to cause liquidity issues during quote simulation
+const MULTI_QUOTE_SIM_AMOUNT_WETH_STR = "0.0001";
+const MULTI_QUOTE_SIM_AMOUNT_WETH_WEI = ethers.parseUnits(MULTI_QUOTE_SIM_AMOUNT_WETH_STR, WETH_DECIMALS);
+
 
 // --- Export Config Object ---
 module.exports = {
     RPC_URL,
     PRIVATE_KEY,
     ARBISCAN_API_KEY,
-    FLASH_SWAP_CONTRACT_ADDRESS, // Export the constant derived from .env
+    FLASH_SWAP_CONTRACT_ADDRESS,
     WETH_ADDRESS,
     USDC_ADDRESS,
     QUOTER_V2_ADDRESS,
@@ -75,8 +81,10 @@ module.exports = {
     POLLING_INTERVAL_MS,
     BORROW_AMOUNT_WETH_STR,
     BORROW_AMOUNT_WETH_WEI,
-    MIN_POTENTIAL_GROSS_PROFIT_WETH_STR,
-    MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI,
-    QUOTER_SIM_AMOUNT_WETH_WEI,
-    QUOTER_SIM_AMOUNT_WETH_STR
+    MIN_POTENTIAL_GROSS_PROFIT_WETH_STR, // Keep or remove if unused
+    MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI, // Keep or remove if unused
+    QUOTER_SIM_AMOUNT_WETH_WEI, // Keep for basic health check if needed
+    QUOTER_SIM_AMOUNT_WETH_STR, // Keep for basic health check if needed
+    MULTI_QUOTE_SIM_AMOUNT_WETH_WEI, // <<< Add new export
+    MULTI_QUOTE_SIM_AMOUNT_WETH_STR, // <<< Add new export
 };
