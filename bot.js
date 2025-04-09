@@ -64,8 +64,52 @@ const MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI = ethers.parseUnits("0.00005", WETH_DE
 
 // --- Helper Functions ---
 
-// Fetch ABI function (keep existing)
-async function fetchABIFromArbiscan(contractAddress) { /* ... (keep existing code) ... */ }
+async function fetchABIFromArbiscan(contractAddress) {
+    console.log(`[ABI Fetch] Attempting to fetch ABI for ${contractAddress}...`);
+    if (!ARBISCAN_API_KEY) {
+        console.error("[ABI Fetch] ARBISCAN_API_KEY not found in .env file.");
+        throw new Error("ARBISCAN_API_KEY not found in .env file.");
+    }
+    const url = `https://api.arbiscan.io/api?module=contract&action=getabi&address=${contractAddress}&apikey=${ARBISCAN_API_KEY}`;
+    let responseDataResult = null; // Variable to store the result field
+
+    try {
+        const response = await axios.get(url);
+        responseDataResult = response.data.result; // Store result before parsing
+
+        if (response.data.status !== "1") {
+            console.error(`[ABI Fetch] Arbiscan API Error for ${contractAddress}: Status=${response.data.status}, Message=${response.data.message}, Result=${response.data.result}`);
+            throw new Error(`Arbiscan API Error: ${response.data.message} - ${response.data.result}`);
+        }
+
+        if (!responseDataResult || typeof responseDataResult !== 'string') {
+             console.error(`[ABI Fetch] Arbiscan returned status 1 but result is not a string or is empty for ${contractAddress}. Result:`, responseDataResult);
+             throw new Error(`Arbiscan returned status 1 but result is not a valid string for ${contractAddress}.`);
+        }
+
+        // Attempt to parse the ABI JSON string
+        const parsedABI = JSON.parse(responseDataResult);
+        console.log(`[ABI Fetch] Successfully fetched and parsed ABI for ${contractAddress}.`);
+        return parsedABI; // Return the parsed ABI object/array
+
+    } catch (err) {
+        console.error(`[ABI Fetch] Failed to fetch or parse ABI for ${contractAddress}.`);
+        // Log specific errors
+        if (err instanceof SyntaxError) {
+             console.error(`[ABI Fetch] JSON Parsing Error: ${err.message}`);
+             console.error(`[ABI Fetch] Raw Result from Arbiscan that failed parsing: ${responseDataResult}`); // Log the raw string
+        } else if (axios.isAxiosError(err)) {
+             console.error(`[ABI Fetch] Axios Error: ${err.message}`);
+             console.error(`[ABI Fetch] Axios Response Status: ${err.response?.status}`);
+             console.error(`[ABI Fetch] Axios Response Data:`, err.response?.data);
+        } else {
+             console.error(`[ABI Fetch] Unknown Error during fetch/parse: ${err.message}`);
+             if(err.stack) console.error(err.stack);
+        }
+        // Re-throw a consistent error message AFTER logging details
+        throw new Error(`Failed to get valid ABI for ${contractAddress}. Check logs above for details.`);
+    }
+}
 
 // Helper function for tick-to-price (rough estimation)
 // Price of token0 (WETH) in terms of token1 (USDC)
@@ -276,63 +320,55 @@ async function monitorPools(state) { // Accept state
     console.log("\n>>> Entering startup async IIFE...");
     try {
         // --- Setup Provider & Signer ---
-        // ... (keep existing setup) ...
+        // ... (existing code) ...
         provider = new ethers.JsonRpcProvider(config.RPC_URL);
         signer = new ethers.Wallet(config.PRIVATE_KEY, provider);
         console.log(`[Init] Signer Address: ${signer.address}`);
 
+
         // --- Fetch FlashSwap ABI Dynamically ---
-        const flashSwapABI_dynamic = await fetchABIFromArbiscan(config.FLASH_SWAP_CONTRACT_ADDRESS);
+        let flashSwapABI_dynamic; // Declare variable
+        try {
+             flashSwapABI_dynamic = await fetchABIFromArbiscan(config.FLASH_SWAP_CONTRACT_ADDRESS);
+             // *** ADDED CHECK ***
+             if (!flashSwapABI_dynamic || !Array.isArray(flashSwapABI_dynamic)) {
+                 console.error(`[Init] Fetched ABI for ${config.FLASH_SWAP_CONTRACT_ADDRESS} is invalid or not an array. ABI:`, flashSwapABI_dynamic);
+                 throw new Error(`Invalid ABI received for FlashSwap contract.`);
+             }
+             console.log(`[Init] Dynamic ABI for FlashSwap contract seems valid.`);
+        } catch (abiError) {
+             console.error(`[Init] CRITICAL: Could not fetch or validate FlashSwap ABI. Error: ${abiError.message}`);
+             throw abiError; // Re-throw to stop initialization
+        }
+
 
         // --- Instantiate Contracts ---
-        // ... (keep existing instantiation) ...
+        console.log("[Init] Instantiating Contracts...");
+        // Now we are more confident flashSwapABI_dynamic is valid here
         contracts.flashSwapContract = new ethers.Contract(config.FLASH_SWAP_CONTRACT_ADDRESS, flashSwapABI_dynamic, signer);
         contracts.quoterContract = new ethers.Contract(config.QUOTER_V2_ADDRESS, IQuoterV2ABI, provider);
         contracts.poolAContract = new ethers.Contract(config.POOL_A_ADDRESS, IUniswapV3PoolABI, provider);
         contracts.poolBContract = new ethers.Contract(config.POOL_B_ADDRESS, IUniswapV3PoolABI, provider);
         console.log("[Init] All Contract instances created successfully.");
 
-
         // --- Create the state object ---
-        const state = { provider, signer, contracts, config }; // Pass updated config
+        // ... (rest of the IIFE as before) ...
+        const state = { provider, signer, contracts, config };
 
-        // --- Initial Logs --- Check constants exist in config object
-        console.log(`Bot starting...`);
-        console.log(` - FlashSwap Contract: ${state.config.FLASH_SWAP_CONTRACT_ADDRESS}`);
-        console.log(` - Quoter V2 Contract: ${state.config.QUOTER_V2_ADDRESS}`);
-        console.log(` - Monitoring Pools:`);
-        console.log(`   - Pool A (WETH/USDC ${state.config.POOL_A_FEE_PERCENT}%): ${state.config.POOL_A_ADDRESS}`);
-        console.log(`   - Pool B (WETH/USDC ${state.config.POOL_B_FEE_PERCENT}%): ${state.config.POOL_B_ADDRESS}`);
-        console.log(` - Debug Borrow Amount: ${ethers.formatUnits(state.config.BORROW_AMOUNT_WETH_WEI, state.config.WETH_DECIMALS)} WETH`);
-        console.log(` - Polling Interval: ${state.config.POLLING_INTERVAL_MS / 1000} seconds`);
-        // console.log(` - Profit Threshold (USD - Removed): $${state.config.PROFIT_THRESHOLD_USD}`);
-        console.log(` - MIN Gross Profit Threshold: ${ethers.formatUnits(state.config.MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI, state.config.WETH_DECIMALS)} WETH (Pre-fees, Needs Tuning)`);
-
+        // --- Initial Logs ---
+        // ... (existing code) ...
 
         // --- Startup Checks ---
-        // ... (keep existing checks: balance, owner) ...
-         console.log(">>> Checking signer balance...");
-         const balance = await provider.getBalance(signer.address);
-         console.log(`>>> Signer balance: ${ethers.formatEther(balance)} ETH`);
-         console.log(">>> Attempting to fetch contract owner...");
-         if (!contracts.flashSwapContract.owner) { throw new Error("Fetched FlashSwap ABI does not contain 'owner' function."); }
-         const contractOwner = await contracts.flashSwapContract.owner();
-         console.log(`>>> Successfully fetched owner: ${contractOwner}`);
-         if (contractOwner.toLowerCase() === signer.address.toLowerCase()) { console.log(`Signer matches contract owner...\n`); }
-         else { console.warn("Warning: Signer does not match owner!") }
-
-
-        // --- Start Monitoring ---
-        console.log(">>> Attempting first monitorPools() run...");
-        await monitorPools(state); // Pass state
-        console.log(">>> First monitorPools() run complete.");
-        console.log(">>> Setting up setInterval...");
-        setInterval(() => monitorPools(state), state.config.POLLING_INTERVAL_MS); // Pass state & use config interval
-        console.log(`\nMonitoring started... Press Ctrl+C to stop.`);
+        // ... (existing code) ...
+        console.log(">>> Checking signer balance...");
+        const balance = await provider.getBalance(signer.address); // Line ~289
+        console.log(`>>> Signer balance: ${ethers.formatEther(balance)} ETH`);
+        // ... (rest of startup checks and monitoring start) ...
 
     } catch (initError) {
         console.error("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         console.error("Initialization Error / Startup Error:");
+        // Error should be more specific now if it came from ABI fetch/validation
         console.error(initError.stack || initError);
         console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         process.exit(1);
