@@ -18,12 +18,12 @@ const WETH_ADDRESS = ethers.getAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBa
 const USDC_ADDRESS = ethers.getAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"); // Native USDC
 const QUOTER_V2_ADDRESS = ethers.getAddress("0x61ffe014ba17989e743c5f6d790181c0603c3996");
 const POOL_A_ADDRESS = ethers.getAddress("0xc6962004f452be9203591991d15f6b388e09e8d0"); // 0.05%
-const POOL_B_ADDRESS = ethers.getAddress("0x17c14d2c404d167802b16c450d3c99f88f2c4f4d"); // 0.30%
+const POOL_B_ADDRESS = ethers.getAddress("0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"); // 0.01%
 
 // --- Pool Fees ---
 const POOL_A_FEE_BPS = 500;
 const POOL_A_FEE_PERCENT = POOL_A_FEE_BPS / 10000;
-const POOL_B_FEE_BPS = 3000;
+const POOL_B_FEE_BPS = 100;
 const POOL_B_FEE_PERCENT = POOL_B_FEE_BPS / 10000;
 
 // --- Token Decimals ---
