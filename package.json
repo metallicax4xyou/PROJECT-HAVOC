@@ -1,24 +1,29 @@
+// package.json
 {
-  "name": "arbitrum-flash",
+  "name": "arbitrum-flash-v23",
   "version": "1.0.0",
-  "description": "Experimental Arbitrage Bot targeting Uniswap V3 on Arbitrum One using flash loans. Includes an on-chain executor contract (Hardhat) and an off-chain monitor (Node.js). Private development. HIGH RISK.",
-  "main": "index.js",
+  "description": "Arbitrum Flash Swap Bot v23",
+  "main": "bot.js",
+  "type": "commonjs", // Or "module" if you prefer ES Modules imports everywhere
   "scripts": {
+    "start": "node bot.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "arbitrum",
+    "uniswap",
+    "flash swap",
+    "bot",
+    "ethers"
+  ],
+  "author": "Your Name",
   "license": "MIT",
-  "devDependencies": {
-    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
-    "@openzeppelin/contracts": "^3.4.0",
-    "@uniswap/v3-core": "^1.0.1",
-    "@uniswap/v3-periphery": "^1.4.4",
-    "dotenv": "^16.4.7",
-    "hardhat": "^2.22.19"
-  },
   "dependencies": {
-    "axios": "^1.8.4",
-    "ethers": "^6.13.5"
+    "axios": "^1.6.x", // Use appropriate version
+    "dotenv": "^16.x.x", // Use appropriate version
+    "ethers": "^6.10.x" // Use appropriate version
+  },
+  "engines": {
+    "node": ">=18.0.0" // Specify Node version if needed
   }
 }
