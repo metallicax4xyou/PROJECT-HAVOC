@@ -1,4 +1,5 @@
 // config.js
+// (Full File Content - Updated BORROW_AMOUNT_WETH_STR)
 require('dotenv').config();
 const { ethers } = require("ethers");
 
@@ -17,13 +18,13 @@ const FLASH_SWAP_CONTRACT_ADDRESS = ethers.getAddress("0x7a00Ec5b64e662425Bbaa0d
 const WETH_ADDRESS = ethers.getAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1");
 const USDC_ADDRESS = ethers.getAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"); // Native USDC
 const QUOTER_V2_ADDRESS = ethers.getAddress("0x61ffe014ba17989e743c5f6d790181c0603c3996");
-const POOL_A_ADDRESS = ethers.getAddress("0xc6962004f452be9203591991d15f6b388e09e8d0"); // 0.05%
-const POOL_B_ADDRESS = ethers.getAddress("0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"); // 0.01%
+const POOL_A_ADDRESS = ethers.getAddress("0xc6962004f452be9203591991d15f6b388e09e8d0"); // 0.05% (Pool A)
+const POOL_B_ADDRESS = ethers.getAddress("0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"); // 0.01% (Pool B)
 
 // --- Pool Fees ---
-const POOL_A_FEE_BPS = 500;
+const POOL_A_FEE_BPS = 500; // 0.05% (Fee for Pool A)
 const POOL_A_FEE_PERCENT = POOL_A_FEE_BPS / 10000;
-const POOL_B_FEE_BPS = 100;
+const POOL_B_FEE_BPS = 100; // 0.01% (Fee for Pool B)
 const POOL_B_FEE_PERCENT = POOL_B_FEE_BPS / 10000;
 
 // --- Token Decimals ---
@@ -32,14 +33,15 @@ const USDC_DECIMALS = 6;
 
 // --- Bot Settings ---
 const POLLING_INTERVAL_MS = 10000; // 10 seconds
-const BORROW_AMOUNT_WETH_STR = "0.01"; // Borrow amount as string
+const BORROW_AMOUNT_WETH_STR = "0.1"; // <<< CHANGED BACK TO 0.1 WETH
 const BORROW_AMOUNT_WETH_WEI = ethers.parseUnits(BORROW_AMOUNT_WETH_STR, WETH_DECIMALS);
 
 // Threshold for potential gross profit (in WETH Wei) BEFORE fees/slippage. TUNABLE.
-const MIN_POTENTIAL_GROSS_PROFIT_WETH_STR = "0.00005"; // Example: ~0.1 USD if WETH is $2000
+// Note: This threshold is now less critical as we do full simulation first
+const MIN_POTENTIAL_GROSS_PROFIT_WETH_STR = "0.00005";
 const MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI = ethers.parseUnits(MIN_POTENTIAL_GROSS_PROFIT_WETH_STR, WETH_DECIMALS);
 
-// Simulation amount for Quoter checks
+// Simulation amount for any remaining Quoter estimateGas checks (if we added them back)
 const QUOTER_SIM_AMOUNT_WETH_STR = "0.001";
 const QUOTER_SIM_AMOUNT_WETH_WEI = ethers.parseUnits(QUOTER_SIM_AMOUNT_WETH_STR, WETH_DECIMALS);
 
@@ -63,8 +65,8 @@ module.exports = {
     POLLING_INTERVAL_MS,
     BORROW_AMOUNT_WETH_STR,
     BORROW_AMOUNT_WETH_WEI,
-    MIN_POTENTIAL_GROSS_PROFIT_WETH_STR,
-    MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI,
+    MIN_POTENTIAL_GROSS_PROFIT_WETH_STR, // Still exported, though less used
+    MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI, // Still exported
     QUOTER_SIM_AMOUNT_WETH_WEI,
     QUOTER_SIM_AMOUNT_WETH_STR
 };
