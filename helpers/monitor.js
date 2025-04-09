@@ -1,32 +1,23 @@
-// helpers/monitor.js
+// helpers/monitor.js - Updated with Refined Profit Check
 const { ethers } = require('ethers');
-const { simulateSwap } = require('./simulateSwap'); // Adjust path as needed
-const { attemptArbitrage } = require('./arbitrage'); // Adjust path as needed
-// No need to import config if passed via state
+// Removed: const { simulateSwap } = require('./simulateSwap'); // No longer needed here
+const { attemptArbitrage } = require('./arbitrage');
 
-// Helper function for tick-to-price (rough estimation) - Keep it here as it's specific to monitoring logic
-function tickToPrice(tick, token0Decimals, token1Decimals) {
-    try {
-        // price = 1.0001 ^ tick * (10**(token0Decimals) / 10**(token1Decimals))
-        const priceRatio = Math.pow(1.0001, Number(tick)); // Ensure tick is a number
-        const decimalAdjustment = Math.pow(10, token0Decimals - token1Decimals);
-        // Handle potential NaN or Infinity results from extreme tick values
-        const price = priceRatio * decimalAdjustment;
-        return isFinite(price) ? price : 0;
-    } catch (e) {
-        console.warn(`[Helper] Error calculating tickToPrice for tick ${tick}: ${e.message}`);
-        return 0; // Return 0 on error
-    }
+// Flash loan fee calculation helper (Uniswap V3 fee is same as pool fee)
+function calculateFlashLoanFee(amount, feeBps) {
+    // Use BigInt math for precision
+    const feeBpsBigInt = BigInt(feeBps);
+    const denominator = 1000000n; // Fee is in basis points (bps), need to divide by 1M
+    return (amount * feeBpsBigInt) / denominator;
 }
 
 async function monitorPools(state) {
-    // Destructure required parts from state
     const { contracts, config } = state;
     const { poolAContract, poolBContract, quoterContract } = contracts;
 
     if (!poolAContract || !poolBContract || !quoterContract || !config) {
         console.error("[Monitor] Missing contracts or config in state. Skipping cycle.");
-        return; // Cannot proceed
+        return;
     }
 
     console.log(`\n[Monitor] ${new Date().toISOString()} - Checking Pools A & B...`);
@@ -35,13 +26,11 @@ async function monitorPools(state) {
         // Fetch pool states concurrently
         const results = await Promise.allSettled([
             poolAContract.slot0(),
-            // poolAContract.liquidity(), // Optional: Fetch liquidity if needed for checks
             poolBContract.slot0(),
-            // poolBContract.liquidity()  // Optional
         ]);
 
         const slotAResult = results[0];
-        const slotBResult = results[1]; // Adjust index if liquidity is fetched
+        const slotBResult = results[1];
 
         let slotA = null, slotB = null;
 
@@ -64,108 +53,156 @@ async function monitorPools(state) {
             return;
         }
 
-        // --- Opportunity Detection & Basic Profit Check ---
+        // --- Refined Opportunity Detection & Profit Simulation ---
         const tickA = Number(slotA.tick);
         const tickB = Number(slotB.tick);
-        const TICK_DIFF_THRESHOLD = 1; // Minimum tick difference
+        const TICK_DIFF_THRESHOLD = 1; // Still useful as an initial quick check
 
-        let potentialGrossProfitWei = 0n; // Use BigInt
         let startPoolId = null; // 'A' or 'B'
-        let proceedToAttempt = false;
+        let proceedToAttempt = false; // Flag to trigger attemptArbitrage
 
-        const priceA = tickToPrice(tickA, config.WETH_DECIMALS, config.USDC_DECIMALS);
-        const priceB = tickToPrice(tickB, config.WETH_DECIMALS, config.USDC_DECIMALS);
-        console.log(`  [Monitor] Approx Prices: A=${priceA.toFixed(config.USDC_DECIMALS)}, B=${priceB.toFixed(config.USDC_DECIMALS)} (WETH/USDC)`);
+        const amountToBorrow = config.BORROW_AMOUNT_WETH_WEI; // The amount we plan to flash loan
 
-        // Compare ticks to find potential direction
-        if (tickB > tickA + TICK_DIFF_THRESHOLD && priceA > 0 && priceB > 0) {
-            console.log("  [Monitor] Potential: WETH cheaper on A (Tick B > Tick A). Start Pool A.");
-            startPoolId = 'A';
-            const priceDiff = priceB - priceA;
-            potentialGrossProfitWei = calculatePotentialProfitWethWei(priceDiff, priceA, priceB, config);
+        // --- Path 1: Try Borrowing from Pool B (if WETH potentially cheaper on B) ---
+        if (tickA > tickB + TICK_DIFF_THRESHOLD) {
+            startPoolId = 'B'; // Set potential start pool
+            console.log("  [Monitor] Potential Path: Borrow WETH from B (0.30%), Swap B -> A.");
 
-        } else if (tickA > tickB + TICK_DIFF_THRESHOLD && priceA > 0 && priceB > 0) {
-            console.log("  [Monitor] Potential: WETH cheaper on B (Tick A > Tick B). Start Pool B.");
-            startPoolId = 'B';
-            const priceDiff = priceA - priceB;
-            potentialGrossProfitWei = calculatePotentialProfitWethWei(priceDiff, priceA, priceB, config);
-
-        } else {
-            console.log(`  [Monitor] No significant price difference detected (Ticks: A=${tickA}, B=${tickB}).`);
-        }
-
-        // Check threshold if a potential direction was found
-        if (startPoolId) {
-            const profitThreshold = config.MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI;
-            console.log(`  [Monitor] Potential Gross Profit (WETH Wei, pre-fees): ${potentialGrossProfitWei.toString()}`);
-            console.log(`  [Monitor] Profit Threshold (WETH Wei):                 ${profitThreshold.toString()}`);
-
-            if (potentialGrossProfitWei > profitThreshold) {
-                console.log("  [Monitor] ✅ Potential profit exceeds threshold. Proceeding to final checks.");
-                proceedToAttempt = true;
-            } else {
-                console.log("  [Monitor] ❌ Potential profit below threshold. Skipping.");
-            }
-        }
-
-        // --- Final Checks & Trigger Arbitrage ---
-        if (proceedToAttempt && startPoolId) {
-            // Optional: Final Quoter simulation check (adds safety, costs RPC call)
-            console.log(`  [Monitor] Performing final Quoter check...`);
-            const [simASuccess, simBSuccess] = await Promise.all([
-                 simulateSwap("Pool A", config.WETH_ADDRESS, config.USDC_ADDRESS, config.QUOTER_SIM_AMOUNT_WETH_WEI, config.POOL_A_FEE_BPS, quoterContract),
-                 simulateSwap("Pool B", config.WETH_ADDRESS, config.USDC_ADDRESS, config.QUOTER_SIM_AMOUNT_WETH_WEI, config.POOL_B_FEE_BPS, quoterContract)
-            ]);
-            console.log(`  [Monitor] Quoter sim results: A=${simASuccess}, B=${simBSuccess}`);
-
-            if (simASuccess && simBSuccess) {
-                console.log("  [Monitor] ✅ Quoter checks passed. Triggering attemptArbitrage.");
-                // Update state with the identified opportunity details
-                state.opportunity = {
-                    startPool: startPoolId, // 'A' or 'B'
-                    // Add any other details attemptArbitrage might need
+            try {
+                console.log(`  [Simulate B->A] 1. Quoting Swap B (0.30%): ${config.BORROW_AMOUNT_WETH_STR} WETH -> USDC...`);
+                const quote1Params = {
+                    tokenIn: config.WETH_ADDRESS,
+                    tokenOut: config.USDC_ADDRESS,
+                    amountIn: amountToBorrow,
+                    fee: config.POOL_B_FEE_BPS, // Fee for Swap 1 (Pool B)
+                    sqrtPriceLimitX96: 0n
                 };
-                await attemptArbitrage(state); // Pass the whole state object
-            } else {
-                 console.log("  [Monitor] ❌ Quoter simulation failed post-profit check. Skipping arbitrage attempt.");
+                // Use callStatic for read-only quote calls in ethers v6
+                const quote1Result = await quoterContract.quoteExactInputSingle.staticCall(quote1Params);
+                const amountOutUSDC = quote1Result.amountOut;
+                 console.log(`  [Simulate B->A]    -> Got ${ethers.formatUnits(amountOutUSDC, config.USDC_DECIMALS)} USDC`);
+
+                if (amountOutUSDC === 0n) throw new Error("Swap 1 simulation resulted in 0 USDC output.");
+
+                console.log(`  [Simulate B->A] 2. Quoting Swap A (0.05%): ${ethers.formatUnits(amountOutUSDC, config.USDC_DECIMALS)} USDC -> WETH...`);
+                const quote2Params = {
+                    tokenIn: config.USDC_ADDRESS,
+                    tokenOut: config.WETH_ADDRESS,
+                    amountIn: amountOutUSDC,
+                    fee: config.POOL_A_FEE_BPS, // Fee for Swap 2 (Pool A)
+                    sqrtPriceLimitX96: 0n
+                };
+                 const quote2Result = await quoterContract.quoteExactInputSingle.staticCall(quote2Params);
+                 const finalWETHAmount = quote2Result.amountOut;
+                 console.log(`  [Simulate B->A]    -> Got ${ethers.formatUnits(finalWETHAmount, config.WETH_DECIMALS)} WETH (final)`);
+
+                 if (finalWETHAmount === 0n) throw new Error("Swap 2 simulation resulted in 0 WETH output.");
+
+                 // 3. Calculate Repayment Amount (Borrow Amount + Flash Loan Fee for Pool B)
+                 const flashLoanFeeB = calculateFlashLoanFee(amountToBorrow, config.POOL_B_FEE_BPS);
+                 const requiredRepaymentB = amountToBorrow + flashLoanFeeB;
+                 console.log(`  [Simulate B->A] Flash Loan Fee (Pool B): ${ethers.formatUnits(flashLoanFeeB, config.WETH_DECIMALS)} WETH`);
+                 console.log(`  [Simulate B->A] Required Repayment:    ${ethers.formatUnits(requiredRepaymentB, config.WETH_DECIMALS)} WETH`);
+
+                 // 4. Compare Final Amount vs Repayment
+                 if (finalWETHAmount > requiredRepaymentB) {
+                     const profitWei = finalWETHAmount - requiredRepaymentB;
+                     console.log(`  [Monitor] ✅ PROFITABLE (Simulated)! Profit: ${ethers.formatUnits(profitWei, config.WETH_DECIMALS)} WETH`);
+                     proceedToAttempt = true;
+                 } else {
+                     console.log(`  [Monitor] ❌ NOT PROFITABLE (Simulated). Final WETH <= Repayment.`);
+                 }
+
+            } catch (error) {
+                console.error(`  [Monitor] Error simulating B->A path: ${error.reason || error.message}`);
+                // Optional: Log more details like error.data if available
+                // if (error.data) console.error(`    Data: ${error.data}`);
             }
+        }
+
+        // --- Path 2: Try Borrowing from Pool A (if WETH potentially cheaper on A) ---
+        else if (tickB > tickA + TICK_DIFF_THRESHOLD) {
+            startPoolId = 'A'; // Set potential start pool
+            console.log("  [Monitor] Potential Path: Borrow WETH from A (0.05%), Swap A -> B.");
+
+            try {
+                console.log(`  [Simulate A->B] 1. Quoting Swap A (0.05%): ${config.BORROW_AMOUNT_WETH_STR} WETH -> USDC...`);
+                 const quote1Params = {
+                     tokenIn: config.WETH_ADDRESS,
+                     tokenOut: config.USDC_ADDRESS,
+                     amountIn: amountToBorrow,
+                     fee: config.POOL_A_FEE_BPS, // Fee for Swap 1 (Pool A)
+                     sqrtPriceLimitX96: 0n
+                 };
+                 const quote1Result = await quoterContract.quoteExactInputSingle.staticCall(quote1Params);
+                 const amountOutUSDC = quote1Result.amountOut;
+                 console.log(`  [Simulate A->B]    -> Got ${ethers.formatUnits(amountOutUSDC, config.USDC_DECIMALS)} USDC`);
+
+                 if (amountOutUSDC === 0n) throw new Error("Swap 1 simulation resulted in 0 USDC output.");
+
+                 console.log(`  [Simulate A->B] 2. Quoting Swap B (0.30%): ${ethers.formatUnits(amountOutUSDC, config.USDC_DECIMALS)} USDC -> WETH...`);
+                 const quote2Params = {
+                     tokenIn: config.USDC_ADDRESS,
+                     tokenOut: config.WETH_ADDRESS,
+                     amountIn: amountOutUSDC,
+                     fee: config.POOL_B_FEE_BPS, // Fee for Swap 2 (Pool B)
+                     sqrtPriceLimitX96: 0n
+                 };
+                 const quote2Result = await quoterContract.quoteExactInputSingle.staticCall(quote2Params);
+                 const finalWETHAmount = quote2Result.amountOut;
+                 console.log(`  [Simulate A->B]    -> Got ${ethers.formatUnits(finalWETHAmount, config.WETH_DECIMALS)} WETH (final)`);
+
+                 if (finalWETHAmount === 0n) throw new Error("Swap 2 simulation resulted in 0 WETH output.");
+
+                 // 3. Calculate Repayment Amount (Borrow Amount + Flash Loan Fee for Pool A)
+                 const flashLoanFeeA = calculateFlashLoanFee(amountToBorrow, config.POOL_A_FEE_BPS);
+                 const requiredRepaymentA = amountToBorrow + flashLoanFeeA;
+                 console.log(`  [Simulate A->B] Flash Loan Fee (Pool A): ${ethers.formatUnits(flashLoanFeeA, config.WETH_DECIMALS)} WETH`);
+                 console.log(`  [Simulate A->B] Required Repayment:    ${ethers.formatUnits(requiredRepaymentA, config.WETH_DECIMALS)} WETH`);
+
+                 // 4. Compare Final Amount vs Repayment
+                 if (finalWETHAmount > requiredRepaymentA) {
+                    const profitWei = finalWETHAmount - requiredRepaymentA;
+                    console.log(`  [Monitor] ✅ PROFITABLE (Simulated)! Profit: ${ethers.formatUnits(profitWei, config.WETH_DECIMALS)} WETH`);
+                     proceedToAttempt = true;
+                 } else {
+                     console.log(`  [Monitor] ❌ NOT PROFITABLE (Simulated). Final WETH <= Repayment.`);
+                 }
+
+            } catch (error) {
+                 console.error(`  [Monitor] Error simulating A->B path: ${error.reason || error.message}`);
+                 // if (error.data) console.error(`    Data: ${error.data}`);
+            }
+        }
+
+        // --- If no significant tick difference ---
+        else {
+             console.log(`  [Monitor] No significant price difference detected (Ticks: A=${tickA}, B=${tickB}). Skipping simulation.`);
+        }
+
+
+        // --- Trigger Arbitrage Attempt IF Simulation Showed Profit ---
+        if (proceedToAttempt && startPoolId) {
+            console.log(`  [Monitor] Pre-simulation indicated profit for Start Pool ${startPoolId}. Triggering attemptArbitrage...`);
+            // Update state with the identified opportunity details
+            state.opportunity = {
+                startPool: startPoolId, // 'A' or 'B'
+                // Include profit estimate if needed by attemptArbitrage (optional)
+                // estimatedProfitWei: profitWei // Calculated in the simulation block above
+            };
+            // Now call the actual arbitrage attempt function which will perform its own simulation (staticCall)
+            await attemptArbitrage(state);
         } else if (startPoolId) {
-             console.log("  [Monitor] Not proceeding to attempt (reason logged above).");
+             // Logged reason above (simulation error or not profitable)
+             console.log(`  [Monitor] Pre-simulation did not indicate profit for Start Pool ${startPoolId}. Not attempting arbitrage.`);
         }
         // else: No opportunity found in the first place
 
     } catch (error) {
         console.error(`[Monitor] Error during monitoring cycle:`, error);
-        // Consider more specific error handling or logging if needed
     } finally {
          console.log(`[Monitor] ${new Date().toISOString()} - Cycle End.`);
     }
 }
-
-// Helper for profit calculation to keep monitorPools cleaner
-function calculatePotentialProfitWethWei(priceDiffUSDC_PerWETH, priceA, priceB, config) {
-    try {
-        // Calculate profit in USDC first for precision with USDC decimals
-        const priceDiffUSDC_Wei = ethers.parseUnits(priceDiffUSDC_PerWETH.toFixed(config.USDC_DECIMALS), config.USDC_DECIMALS);
-
-        // Potential Gross Profit (USDC Wei) = priceDiffUSDC_Wei * BORROW_AMOUNT_WETH (adjusting for WETH decimals)
-        const potentialGrossProfitUSDC_Wei = (priceDiffUSDC_Wei * config.BORROW_AMOUNT_WETH_WEI) / ethers.parseUnits("1", config.WETH_DECIMALS);
-
-        // Convert rough USDC profit back to WETH using average price for threshold check
-        const avgPrice = (priceA + priceB) / 2;
-        if (avgPrice <= 0) return 0n; // Avoid division by zero
-
-        const avgPrice_USDC_Wei = ethers.parseUnits(avgPrice.toFixed(config.USDC_DECIMALS), config.USDC_DECIMALS);
-        if (avgPrice_USDC_Wei === 0n) return 0n; // Avoid division by zero
-
-        const potentialGrossProfitWETH_Wei = (potentialGrossProfitUSDC_Wei * ethers.parseUnits("1", config.WETH_DECIMALS)) / avgPrice_USDC_Wei;
-        return potentialGrossProfitWETH_Wei;
-
-    } catch (calcError) {
-        console.warn(`[Monitor] Warning during profit calculation: ${calcError.message}`);
-        return 0n; // Return zero BigInt on error
-    }
-}
-
 
 module.exports = { monitorPools };
