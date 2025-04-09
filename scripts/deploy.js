@@ -1,104 +1,87 @@
 // scripts/deploy.js
-
-/**
- * Deploy script for FlashSwap.sol to Arbitrum One
- *
- * Usage: npx hardhat run scripts/deploy.js --network arbitrum
- * Requires: ARBISCAN_API_KEY and PRIVATE_KEY in .env for deployment & verification
- */
-
 const hre = require("hardhat");
-const { network } = require("hardhat"); // Import network
+const ethers = hre.ethers; // Use ethers from Hardhat Runtime Environment
 
-// Address for the Uniswap V3 SwapRouter on Arbitrum One
-const ARBITRUM_SWAP_ROUTER = "0xE592427A0AEce92De3Edee1F18E0157C05861564";
-// Define minimum balance required for deployment (e.g., 0.001 ETH)
-const MIN_BALANCE_FOR_DEPLOY = hre.ethers.parseEther("0.0005"); // Reduced slightly, adjust as needed
-// --- Suggestion #4: Confirmations ---
-const REQUIRED_CONFIRMATIONS = 2; // Increased from 1 for Arbitrum One
+// --- Configuration ---
+// Make sure this address is correct for the target network (Arbitrum One)
+const UNISWAP_V3_ROUTER_ADDRESS = "0xE592427A0AEce92De3Edee1F18E0157C05861564";
+const CONFIRMATIONS_TO_WAIT = 2; // Number of block confirmations to wait for
 
 async function main() {
-    // Ensure we are on the correct network
-    if (network.name !== "arbitrum") {
-        console.error("❌ This script is intended for the Arbitrum One network only.");
-        console.error(`❌ Current network: ${network.name}`);
-        process.exit(1);
+    console.log(`🚀 Deploying FlashSwap contract to ${hre.network.name}...`);
+
+    // --- Get Network and Signer Info ---
+    const [deployer] = await ethers.getSigners();
+    const network = await ethers.provider.getNetwork();
+    console.log(`Network: ${network.name} (Chain ID: ${network.chainId})`);
+    console.log(`Deployer Account: ${deployer.address}`);
+
+    try {
+        const balance = await ethers.provider.getBalance(deployer.address);
+        console.log(`Account Balance (${network.name} ETH): ${ethers.formatEther(balance)}`);
+        if (balance === 0n) {
+            console.warn("⚠️ Warning: Deployer account has zero balance.");
+            // Consider adding a check to stop deployment if balance is too low
+        }
+    } catch (error) {
+        console.error("❌ Error fetching deployer balance:", error);
+        // Decide if this should halt deployment
     }
 
-    console.log("🚀 Deploying FlashSwap contract to Arbitrum One...");
-    console.log(`Network: ${network.name} (Chain ID: ${network.config.chainId})`);
+    // --- Deployment ---
+    console.log(`Deploying contract with Uniswap V3 Router: ${UNISWAP_V3_ROUTER_ADDRESS}`);
 
-    const [deployer] = await hre.ethers.getSigners();
-    if (!deployer) {
-        throw new Error("❌ Cannot find deployer account. Check Hardhat config and .env file (PRIVATE_KEY).");
+    try {
+        // Get the contract factory
+        const FlashSwapFactory = await ethers.getContractFactory("FlashSwap");
+
+        // Start the deployment transaction
+        const flashSwapContract = await FlashSwapFactory.deploy(UNISWAP_V3_ROUTER_ADDRESS);
+
+        // --- Correct Way to Get Transaction and Wait ---
+        const deployTxResponse = flashSwapContract.deploymentTransaction(); // Get the transaction response object
+
+        if (!deployTxResponse) {
+             throw new Error("Deployment transaction response not found after deploy() call.");
+        }
+
+        console.log("⏳ Waiting for deployment transaction to be mined...");
+        console.log(`   Deployment Transaction Hash: ${deployTxResponse.hash}`);
+
+        // Call .wait() directly on the transaction response object
+        // This replaces the problematic provider.waitForTransaction call
+        console.log(`⏳ Waiting for ${CONFIRMATIONS_TO_WAIT} confirmations...`);
+        const deployReceipt = await deployTxResponse.wait(CONFIRMATIONS_TO_WAIT);
+
+        if (!deployReceipt) {
+            throw new Error(`Transaction receipt not found after waiting for ${CONFIRMATIONS_TO_WAIT} confirmations.`);
+        }
+
+        // Get the final deployed contract address AFTER waiting
+        const deployedAddress = await flashSwapContract.getAddress(); // Use getAddress()
+
+        console.log("----------------------------------------------------");
+        console.log(`✅ FlashSwap deployed successfully!`);
+        console.log(`   Contract Address: ${deployedAddress}`);
+        console.log(`   Transaction Hash: ${deployReceipt.hash}`);
+        console.log(`   Block Number: ${deployReceipt.blockNumber}`);
+        console.log(`   Gas Used: ${deployReceipt.gasUsed.toString()}`);
+        console.log("----------------------------------------------------");
+
+        // Optional: Verify on Etherscan/Arbiscan
+        // Add verification logic here if needed
+
+    } catch (error) {
+        console.error("\n❌ Deployment script failed:");
+        console.error(error);
+        process.exitCode = 1; // Set exit code to indicate failure
     }
-    console.log("Deployer Account:", deployer.address);
-
-    const balance = await hre.ethers.provider.getBalance(deployer.address);
-    console.log("Account Balance (Arbitrum ETH):", hre.ethers.formatEther(balance));
-    // --- Suggestion #1: Better Balance Check ---
-    if (balance < MIN_BALANCE_FOR_DEPLOY) {
-        console.warn(`⚠️ Low ETH balance (${hre.ethers.formatEther(balance)} ETH) on Arbitrum. Deployment might fail. Minimum recommended: ${hre.ethers.formatEther(MIN_BALANCE_FOR_DEPLOY)} ETH.`);
-        // Consider exiting if balance is extremely low:
-        // if (balance === 0n) { process.exit(1); }
-    }
-
-    // Get the contract factory
-    const FlashSwap = await hre.ethers.getContractFactory("FlashSwap");
-    console.log(`Deploying contract with Uniswap V3 Router: ${ARBITRUM_SWAP_ROUTER}`);
-
-    // Deploy the contract
-    const flashSwap = await FlashSwap.deploy(ARBITRUM_SWAP_ROUTER);
-
-    console.log("⏳ Waiting for deployment transaction to be mined...");
-
-    // --- Suggestion #2: Use waitForDeployment ---
-    await flashSwap.waitForDeployment(); // Waits for the contract to be deployed
-    const flashSwapAddress = await flashSwap.getAddress(); // Get address after deployment is confirmed
-
-    // Fetch the transaction receipt using the deployment transaction hash
-    const deployTxHash = flashSwap.deploymentTransaction()?.hash;
-    if (!deployTxHash) {
-        throw new Error("❌ Deployment transaction hash is missing.");
-    }
-    console.log(`   Deployment Transaction Hash: ${deployTxHash}`);
-    console.log(`⏳ Waiting for ${REQUIRED_CONFIRMATIONS} confirmations...`);
-    const receipt = await hre.ethers.provider.waitForTransaction(deployTxHash, REQUIRED_CONFIRMATIONS);
-
-    if (!receipt) {
-       throw new Error(`❌ Transaction receipt not found after ${REQUIRED_CONFIRMATIONS} confirmations.`);
-    }
-    if (receipt.status !== 1) {
-         console.error("❌ Deployment Transaction FAILED!");
-         console.error("   Receipt:", receipt);
-         process.exit(1);
-    }
-    // --- End change ---
-
-    console.log("✅ FlashSwap contract deployed successfully!");
-    console.log("   Contract Address:", flashSwapAddress);
-    console.log("   Transaction Hash:", receipt.hash);
-    console.log("   Confirmed Block:", receipt.blockNumber);
-    console.log("   Deployer:", deployer.address);
-    console.log("   Gas Used:", receipt.gasUsed.toString());
-
-    // --- Verification ---
-    const apiKey = process.env.ARBISCAN_API_KEY;
-    if (apiKey && apiKey.length > 0) {
-        console.log("\n🔍 Attempting contract verification on Arbiscan...");
-        console.log(`   Run manually if fails: npx hardhat verify --network ${network.name} ${flashSwapAddress} "${ARBITRUM_SWAP_ROUTER}"`);
-        console.log(`   Waiting 30 seconds for Arbiscan indexing...`);
-        await new Promise(resolve => setTimeout(resolve, 30000));
-
-        try {
-            await hre.run("verify:verify", { address: flashSwapAddress, constructorArguments: [ARBITRUM_SWAP_ROUTER] });
-            console.log("✅ Contract verified successfully on Arbiscan!");
-        } catch (error) { /* ... Verification error handling ... */ }
-    } else { /* ... Skip verification warning ... */ }
 }
 
+// We recommend this pattern to be able to use async/await everywhere
+// and properly handle errors.
 main().catch((error) => {
-    console.error("\n❌ Deployment script failed:");
+    console.error("❌ Unhandled error in deployment script:");
     console.error(error);
     process.exitCode = 1;
 });
