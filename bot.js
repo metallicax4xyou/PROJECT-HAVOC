@@ -132,10 +132,28 @@ async function attemptArbitrage(state) { // Accept state object
     const arbitrageParams = { tokenIntermediate: tokenIntermediateAddress, poolA: poolAForSwap, poolB: poolBForSwap, feeA: feeAForSwap, feeB: feeBForSwap, amountOutMinimum1: 0n, amountOutMinimum2: 0n };
     let encodedParams;
      try { /* ... Keep encoding logic ... */ } catch (encodeError) { /* ... */ return; }
-    console.log("  Callback Parameters (Encoded):", encodedParams.substring(0,100)+"...");
+        // --- Construct Callback Params ---
+    const arbitrageParams = { /* ... define params ... */ };
+    let encodedParams; // Declare outside try block
+
+    try {
+        console.log("  Attempting to encode parameters..."); // Add log
+        encodedParams = ethers.AbiCoder.defaultAbiCoder().encode(
+            ['tuple(address tokenIntermediate, address poolA, address poolB, uint24 feeA, uint24 feeB, uint amountOutMinimum1, uint amountOutMinimum2)'],
+            [arbitrageParams]
+        );
+        console.log("  Callback Parameters (Decoded):", { /* Minimal logging */ });
+        // --- MOVED the encoded log inside the try block AFTER successful encoding ---
+        console.log("  Callback Parameters (Encoded):", encodedParams.substring(0,100)+"...");
+
+    } catch (encodeError) {
+        console.error("  ❌ [Attempt] Error encoding arbitrage parameters:", encodeError);
+        console.log("========= Arbitrage Attempt Complete (Encode Error) ========="); // Add specific end log
+        return; // Explicitly return on error
+    }
 
     // --- initiateFlashSwap Args ---
-    const initiateFlashSwapArgs = [ flashLoanPoolAddress, borrowAmount0, borrowAmount1, encodedParams ];
+    const initiateFlashSwapArgs = [ flashLoanPoolAddress, borrowAmount0, borrowAmount1, encodedParams ]; // Use encodedParams
 
     // --- Simulation & Estimation ---
     console.log("  >>> Entering Simulation & Estimation block <<<");
