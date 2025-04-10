@@ -26,11 +26,11 @@ const WETH_ADDRESS = ethers.getAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBa
 const USDC_ADDRESS = ethers.getAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"); // Native USDC
 const QUOTER_V2_ADDRESS = ethers.getAddress("0x61ffe014ba17989e743c5f6d790181c0603c3996");
 
-// <<< REVERT TO ORIGINAL POOLS >>>
-const POOL_A_ADDRESS = ethers.getAddress("0xc6962004f452be9203591991d15f6b388e09e8d0"); // 0.05%
-const POOL_B_ADDRESS = ethers.getAddress("0x17c14d2c404d167802b16c450d3c99f88f2c4f4d"); // 0.30%
+// Current Pools (0.05% and 0.30%)
+const POOL_A_ADDRESS = ethers.getAddress("0xC6962004f452bE9203591991D15f6b388e09E8D0"); // 0.05%
+const POOL_B_ADDRESS = ethers.getAddress("0x17c14D2c404D167802b16C450d3c99F88F2c4F4d"); // 0.30%
 
-// <<< REVERT FEES >>>
+// --- Pool Fees --- (Matching the pools above)
 const POOL_A_FEE_BPS = 500; // 0.05%
 const POOL_A_FEE_PERCENT = POOL_A_FEE_BPS / 10000;
 const POOL_B_FEE_BPS = 3000; // 0.30%
@@ -47,18 +47,29 @@ const POLLING_INTERVAL_MS = 10000; // 10 seconds
 const BORROW_AMOUNT_WETH_STR = "0.1";
 const BORROW_AMOUNT_WETH_WEI = ethers.parseUnits(BORROW_AMOUNT_WETH_STR, WETH_DECIMALS);
 
-// Rough profit threshold based on ticks (can be removed or refined)
+// Rough profit threshold based on ticks (optional, currently not primary filter)
 const MIN_POTENTIAL_GROSS_PROFIT_WETH_STR = "0.00005";
 const MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI = ethers.parseUnits(MIN_POTENTIAL_GROSS_PROFIT_WETH_STR, WETH_DECIMALS);
 
-// Simulation amount for basic Quoter health check (used in simulateSwap helper)
-const QUOTER_SIM_AMOUNT_WETH_STR = "0.001";
-const QUOTER_SIM_AMOUNT_WETH_WEI = ethers.parseUnits(QUOTER_SIM_AMOUNT_WETH_STR, WETH_DECIMALS);
+// Simulation amount for basic Quoter health check (used in simulateSwap helper if needed)
+// const QUOTER_SIM_AMOUNT_WETH_STR = "0.001";
+// const QUOTER_SIM_AMOUNT_WETH_WEI = ethers.parseUnits(QUOTER_SIM_AMOUNT_WETH_STR, WETH_DECIMALS);
 
-// <<< NEW: Amount for Multi-Quote Static Call Simulation in monitor.js >>>
-// Use a small amount unlikely to cause liquidity issues during quote simulation
+// Amount for Multi-Quote Static Call Simulation in monitor.js
 const MULTI_QUOTE_SIM_AMOUNT_WETH_STR = "0.0001";
 const MULTI_QUOTE_SIM_AMOUNT_WETH_WEI = ethers.parseUnits(MULTI_QUOTE_SIM_AMOUNT_WETH_STR, WETH_DECIMALS);
+
+// <<< NEW: Tick Delta Warning Threshold >>>
+// Log if absolute tick difference is less than or equal to this value
+const TICK_DELTA_WARNING_THRESHOLD = 20; // Example: Log if ticks are within 20 of each other
+
+// <<< NEW: Minimum Net Profit Required (in WETH Wei) >>>
+// Set a minimum profit target AFTER estimated gas cost
+const MIN_NET_PROFIT_WEI = ethers.parseUnits("0.0001", WETH_DECIMALS); // Example: ~0.20 USD if WETH=$2k. TUNABLE.
+
+// <<< NEW: Gas Limit Estimate >>>
+// Placeholder for initiateFlashSwap - refine with fork testing later
+const GAS_LIMIT_ESTIMATE = 1_000_000n; // Use BigInt. TUNABLE placeholder.
 
 
 // --- Export Config Object ---
@@ -81,10 +92,10 @@ module.exports = {
     POLLING_INTERVAL_MS,
     BORROW_AMOUNT_WETH_STR,
     BORROW_AMOUNT_WETH_WEI,
-    MIN_POTENTIAL_GROSS_PROFIT_WETH_STR, // Keep or remove if unused
     MIN_POTENTIAL_GROSS_PROFIT_WETH_WEI, // Keep or remove if unused
-    QUOTER_SIM_AMOUNT_WETH_WEI, // Keep for basic health check if needed
-    QUOTER_SIM_AMOUNT_WETH_STR, // Keep for basic health check if needed
-    MULTI_QUOTE_SIM_AMOUNT_WETH_WEI, // <<< Add new export
-    MULTI_QUOTE_SIM_AMOUNT_WETH_STR, // <<< Add new export
+    MULTI_QUOTE_SIM_AMOUNT_WETH_WEI,
+    MULTI_QUOTE_SIM_AMOUNT_WETH_STR,
+    TICK_DELTA_WARNING_THRESHOLD,    // <<< Add new export
+    MIN_NET_PROFIT_WEI,              // <<< Add new export
+    GAS_LIMIT_ESTIMATE,              // <<< Add new export
 };
