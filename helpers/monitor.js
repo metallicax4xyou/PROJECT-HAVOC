@@ -1,120 +1,91 @@
 // helpers/monitor.js
-const { ethers } = require('ethers');
-const { attemptArbitrage } = require('./arbitrage');
+// ... (imports, helpers, state fetching, tick check logic) ...
 
-function calculateFlashFee(amountBorrowed, feeBps) { /* ... */ }
-function tickToPrice(tick, token0Decimals, token1Decimals) { /* ... */ }
-
-async function monitorPools(state) {
-    const { contracts, config } = state;
-    const { poolAContract, poolBContract, quoterContract } = contracts;
-
-    if (!poolAContract || !poolBContract || !quoterContract || !config) { return; }
-
-    const poolADesc = `Pool A (${config.POOL_A_ADDRESS} - ${config.POOL_A_FEE_BPS / 100}%)`;
-    const poolBDesc = `Pool B (${config.POOL_B_ADDRESS} - ${config.POOL_B_FEE_BPS / 100}%)`;
-    console.log(`\n[Monitor] ${new Date().toISOString()} - Checking ${poolADesc} and ${poolBDesc}...`);
-
-    try {
-        // Fetch pool states
-        console.log("  [Monitor] Fetching pool states...");
-        const results = await Promise.allSettled([
-            poolAContract.slot0(), poolAContract.liquidity(),
-            poolBContract.slot0(), poolBContract.liquidity()
-        ]);
-        console.log("  [Monitor] Pool state fetch complete.");
-
-        // Debug log results (Keep this - it worked)
-        console.log("  [DEBUG] Raw Promise.allSettled results:", JSON.stringify(results, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
-        console.log(`  [DEBUG] results array length: ${results?.length}`);
-        if (!Array.isArray(results) || results.length < 4) { return; }
-
-        // Process results safely (Keep this)
-        let slotA = null, liqA = 0n, slotB = null, liqB = 0n;
-        // ... (Assign results safely, checking for undefined results[i]) ...
-        if (results[0] && results[0].status === 'fulfilled') slotA = results[0].value; else console.error(/*...*/);
-        if (results[1] && results[1].status === 'fulfilled') liqA = BigInt(results[1].value); else console.error(/*...*/);
-        if (results[2] && results[2].status === 'fulfilled') slotB = results[2].value; else console.error(/*...*/);
-        if (results[3] && results[3].status === 'fulfilled') liqB = BigInt(results[3].value); else console.error(/*...*/);
+    console.log(`  [Monitor] Exiting Tick Check Block (startPoolId=${startPoolId}).`);
 
 
-        // Log states (Keep this)
-        console.log(`  [Monitor] ${poolADesc} State: Tick=${slotA?.tick}, Liquidity=${liqA.toString()}`);
-        console.log(`  [Monitor] ${poolBDesc} State: Tick=${slotB?.tick}, Liquidity=${liqB.toString()}`);
+    // --- Accurate Pre-Simulation ---
+    // --- RE-ENABLE SIMULATION BLOCK --- >>> Remove the /* and */ below
 
-        // Exit checks (Keep this)
-        if (!slotA || !slotB) { console.log("...Missing slot0..."); return; }
-        if (liqA === 0n || liqB === 0n) { console.log("...Zero liquidity..."); return;}
+    if (startPoolId && liqA > 0n && liqB > 0n) { // Check liquidity again just before sim
+         console.log(`  [Monitor] Performing multi-quote simulation (Sim Amount: ${config.MULTI_QUOTE_SIM_AMOUNT_WETH_STR} WETH)...`);
+         const intendedBorrowAmount = config.BORROW_AMOUNT_WETH_WEI;
+         const simAmountInInitial = config.MULTI_QUOTE_SIM_AMOUNT_WETH_WEI;
+         const tokenInInitial = config.WETH_ADDRESS;
+         const tokenIntermediate = config.USDC_ADDRESS;
+         const tokenOutFinal = config.WETH_ADDRESS;
 
+         // Calculate Repayment needed
+         const flashFee = calculateFlashFee(intendedBorrowAmount, flashLoanPoolFeeBps);
+         const requiredRepaymentAmount = intendedBorrowAmount + flashFee;
+         console.log(`    Sim: Intended Borrow: ${ethers.formatUnits(intendedBorrowAmount, config.WETH_DECIMALS)} WETH`);
+         console.log(`    Sim: Flash Fee Est:   ${ethers.formatUnits(flashFee, config.WETH_DECIMALS)} WETH (${flashLoanPoolFeeBps/100}%)`);
+         console.log(`    Sim: Repayment Req:   ${ethers.formatUnits(requiredRepaymentAmount, config.WETH_DECIMALS)} WETH`);
 
-        // --- Basic Opportunity Check via Ticks ---
-        console.log("  [Monitor] Entering Tick Check Block...");
-        // --- DECLARE VARIABLES CLOSER TO USE ---
-        let startPoolId = null; // <<< Declare immediately before use/assignment
-        let flashLoanPoolFeeBps = 0;
-        let swapPoolAddress = ethers.ZeroAddress;
-        let swapPoolFeeBps = 0;
-        // ---
+         // --- START Try Block for quoteExactInputSingle ---
+         try {
+             // Simulate Swap 1 (WETH -> USDC) using quoteExactInputSingle
+             const paramsSwap1 = {
+                 tokenIn: tokenInInitial, tokenOut: tokenIntermediate,
+                 amountIn: simAmountInInitial, fee: swapPoolFeeBps, // Uses fee of the swap pool
+                 sqrtPriceLimitX96: 0n
+             };
+             console.log(`    Sim: Swap 1 - Attempting staticCall (Single)... Pool: ${swapPoolAddress} Fee: ${swapPoolFeeBps}`);
+             const quoteResult1 = await quoterContract.quoteExactInputSingle.staticCall(paramsSwap1);
+             const simAmountIntermediateOut = quoteResult1.amountOut;
 
-        if (slotA && slotB) {
-            const tickA = Number(slotA.tick);
-            const tickB = Number(slotB.tick);
-            const TICK_DIFF_THRESHOLD = 1;
+             if (simAmountIntermediateOut === 0n) throw new Error("Swap 1 simulation resulted in 0 output.");
+             console.log(`    Sim: Swap 1 (WETH->USDC @ ${swapPoolFeeBps/100}%) Output: ${ethers.formatUnits(simAmountIntermediateOut, config.USDC_DECIMALS)} USDC`);
 
-            if (tickB > tickA + TICK_DIFF_THRESHOLD) {
-                startPoolId = 'A'; // Assign
-                flashLoanPoolFeeBps = config.POOL_A_FEE_BPS;
-                swapPoolAddress = config.POOL_B_ADDRESS;
-                swapPoolFeeBps = config.POOL_B_FEE_BPS;
-                console.log(`  [Monitor] Tick Check Result: Potential Start A`);
-            } else if (tickA > tickB + TICK_DIFF_THRESHOLD) {
-                startPoolId = 'B'; // Assign
-                flashLoanPoolFeeBps = config.POOL_B_FEE_BPS;
-                swapPoolAddress = config.POOL_A_ADDRESS;
-                swapPoolFeeBps = config.POOL_A_FEE_BPS;
-                console.log(`  [Monitor] Tick Check Result: Potential Start B`);
-            } else {
-                // startPoolId remains null
-                console.log(`  [Monitor] Tick Check Result: No significant tick difference.`);
-            }
-        } else {
-             // startPoolId remains null
-            console.log("  [Monitor] Tick Check Skipped (Error: slotA or slotB missing despite check).");
-        }
-        // Use the potentially assigned value
-        console.log(`  [Monitor] Exiting Tick Check Block (startPoolId=${startPoolId}).`);
+             // Simulate Swap 2 (USDC -> WETH) using quoteExactInputSingle
+             const paramsSwap2 = {
+                 tokenIn: tokenIntermediate, tokenOut: tokenOutFinal,
+                 amountIn: simAmountIntermediateOut, fee: swapPoolFeeBps, // Uses fee of the swap pool
+                 sqrtPriceLimitX96: 0n
+             };
+             console.log(`    Sim: Swap 2 - Attempting staticCall (Single)... Pool: ${swapPoolAddress} Fee: ${swapPoolFeeBps}`);
+             const quoteResult2 = await quoterContract.quoteExactInputSingle.staticCall(paramsSwap2);
+             const simFinalAmountOut = quoteResult2.amountOut;
 
+             if (simFinalAmountOut === 0n) throw new Error("Swap 2 simulation resulted in 0 output.");
+             console.log(`    Sim: Swap 2 (USDC->WETH @ ${swapPoolFeeBps/100}%) Output: ${ethers.formatUnits(simFinalAmountOut, config.WETH_DECIMALS)} WETH`);
 
-        // --- Accurate Pre-Simulation (Still Commented Out) ---
-        // Declare these closer to use too, although it matters less here
-        let proceedToAttempt = false;
-        let estimatedProfitWei = 0n;
-        /*
-        if (startPoolId && liqA > 0n && liqB > 0n) {
-           // ... Simulation logic ...
-           // if (profit > 0) proceedToAttempt = true;
-        } else if (startPoolId) { ... }
-        */
+             // --- Profit Check ---
+             let estimatedFinalAmountActual = 0n;
+             if (simAmountInInitial > 0n) {
+                 estimatedFinalAmountActual = (simFinalAmountOut * intendedBorrowAmount) / simAmountInInitial;
+             } else { console.warn("    Sim: simAmountInInitial is zero."); }
 
-        // --- Trigger Arbitrage Attempt ---
-        console.log("  [Monitor] Entering Trigger Block...");
-        if (proceedToAttempt && startPoolId) { // proceedToAttempt is false, startPoolId might be null or 'A'/'B'
-             console.log("  [Monitor] Conditions met. Triggering attemptArbitrage.");
-             state.opportunity = { startPool: startPoolId, profit: estimatedProfitWei };
-             await attemptArbitrage(state);
-        } else if (startPoolId) { // Check if startPoolId has a value ('A' or 'B')
-             console.log("  [Monitor] Not proceeding to attemptArbitrage (Simulation commented out or unprofitable).");
-        } else { // startPoolId is still null
-             console.log("  [Monitor] Not proceeding to attemptArbitrage (No opportunity found).");
-        }
-        console.log("  [Monitor] Exiting Trigger Block.");
+             console.log(`    Sim: Est. Final WETH (for ${config.BORROW_AMOUNT_WETH_STR} WETH borrow): ${ethers.formatUnits(estimatedFinalAmountActual, config.WETH_DECIMALS)}`);
+             console.log(`    Sim: Repayment Req:                       ${ethers.formatUnits(requiredRepaymentAmount, config.WETH_DECIMALS)}`);
 
+             if (estimatedFinalAmountActual > requiredRepaymentAmount) {
+                 estimatedProfitWei = estimatedFinalAmountActual - requiredRepaymentAmount;
+                 console.log(`  [Monitor] ✅ Pre-Sim SUCCESS: Est. Profit: ${ethers.formatUnits(estimatedProfitWei, config.WETH_DECIMALS)} WETH`);
+                 if (estimatedProfitWei > 0n) proceedToAttempt = true; // Set flag to trigger attemptArbitrage
+                 else console.log(`  [Monitor] ❌ Pre-Sim Result: Scaled profit zero/negative.`);
+             } else {
+                  console.log(`  [Monitor] ❌ Pre-Sim Result: Est. final amount less than repayment.`);
+             }
 
-    } catch (error) {
-        console.error(`[Monitor] CRITICAL Error during monitoring cycle:`, error);
-    } finally {
-         console.log(`[Monitor] ${new Date().toISOString()} - Cycle End.`);
+         } catch (error) { // Catch for quoteExactInputSingle block
+             console.error(`  [Monitor] ❌ Pre-Sim Error (quoteExactInputSingle): ${error.reason || error.message}`);
+             if(error.data) console.error(`      Revert Data: ${error.data}`);
+             if(error.info) console.error(`      Info: ${JSON.stringify(error.info)}`);
+         } // --- END Try Block ---
+
+    } else if (startPoolId) {
+        console.log(`  [Monitor] Skipping simulation due to zero liquidity (Error: Should have exited earlier).`);
     }
-}
 
-module.exports = { monitorPools };
+    // <<< --- END RE-ENABLE SIMULATION BLOCK ---
+
+
+    // --- Trigger Arbitrage Attempt --- (Keep this logic)
+    console.log("  [Monitor] Entering Trigger Block...");
+    // ... (trigger logic using proceedToAttempt) ...
+    console.log("  [Monitor] Exiting Trigger Block.");
+
+} catch (error) { /* ... outer catch ... */ }
+finally { /* ... outer finally ... */ }
+}
