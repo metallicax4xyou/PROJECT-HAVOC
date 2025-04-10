@@ -24,7 +24,9 @@ const FLASH_SWAP_CONTRACT_ADDRESS = ethers.getAddress(FLASH_SWAP_CONTRACT_ADDRES
 // Other addresses
 const WETH_ADDRESS = ethers.getAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1");
 const USDC_ADDRESS = ethers.getAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"); // Native USDC
-const QUOTER_V2_ADDRESS = ethers.getAddress("0x61ffe014ba17989e743c5f6d790181c0603c3996");
+
+// <<< UPDATED QUOTER ADDRESS TO V2 >>>
+const QUOTER_V2_ADDRESS = ethers.getAddress("0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"); // Uniswap V3 Quoter V2
 
 // Current Pools (0.05% and 0.30%)
 const POOL_A_ADDRESS = ethers.getAddress("0xC6962004f452bE9203591991D15f6b388e09E8D0"); // 0.05%
@@ -80,7 +82,7 @@ module.exports = {
     FLASH_SWAP_CONTRACT_ADDRESS,
     WETH_ADDRESS,
     USDC_ADDRESS,
-    QUOTER_V2_ADDRESS,
+    QUOTER_V2_ADDRESS, // Ensure this uses the updated value
     POOL_A_ADDRESS,
     POOL_B_ADDRESS,
     POOL_A_FEE_BPS,
