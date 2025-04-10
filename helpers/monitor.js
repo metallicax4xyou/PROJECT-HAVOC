@@ -24,42 +24,54 @@ async function monitorPools(state) {
         ]);
         console.log("  [Monitor] Pool state fetch complete.");
 
-        // <<< --- ADDED DEBUG LOG for results array --- >>>
-        console.log("  [DEBUG] Raw Promise.allSettled results:", JSON.stringify(results, null, 2));
-        // Log length as well
-        console.log(`  [DEBUG] results array length: ${results?.length}`);
-        // <<< --- END DEBUG LOG --- >>>
+        // <<< --- UPDATED DEBUG LOG with BigInt replacer --- >>>
+        console.log("  [DEBUG] Raw Promise.allSettled results:", JSON.stringify(results, (key, value) =>
+            typeof value === 'bigint'
+                ? value.toString() // Convert BigInts to strings
+                : value // Return other values unchanged
+        , 2)); // Indent for readability
+        // <<< --- END UPDATED DEBUG LOG --- >>>
 
-        // Check if results is actually an array with the expected length
-        if (!Array.isArray(results) || results.length < 4) {
-            console.error("  [Monitor] CRITICAL: Promise.allSettled did not return the expected array structure. Results:", results);
-            // Prevent accessing undefined elements
-             return; // Exit cycle if structure is wrong
-        }
+        console.log(`  [DEBUG] results array length: ${results?.length}`); // Keep this
 
+        // Check array structure (Keep this)
+        if (!Array.isArray(results) || results.length < 4) { /* ... error and return ... */ }
 
-        // Process results safely
+        // Process results safely (Keep this logic)
         let slotA = null, liqA = 0n, slotB = null, liqB = 0n;
-        // Access elements ONLY if results array is valid
-        const slotAResult = results[0];
-        const liqAResult = results[1];
-        const slotBResult = results[2];
-        const liqBResult = results[3];
+        const slotAResult = results[0]; const liqAResult = results[1];
+        const slotBResult = results[2]; const liqBResult = results[3];
 
-        // Add checks for undefined results before accessing .status
-        if (slotAResult && slotAResult.status === 'fulfilled') slotA = slotAResult.value;
-        else console.error(`[Monitor] Failed Fetch: Pool A slot0 - ${slotAResult?.reason?.message || slotAResult?.reason || 'Result undefined'}`);
-        if (liqAResult && liqAResult.status === 'fulfilled') liqA = liqAResult.value;
-        else console.error(`[Monitor] Failed Fetch: Pool A liquidity - ${liqAResult?.reason?.message || liqAResult?.reason || 'Result undefined'}`);
-        if (slotBResult && slotBResult.status === 'fulfilled') slotB = slotBResult.value;
-        else console.error(`[Monitor] Failed Fetch: Pool B slot0 - ${slotBResult?.reason?.message || slotBResult?.reason || 'Result undefined'}`);
-        if (liqBResult && liqBResult.status === 'fulfilled') liqB = liqBResult.value;
-        else console.error(`[Monitor] Failed Fetch: Pool B liquidity - ${liqBResult?.reason?.message || liqBResult?.reason || 'Result undefined'}`);
+        // Keep checks for undefined results before accessing .status
+        if (slotAResult && slotAResult.status === 'fulfilled') slotA = slotAResult.value; else console.error(/*...*/);
+        if (liqAResult && liqAResult.status === 'fulfilled') liqA = BigInt(liqAResult.value); else console.error(/*...*/); // Ensure liqA is BigInt
+        if (slotBResult && slotBResult.status === 'fulfilled') slotB = slotBResult.value; else console.error(/*...*/);
+        if (liqBResult && liqBResult.status === 'fulfilled') liqB = BigInt(liqBResult.value); else console.error(/*...*/); // Ensure liqB is BigInt
 
-
-        // Log states
+        // Log states (Keep this)
         console.log(`  [Monitor] ${poolADesc} State: Tick=${slotA?.tick}, Liquidity=${liqA.toString()}`);
-        // ... (rest of the logic remains the same, including commented out simulation) ...
+        // ...
+
+        // Exit checks (Keep this)
+        if (!slotA || !slotB) { /*...*/ }
+        if (liqA === 0n || liqB === 0n) { /*...*/ }
+
+        // --- Basic Opportunity Check via Ticks --- (Keep this, simulation still commented out)
+        console.log("  [Monitor] Entering Tick Check Block...");
+        // ... (tick check logic) ...
+        console.log(`  [Monitor] Exiting Tick Check Block (startPoolId=${startPoolId}).`);
+
+        // --- Accurate Pre-Simulation (Still Commented Out) ---
+        /*
+        if (startPoolId && liqA > 0n && liqB > 0n) {
+            // ... simulation logic ...
+        } else if (startPoolId) { ... }
+        */
+
+        // --- Trigger Arbitrage Attempt --- (Keep this)
+        console.log("  [Monitor] Entering Trigger Block...");
+        // ... (trigger logic) ...
+        console.log("  [Monitor] Exiting Trigger Block.");
 
 
     } catch (error) {
