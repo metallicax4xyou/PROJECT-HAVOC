@@ -1,92 +1,63 @@
-// helpers/monitor.js
+// helpers/contracts.js
 const { ethers } = require('ethers');
-const { attemptArbitrage } = require('./arbitrage');
+const config = require('../config'); // Adjust path if your structure differs
 
-// --- Helper Functions ---
-function calculateFlashFee(amountBorrowed, feeBps) { /* ... */ }
-function tickToPrice(tick, token0Decimals, token1Decimals) { /* ... */ }
-function createTimeout(ms, message = 'Operation timed out') {
-    return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms));
-}
-const QUOTE_TIMEOUT_MS = 5000;
-// <<< INCREASED FETCH TIMEOUT SIGNIFICANTLY >>>
-const FETCH_TIMEOUT_MS = 30000; // Try 30 seconds
+// Load static ABIs from the /abis directory
+const IUniswapV3PoolABI = require('../abis/IUniswapV3Pool.json');
+const IQuoterV2ABI = require('../abis/IQuoterV2.json'); // ABI includes quoteExactInputSingle and quoteExactInput
 
-// --- Main Monitoring Function ---
-async function monitorPools(state) {
-    // ... (state/contract checks) ...
-    const { contracts, config, provider } = state;
-    const { poolAContract, poolBContract, quoterContract } = contracts;
+/**
+ * Initializes and returns ethers.js contract instances.
+ * @param {ethers.Provider} provider - The ethers provider instance.
+ * @param {ethers.Signer} signer - The ethers signer instance (for sending transactions).
+ * @param {Array} flashSwapABI - The ABI for the dynamically fetched FlashSwap contract.
+ * @returns {object} An object containing the initialized contract instances.
+ * @throws {Error} If required inputs are missing or invalid.
+ */
+function initializeContracts(provider, signer, flashSwapABI) {
+    console.log("[Contracts] Initializing contract instances...");
 
-    const poolADesc = `Pool A (${config.POOL_A_ADDRESS} - ${config.POOL_A_FEE_BPS / 100}%)`;
-    const poolBDesc = `Pool B (${config.POOL_B_ADDRESS} - ${config.POOL_B_FEE_BPS / 100}%)`;
-    console.log(`\n[Monitor] ${new Date().toISOString()} - Checking ${poolADesc} and ${poolBDesc}...`);
-
-    let results = null; // Declare results outside try block
+    // Input validation
+    if (!provider) {
+        throw new Error("[Contracts] Provider is required for initialization.");
+    }
+    if (!signer) {
+        // Signer is needed for the FlashSwap contract which executes transactions
+        throw new Error("[Contracts] Signer is required for FlashSwap contract initialization.");
+    }
+    if (!flashSwapABI || !Array.isArray(flashSwapABI) || flashSwapABI.length === 0) {
+        // FlashSwap ABI is fetched dynamically, need to ensure it's valid
+        throw new Error("[Contracts] Valid FlashSwap ABI (flashSwapABI) is required for initialization.");
+    }
+    if (!IUniswapV3PoolABI || !IQuoterV2ABI) {
+        // Check that static ABIs loaded correctly
+        throw new Error("[Contracts] Failed to load static ABIs (Pool or Quoter).");
+    }
 
     try {
-        console.log("  [Monitor] Fetching pool states and fee data...");
-        const promisesToSettle = [
-            provider.getFeeData(), poolAContract.slot0(), poolAContract.liquidity(),
-            poolBContract.slot0(), poolBContract.liquidity()
-        ];
+        // Instantiate contracts
+        const contracts = {
+            // FlashSwap contract needs the signer to execute initiateFlashSwap
+            flashSwapContract: new ethers.Contract(config.FLASH_SWAP_CONTRACT_ADDRESS, flashSwapABI, signer),
 
-        // --- Improved Timeout Handling ---
-        try {
-            results = await Promise.race([ // Assign result here
-                Promise.allSettled(promisesToSettle),
-                createTimeout(FETCH_TIMEOUT_MS, `State/Fee fetching timed out after ${FETCH_TIMEOUT_MS}ms`)
-            ]);
-            console.log("  [Monitor] Fetch attempt finished (within timeout window).");
-        } catch (timeoutError) {
-            // This block executes ONLY if the createTimeout promise rejects first
-            console.error(`  [Monitor] ❌ FETCH TIMEOUT: ${timeoutError.message}`);
-            results = null; // Explicitly set results to null on timeout
-        }
-        // --- End Improved Timeout Handling ---
+            // Quoter and Pools are read-only, use provider
+            quoterContract: new ethers.Contract(config.QUOTER_V2_ADDRESS, IQuoterV2ABI, provider),
+            poolAContract: new ethers.Contract(config.POOL_A_ADDRESS, IUniswapV3PoolABI, provider),
+            poolBContract: new ethers.Contract(config.POOL_B_ADDRESS, IUniswapV3PoolABI, provider),
+        };
 
+        console.log("[Contracts] All contract instances created successfully.");
+        // Optional: Add checks to ensure methods exist on instances if needed
+        // if (typeof contracts.flashSwapContract.initiateFlashSwap !== 'function') { ... }
 
-        // Check if fetch succeeded (results is an array) or timed out (results is null)
-        if (!results || !Array.isArray(results) || results.length < 5) {
-             console.error("  [Monitor] Fetch results invalid or timeout occurred. Skipping rest of cycle.");
-             return; // Exit cycle
-        }
-        console.log("  [Monitor] Fetch results received successfully."); // Log success
-
-
-        // Process results (Now guaranteed that results is a valid array)
-        const feeDataResult = results[0]; /* ... other results ... */
-        let feeData = null; /* ... assign feeData ... */
-        if (!feeData || !feeData.maxFeePerGas || feeData.maxFeePerGas <= 0n) { return; }
-        const currentMaxFeePerGas = feeData.maxFeePerGas;
-        console.log(`  [Monitor] Fee Data OK: maxFeePerGas=${ethers.formatUnits(currentMaxFeePerGas, 'gwei')} Gwei`);
-
-        const estimatedGasCost = currentMaxFeePerGas * config.GAS_LIMIT_ESTIMATE; // Calculate gas cost early
-        console.log(`  [Gas] Estimated Tx Cost: ~${ethers.formatUnits(estimatedGasCost, 'ether')} ETH`);
-
-        let slotA = null, liqA = 0n, slotB = null, liqB = 0n;
-        // ... (Assign pool data results safely) ...
-        console.log(`  [Monitor] ${poolADesc} State: Tick=${slotA?.tick}, Liquidity=${liqA.toString()}`);
-        console.log(`  [Monitor] ${poolBDesc} State: Tick=${slotB?.tick}, Liquidity=${liqB.toString()}`);
-
-        // Exit checks
-        if (!slotA || !slotB || liqA === 0n || liqB === 0n) { return; }
-
-        // --- Basic Opportunity Check via Ticks ---
-        // ... (logic remains the same, including near-miss log) ...
-
-        // --- Accurate Pre-Simulation --- (Using BORROW_AMOUNT, Positional Args)
-        // ... (logic remains the same, including simulation with quote timeouts) ...
-
-        // --- Trigger Arbitrage Attempt ---
-        // ... (logic remains the same) ...
+        return contracts;
 
     } catch (error) {
-        // Catch unexpected errors *after* the fetch block
-        console.error(`[Monitor] CRITICAL Error during processing/simulation:`, error);
-    } finally {
-         console.log(`[Monitor] ${new Date().toISOString()} - Cycle End.`); // Should always run now
+        console.error("[Contracts] Error during contract instantiation:", error);
+        // Throw a more specific error to halt initialization if contracts fail
+        throw new Error(`Failed to initialize contracts: ${error.message}`);
     }
 }
 
-module.exports = { monitorPools };
+// Export using the object pattern for require destructuring
+module.exports = { initializeContracts };
