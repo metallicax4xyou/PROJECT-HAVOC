@@ -24,53 +24,89 @@ async function monitorPools(state) {
         ]);
         console.log("  [Monitor] Pool state fetch complete.");
 
-        // <<< --- UPDATED DEBUG LOG with BigInt replacer --- >>>
-        console.log("  [DEBUG] Raw Promise.allSettled results:", JSON.stringify(results, (key, value) =>
-            typeof value === 'bigint'
-                ? value.toString() // Convert BigInts to strings
-                : value // Return other values unchanged
-        , 2)); // Indent for readability
-        // <<< --- END UPDATED DEBUG LOG --- >>>
+        // Debug log results (Keep this - it worked)
+        console.log("  [DEBUG] Raw Promise.allSettled results:", JSON.stringify(results, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+        console.log(`  [DEBUG] results array length: ${results?.length}`);
+        if (!Array.isArray(results) || results.length < 4) { return; }
 
-        console.log(`  [DEBUG] results array length: ${results?.length}`); // Keep this
-
-        // Check array structure (Keep this)
-        if (!Array.isArray(results) || results.length < 4) { /* ... error and return ... */ }
-
-        // Process results safely (Keep this logic)
+        // Process results safely (Keep this)
         let slotA = null, liqA = 0n, slotB = null, liqB = 0n;
-        const slotAResult = results[0]; const liqAResult = results[1];
-        const slotBResult = results[2]; const liqBResult = results[3];
+        // ... (Assign results safely, checking for undefined results[i]) ...
+        if (results[0] && results[0].status === 'fulfilled') slotA = results[0].value; else console.error(/*...*/);
+        if (results[1] && results[1].status === 'fulfilled') liqA = BigInt(results[1].value); else console.error(/*...*/);
+        if (results[2] && results[2].status === 'fulfilled') slotB = results[2].value; else console.error(/*...*/);
+        if (results[3] && results[3].status === 'fulfilled') liqB = BigInt(results[3].value); else console.error(/*...*/);
 
-        // Keep checks for undefined results before accessing .status
-        if (slotAResult && slotAResult.status === 'fulfilled') slotA = slotAResult.value; else console.error(/*...*/);
-        if (liqAResult && liqAResult.status === 'fulfilled') liqA = BigInt(liqAResult.value); else console.error(/*...*/); // Ensure liqA is BigInt
-        if (slotBResult && slotBResult.status === 'fulfilled') slotB = slotBResult.value; else console.error(/*...*/);
-        if (liqBResult && liqBResult.status === 'fulfilled') liqB = BigInt(liqBResult.value); else console.error(/*...*/); // Ensure liqB is BigInt
 
         // Log states (Keep this)
         console.log(`  [Monitor] ${poolADesc} State: Tick=${slotA?.tick}, Liquidity=${liqA.toString()}`);
-        // ...
+        console.log(`  [Monitor] ${poolBDesc} State: Tick=${slotB?.tick}, Liquidity=${liqB.toString()}`);
 
         // Exit checks (Keep this)
-        if (!slotA || !slotB) { /*...*/ }
-        if (liqA === 0n || liqB === 0n) { /*...*/ }
+        if (!slotA || !slotB) { console.log("...Missing slot0..."); return; }
+        if (liqA === 0n || liqB === 0n) { console.log("...Zero liquidity..."); return;}
 
-        // --- Basic Opportunity Check via Ticks --- (Keep this, simulation still commented out)
+
+        // --- Basic Opportunity Check via Ticks ---
         console.log("  [Monitor] Entering Tick Check Block...");
-        // ... (tick check logic) ...
+        // --- DECLARE VARIABLES CLOSER TO USE ---
+        let startPoolId = null; // <<< Declare immediately before use/assignment
+        let flashLoanPoolFeeBps = 0;
+        let swapPoolAddress = ethers.ZeroAddress;
+        let swapPoolFeeBps = 0;
+        // ---
+
+        if (slotA && slotB) {
+            const tickA = Number(slotA.tick);
+            const tickB = Number(slotB.tick);
+            const TICK_DIFF_THRESHOLD = 1;
+
+            if (tickB > tickA + TICK_DIFF_THRESHOLD) {
+                startPoolId = 'A'; // Assign
+                flashLoanPoolFeeBps = config.POOL_A_FEE_BPS;
+                swapPoolAddress = config.POOL_B_ADDRESS;
+                swapPoolFeeBps = config.POOL_B_FEE_BPS;
+                console.log(`  [Monitor] Tick Check Result: Potential Start A`);
+            } else if (tickA > tickB + TICK_DIFF_THRESHOLD) {
+                startPoolId = 'B'; // Assign
+                flashLoanPoolFeeBps = config.POOL_B_FEE_BPS;
+                swapPoolAddress = config.POOL_A_ADDRESS;
+                swapPoolFeeBps = config.POOL_A_FEE_BPS;
+                console.log(`  [Monitor] Tick Check Result: Potential Start B`);
+            } else {
+                // startPoolId remains null
+                console.log(`  [Monitor] Tick Check Result: No significant tick difference.`);
+            }
+        } else {
+             // startPoolId remains null
+            console.log("  [Monitor] Tick Check Skipped (Error: slotA or slotB missing despite check).");
+        }
+        // Use the potentially assigned value
         console.log(`  [Monitor] Exiting Tick Check Block (startPoolId=${startPoolId}).`);
 
+
         // --- Accurate Pre-Simulation (Still Commented Out) ---
+        // Declare these closer to use too, although it matters less here
+        let proceedToAttempt = false;
+        let estimatedProfitWei = 0n;
         /*
         if (startPoolId && liqA > 0n && liqB > 0n) {
-            // ... simulation logic ...
+           // ... Simulation logic ...
+           // if (profit > 0) proceedToAttempt = true;
         } else if (startPoolId) { ... }
         */
 
-        // --- Trigger Arbitrage Attempt --- (Keep this)
+        // --- Trigger Arbitrage Attempt ---
         console.log("  [Monitor] Entering Trigger Block...");
-        // ... (trigger logic) ...
+        if (proceedToAttempt && startPoolId) { // proceedToAttempt is false, startPoolId might be null or 'A'/'B'
+             console.log("  [Monitor] Conditions met. Triggering attemptArbitrage.");
+             state.opportunity = { startPool: startPoolId, profit: estimatedProfitWei };
+             await attemptArbitrage(state);
+        } else if (startPoolId) { // Check if startPoolId has a value ('A' or 'B')
+             console.log("  [Monitor] Not proceeding to attemptArbitrage (Simulation commented out or unprofitable).");
+        } else { // startPoolId is still null
+             console.log("  [Monitor] Not proceeding to attemptArbitrage (No opportunity found).");
+        }
         console.log("  [Monitor] Exiting Trigger Block.");
 
 
