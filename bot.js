@@ -1,7 +1,7 @@
 // bot.js - Entry Point
 const { ethers } = require('ethers');
 const config = require('./config');
-const { fetchABIWithCache } = require('./helpers/abiFetcher');
+// <<< Removed require for abiFetcher >>>
 const { initializeContracts } = require('./helpers/contracts');
 const { monitorPools } = require('./helpers/monitor');
 
@@ -24,24 +24,13 @@ async function startBot() {
         throw error; // Stop execution if provider/signer fails
     }
 
-    // --- Fetch Dynamic ABI ---
-    let flashSwapABI;
-    try {
-        console.log("[Init] Fetching FlashSwap Contract ABI...");
-        flashSwapABI = await fetchABIWithCache(config.FLASH_SWAP_CONTRACT_ADDRESS);
-        if (!flashSwapABI || !Array.isArray(flashSwapABI) || flashSwapABI.length === 0) {
-             throw new Error(`Invalid ABI received for FlashSwap contract (${config.FLASH_SWAP_CONTRACT_ADDRESS}).`);
-        }
-         console.log("[Init] FlashSwap ABI obtained successfully.");
-    } catch (error) {
-        console.error("[Init] CRITICAL: Failed to fetch FlashSwap ABI.", error);
-        throw error; // Stop execution
-    }
+    // <<< Removed dynamic ABI fetching block >>>
 
     // --- Instantiate Contracts ---
     let contracts;
     try {
-        contracts = initializeContracts(provider, signer, flashSwapABI);
+        // <<< Updated call to initializeContracts (no ABI passed) >>>
+        contracts = initializeContracts(provider, signer);
     } catch (error) {
          console.error("[Init] CRITICAL: Failed to initialize contracts.", error);
          throw error; // Stop execution
@@ -62,7 +51,8 @@ async function startBot() {
     console.log(` - Monitoring Pools: A=(${config.POOL_A_ADDRESS}), B=(${config.POOL_B_ADDRESS})`);
     console.log(` - Fees: A=${config.POOL_A_FEE_PERCENT}%, B=${config.POOL_B_FEE_PERCENT}%`);
     console.log(` - Borrow Amount: ${config.BORROW_AMOUNT_WETH_STR} WETH`);
-    console.log(` - Min Gross Profit Threshold: ${config.MIN_POTENTIAL_GROSS_PROFIT_WETH_STR} WETH (Pre-fees)`);
+    console.log(` - Min Gross Profit Threshold: ${config.MIN_POTENTIAL_GROSS_PROFIT_WETH_STR} WETH (Pre-fees)`); // Note: This threshold isn't directly used in monitor.js currently
+    console.log(` - Min Net Profit Threshold: ${ethers.formatUnits(config.MIN_NET_PROFIT_WEI, config.WETH_DECIMALS)} WETH (After Gas Estimate)`);
     console.log(` - Polling Interval: ${config.POLLING_INTERVAL_MS / 1000} seconds`);
 
     console.log("[Init] Performing startup checks...");
@@ -73,7 +63,7 @@ async function startBot() {
             console.warn("[Check] Warning: Signer balance is zero.");
         }
 
-        // Check if flash swap contract has an owner function (basic ABI check)
+        // Check if flash swap contract has an owner function (basic ABI check using local ABI)
         if (contracts.flashSwapContract.owner && typeof contracts.flashSwapContract.owner === 'function') {
              const owner = await contracts.flashSwapContract.owner();
              console.log(`[Check] FlashSwap Contract Owner: ${owner}`);
