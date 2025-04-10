@@ -5,16 +5,17 @@ const config = require('../config'); // Adjust path if your structure differs
 // Load static ABIs from the /abis directory
 const IUniswapV3PoolABI = require('../abis/IUniswapV3Pool.json');
 const IQuoterV2ABI = require('../abis/IQuoterV2.json'); // ABI includes quoteExactInputSingle and quoteExactInput
+const FlashSwapABI = require('../abis/FlashSwap.json'); // <<< Load local FlashSwap ABI
 
 /**
  * Initializes and returns ethers.js contract instances.
  * @param {ethers.Provider} provider - The ethers provider instance.
  * @param {ethers.Signer} signer - The ethers signer instance (for sending transactions).
- * @param {Array} flashSwapABI - The ABI for the dynamically fetched FlashSwap contract.
  * @returns {object} An object containing the initialized contract instances.
  * @throws {Error} If required inputs are missing or invalid.
  */
-function initializeContracts(provider, signer, flashSwapABI) {
+// <<< Removed flashSwapABI parameter >>>
+function initializeContracts(provider, signer) {
     console.log("[Contracts] Initializing contract instances...");
 
     // Input validation
@@ -25,20 +26,18 @@ function initializeContracts(provider, signer, flashSwapABI) {
         // Signer is needed for the FlashSwap contract which executes transactions
         throw new Error("[Contracts] Signer is required for FlashSwap contract initialization.");
     }
-    if (!flashSwapABI || !Array.isArray(flashSwapABI) || flashSwapABI.length === 0) {
-        // FlashSwap ABI is fetched dynamically, need to ensure it's valid
-        throw new Error("[Contracts] Valid FlashSwap ABI (flashSwapABI) is required for initialization.");
-    }
-    if (!IUniswapV3PoolABI || !IQuoterV2ABI) {
+    // <<< Removed check for passed flashSwapABI parameter >>>
+    if (!IUniswapV3PoolABI || !IQuoterV2ABI || !FlashSwapABI) { // <<< Added check for local FlashSwapABI
         // Check that static ABIs loaded correctly
-        throw new Error("[Contracts] Failed to load static ABIs (Pool or Quoter).");
+        throw new Error("[Contracts] Failed to load static ABIs (Pool, Quoter, or FlashSwap).");
     }
 
     try {
         // Instantiate contracts
         const contracts = {
             // FlashSwap contract needs the signer to execute initiateFlashSwap
-            flashSwapContract: new ethers.Contract(config.FLASH_SWAP_CONTRACT_ADDRESS, flashSwapABI, signer),
+            // <<< Use locally loaded FlashSwapABI >>>
+            flashSwapContract: new ethers.Contract(config.FLASH_SWAP_CONTRACT_ADDRESS, FlashSwapABI, signer),
 
             // Quoter and Pools are read-only, use provider
             quoterContract: new ethers.Contract(config.QUOTER_V2_ADDRESS, IQuoterV2ABI, provider),
