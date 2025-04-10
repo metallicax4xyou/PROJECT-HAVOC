@@ -2,53 +2,73 @@
 const { ethers } = require('ethers');
 const { attemptArbitrage } = require('./arbitrage');
 
-// --- Helper Functions --- (DEFINED FIRST)
+// --- Helper Functions --- (Defined FIRST)
+function calculateFlashFee(amountBorrowed, feeBps) { /* ... */ }
+function tickToPrice(tick, token0Decimals, token1Decimals) { /* ... */ }
 
-function calculateFlashFee(amountBorrowed, feeBps) {
-    const feeBpsBigInt = BigInt(feeBps);
-    const denominator = 1000000n;
-    return (amountBorrowed * feeBpsBigInt) / denominator;
-}
-
-function tickToPrice(tick, token0Decimals, token1Decimals) {
-    try {
-        const priceRatio = Math.pow(1.0001, Number(tick));
-        const decimalAdjustment = Math.pow(10, token0Decimals - token1Decimals);
-        const price = priceRatio * decimalAdjustment;
-        return isFinite(price) ? price : 0;
-    } catch (e) {
-        console.warn(`[Helper] Error calculating tickToPrice for tick ${tick}: ${e.message}`);
-        return 0;
-    }
-}
-
-// --- Main Monitoring Function --- (DEFINED AFTER HELPERS)
-async function monitorPools(state) { // <<< async keyword is here
+// --- Main Monitoring Function ---
+async function monitorPools(state) {
     const { contracts, config } = state;
-    const { poolAContract, poolBContract, quoterContract } = contracts;
 
-    if (!poolAContract || !poolBContract || !quoterContract || !config) { return; }
+    // --- Check state object validity ---
+    if (!contracts || !contracts.poolAContract || !contracts.poolBContract || !contracts.quoterContract || !config) {
+        console.error("[Monitor] CRITICAL: Invalid state object passed. Missing contracts or config. State:", state);
+        return;
+    }
+    const { poolAContract, poolBContract, quoterContract } = contracts; // Destructure after check
+    // --- End Check ---
+
 
     const poolADesc = `Pool A (${config.POOL_A_ADDRESS} - ${config.POOL_A_FEE_BPS / 100}%)`;
     const poolBDesc = `Pool B (${config.POOL_B_ADDRESS} - ${config.POOL_B_FEE_BPS / 100}%)`;
     console.log(`\n[Monitor] ${new Date().toISOString()} - Checking ${poolADesc} and ${poolBDesc}...`);
 
     try {
-        // Fetch pool states
+        // --- Check contract instances before use ---
+        console.log("  [DEBUG] Checking contract instances before fetch...");
+        if (!(poolAContract instanceof ethers.Contract) || typeof poolAContract.slot0 !== 'function' || typeof poolAContract.liquidity !== 'function') {
+            console.error("  [Monitor] ERROR: Pool A contract instance appears invalid or missing methods.");
+            return;
+        }
+         if (!(poolBContract instanceof ethers.Contract) || typeof poolBContract.slot0 !== 'function' || typeof poolBContract.liquidity !== 'function') {
+            console.error("  [Monitor] ERROR: Pool B contract instance appears invalid or missing methods.");
+            return;
+        }
+        console.log("  [DEBUG] Contract instances appear valid.");
+        // --- End Check ---
+
+        // --- Fetch pool states ---
         console.log("  [Monitor] Fetching pool states...");
-        const results = await Promise.allSettled([ /* pool calls */ ]); // await is valid inside async function
+        // --- *** ENSURE THIS ARRAY IS CORRECT *** ---
+        const promisesToSettle = [
+            poolAContract.slot0(),
+            poolAContract.liquidity(),
+            poolBContract.slot0(),
+            poolBContract.liquidity()
+        ];
+        // --- *** END ENSURE *** ---
+        console.log(`  [DEBUG] Number of promises created: ${promisesToSettle.length}`); // Should log 4
+
+        const results = await Promise.allSettled(promisesToSettle); // Pass the defined array
         console.log("  [Monitor] Pool state fetch complete.");
 
         // Debug log results
         console.log("  [DEBUG] Raw Promise.allSettled results:", JSON.stringify(results, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
-        console.log(`  [DEBUG] results array length: ${results?.length}`);
-        if (!Array.isArray(results) || results.length < 4) { return; }
+        console.log(`  [DEBUG] results array length: ${results?.length}`); // Should log 4
 
-        // Process results
+        // Check array structure
+        if (!Array.isArray(results) || results.length < 4) {
+            console.error("  [Monitor] CRITICAL: Promise.allSettled did not return the expected array structure.");
+            return;
+        }
+
+        // Process results safely
         let slotA = null, liqA = 0n, slotB = null, liqB = 0n;
-        // ... (assign results safely) ...
+        // ... (Assign results safely, checking results[i] and results[i].status) ...
         if (results[0] && results[0].status === 'fulfilled') slotA = results[0].value; else console.error(/*...*/);
-        // ... etc ...
+        if (results[1] && results[1].status === 'fulfilled') liqA = BigInt(results[1].value); else console.error(/*...*/);
+        if (results[2] && results[2].status === 'fulfilled') slotB = results[2].value; else console.error(/*...*/);
+        if (results[3] && results[3].status === 'fulfilled') liqB = BigInt(results[3].value); else console.error(/*...*/);
 
         // Log states
         console.log(`  [Monitor] ${poolADesc} State: Tick=${slotA?.tick}, Liquidity=${liqA.toString()}`);
@@ -58,67 +78,31 @@ async function monitorPools(state) { // <<< async keyword is here
         if (!slotA || !slotB) { /*...*/ return; }
         if (liqA === 0n || liqB === 0n) { /*...*/ return; }
 
-        // --- Basic Opportunity Check ---
+        // --- Basic Opportunity Check via Ticks ---
+        // ... (Declare startPoolId etc. Check ticks. Log result.) ...
         console.log("  [Monitor] Entering Tick Check Block...");
-        let startPoolId = null;
-        let flashLoanPoolFeeBps = 0;
-        let swapPoolAddress = ethers.ZeroAddress;
-        let swapPoolFeeBps = 0;
-
-        if (slotA && slotB) {
-            // ... (tick check logic - assigns startPoolId etc.) ...
-        } else { /*...*/ }
+        let startPoolId = null; /* ... other declarations ... */
+        if(slotA && slotB) { /* ... tick comparison logic ... */ }
         console.log(`  [Monitor] Exiting Tick Check Block (startPoolId=${startPoolId}).`);
 
-
-        // --- Accurate Pre-Simulation --- (Now uncommented)
-        let proceedToAttempt = false;
-        let estimatedProfitWei = 0n;
-
-        if (startPoolId && liqA > 0n && liqB > 0n) {
-             console.log(`  [Monitor] Performing multi-quote simulation...`);
-             const intendedBorrowAmount = config.BORROW_AMOUNT_WETH_WEI;
-             const simAmountInInitial = config.MULTI_QUOTE_SIM_AMOUNT_WETH_WEI;
-             // ... (rest of simulation setup) ...
-
-             try {
-                 const paramsSwap1 = { /* ... */ };
-                 console.log(`    Sim: Swap 1 - Attempting staticCall (Single)...`);
-                 // <<< await is VALID here because we are inside async function monitorPools >>>
-                 const quoteResult1 = await quoterContract.quoteExactInputSingle.staticCall(paramsSwap1);
-                 const simAmountIntermediateOut = quoteResult1.amountOut;
-                 // ... (check output, log, define paramsSwap2) ...
-
-                 console.log(`    Sim: Swap 2 - Attempting staticCall (Single)...`);
-                  // <<< await is VALID here >>>
-                 const quoteResult2 = await quoterContract.quoteExactInputSingle.staticCall(paramsSwap2);
-                 const simFinalAmountOut = quoteResult2.amountOut;
-                 // ... (check output, log, scale result, check profit) ...
-                 // ... (set proceedToAttempt = true if profitable) ...
-
-             } catch (error) {
-                 console.error(`  [Monitor] ❌ Pre-Sim Error: ${error.reason || error.message}`);
-                 // ... (log details) ...
-             } // --- END Try Block ---
-
-        } else if (startPoolId) { /* ... log skipping sim ... */ }
-
+        // --- Accurate Pre-Simulation (Still Commented Out) ---
+        let proceedToAttempt = false; /* ... other declarations ... */
+        /* if (startPoolId && ...) { ... simulation logic ... } */
 
         // --- Trigger Arbitrage Attempt ---
+        // ... (Trigger logic. Log results.) ...
         console.log("  [Monitor] Entering Trigger Block...");
-        if (proceedToAttempt && startPoolId) {
-             console.log("  [Monitor] Conditions met. Triggering attemptArbitrage.");
-             state.opportunity = { startPool: startPoolId, profit: estimatedProfitWei };
-              // <<< await is VALID here >>>
-             await attemptArbitrage(state);
-        } else if (startPoolId) { /* ... log not proceeding ... */ }
-        else { /* ... log no opportunity ... */ }
+        if (proceedToAttempt && startPoolId) { /* ... call attemptArbitrage ... */ }
+        else if (startPoolId) { console.log("  [Monitor] Not proceeding (Sim commented out)...");}
+        else { console.log("  [Monitor] Not proceeding (No opportunity)..."); }
         console.log("  [Monitor] Exiting Trigger Block.");
 
 
-    } catch (error) { /* ... outer catch ... */ }
-    finally { /* ... outer finally ... */ }
-
-} // <<< --- END async function monitorPools ---
+    } catch (error) {
+        console.error(`[Monitor] CRITICAL Error during monitoring cycle:`, error);
+    } finally {
+         console.log(`[Monitor] ${new Date().toISOString()} - Cycle End.`);
+    }
+} // <<< END async function monitorPools
 
 module.exports = { monitorPools };
