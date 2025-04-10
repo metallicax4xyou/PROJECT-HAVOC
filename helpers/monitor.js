@@ -2,123 +2,120 @@
 const { ethers } = require('ethers');
 const { attemptArbitrage } = require('./arbitrage');
 
-// --- Helper Functions --- (Keep these as they are)
 function calculateFlashFee(amountBorrowed, feeBps) { /* ... */ }
 function tickToPrice(tick, token0Decimals, token1Decimals) { /* ... */ }
 
-// --- Main Monitoring Function ---
 async function monitorPools(state) {
     const { contracts, config } = state;
     const { poolAContract, poolBContract, quoterContract } = contracts;
 
-    if (!poolAContract || !poolBContract || !quoterContract || !config) { /* ... error check ... */ return; }
+    if (!poolAContract || !poolBContract || !quoterContract || !config) { return; }
 
     const poolADesc = `Pool A (${config.POOL_A_ADDRESS} - ${config.POOL_A_FEE_BPS / 100}%)`;
     const poolBDesc = `Pool B (${config.POOL_B_ADDRESS} - ${config.POOL_B_FEE_BPS / 100}%)`;
     console.log(`\n[Monitor] ${new Date().toISOString()} - Checking ${poolADesc} and ${poolBDesc}...`);
 
     try {
-        // Fetch pool states
-        console.log("  [Monitor] Fetching pool states via Promise.allSettled..."); // Log before fetch
-        const results = await Promise.allSettled([
-            poolAContract.slot0(), poolAContract.liquidity(),
-            poolBContract.slot0(), poolBContract.liquidity()
-        ]);
-        console.log("  [Monitor] Pool state fetch complete."); // Log after fetch
-
-        // Process results
-        const slotAResult = results[0], liqAResult = results[1];
-        const slotBResult = results[2], liqBResult = results[3];
+        // Fetch pool states (Same as before)
+        console.log("  [Monitor] Fetching pool states...");
+        const results = await Promise.allSettled([/*...*/]);
+        console.log("  [Monitor] Pool state fetch complete.");
         let slotA = null, liqA = 0n, slotB = null, liqB = 0n;
+        // Process results (Same as before)
+        if (results[0].status === 'fulfilled') slotA = results[0].value; else console.error(/*...*/);
+        if (results[1].status === 'fulfilled') liqA = results[1].value; else console.error(/*...*/);
+        if (results[2].status === 'fulfilled') slotB = results[2].value; else console.error(/*...*/);
+        if (results[3].status === 'fulfilled') liqB = results[3].value; else console.error(/*...*/);
 
-        // Assign results safely, logging errors if promises rejected
-        if (slotAResult.status === 'fulfilled') slotA = slotAResult.value;
-        else console.error(`[Monitor] Failed Fetch: Pool A slot0 - ${slotAResult.reason?.message || slotAResult.reason}`);
-        if (liqAResult.status === 'fulfilled') liqA = liqAResult.value;
-        else console.error(`[Monitor] Failed Fetch: Pool A liquidity - ${liqAResult.reason?.message || liqAResult.reason}`);
-        if (slotBResult.status === 'fulfilled') slotB = slotBResult.value;
-        else console.error(`[Monitor] Failed Fetch: Pool B slot0 - ${slotBResult.reason?.message || slotBResult.reason}`);
-        if (liqBResult.status === 'fulfilled') liqB = liqBResult.value;
-        else console.error(`[Monitor] Failed Fetch: Pool B liquidity - ${liqBResult.reason?.message || liqBResult.reason}`);
+        // Log states (Same as before)
+        console.log(`  [Monitor] ${poolADesc} State: Tick=${slotA?.tick}, Liquidity=${liqA.toString()}`);
+        console.log(`  [Monitor] ${poolBDesc} State: Tick=${slotB?.tick}, Liquidity=${liqB.toString()}`);
 
-        // <<< --- ADDED DEBUG LOGS --- >>>
-        console.log("  [DEBUG] Raw Fetch Results:", {
-             slotA_status: slotAResult.status,
-             liqA_status: liqAResult.status,
-             slotB_status: slotBResult.status,
-             liqB_status: liqBResult.status,
-        });
-        console.log("  [DEBUG] Assigned Values:", {
-            slotA_tick: slotA?.tick?.toString(), // Use optional chaining and toString
-            liqA: liqA.toString(),
-            slotB_tick: slotB?.tick?.toString(),
-            liqB: liqB.toString(),
-        });
-        // <<< --- END ADDED DEBUG LOGS --- >>>
-
-        // Log states using assigned values (this log might have been skipped before)
-        console.log(`  [Monitor] ${poolADesc} State (Post-Debug): Tick=${slotA?.tick}, Liquidity=${liqA.toString()}`);
-        if (liqA === 0n && slotA) console.warn("    ⚠️ Pool A has ZERO active liquidity!");
-        console.log(`  [Monitor] ${poolBDesc} State (Post-Debug): Tick=${slotB?.tick}, Liquidity=${liqB.toString()}`);
-        if (liqB === 0n && slotB) console.warn("    ⚠️ Pool B has ZERO active liquidity!");
-
-        // Exit check (Now we'll see logs before this hits if fetching failed)
-        if (!slotA || !slotB) { // Only need slot0 for basic tick check
-             console.log("  [Monitor] Cannot proceed: Missing slot0 data for one or both pools.");
-             // Don't return yet if only liquidity failed, might still log ticks
-        }
-        // Check liquidity specifically before simulation
-        if (liqA === 0n || liqB === 0n) {
-             console.log("  [Monitor] Cannot proceed with simulation: Zero liquidity detected.");
-             // We can still log tick difference below if desired, but don't proceed to quotes
-             // return; // Optionally return here to skip tick check too
-        }
-
+        // Exit checks (Same as before)
+        if (!slotA || !slotB) { console.log("...Missing slot0..."); return; }
+        if (liqA === 0n || liqB === 0n) { console.log("...Zero liquidity..."); return;}
 
         // --- Basic Opportunity Check via Ticks ---
-        // This requires slotA and slotB to be non-null
+        console.log("  [Monitor] Entering Tick Check Block..."); // <<< ADD LOG
         let startPoolId = null;
         let flashLoanPoolFeeBps = 0;
         let swapPoolAddress = ethers.ZeroAddress;
         let swapPoolFeeBps = 0;
-        let proceedToAttempt = false;
-        let estimatedProfitWei = 0n;
+        let proceedToAttempt = false; // Keep this for later trigger logic
+        let estimatedProfitWei = 0n;  // Keep this for later trigger logic
 
-        if (slotA && slotB) { // Check if we have tick data
+        if (slotA && slotB) {
             const tickA = Number(slotA.tick);
             const tickB = Number(slotB.tick);
             const TICK_DIFF_THRESHOLD = 1;
 
-            if (tickB > tickA + TICK_DIFF_THRESHOLD) { /* ... Set params for Start A ... */ }
-            else if (tickA > tickB + TICK_DIFF_THRESHOLD) { /* ... Set params for Start B ... */ }
-            else { console.log(`  [Monitor] Tick Check: No significant tick difference.`); }
+            if (tickB > tickA + TICK_DIFF_THRESHOLD) {
+                startPoolId = 'A'; flashLoanPoolFeeBps = config.POOL_A_FEE_BPS;
+                swapPoolAddress = config.POOL_B_ADDRESS; swapPoolFeeBps = config.POOL_B_FEE_BPS;
+                console.log(`  [Monitor] Tick Check Result: Potential Start A`);
+            } else if (tickA > tickB + TICK_DIFF_THRESHOLD) {
+                startPoolId = 'B'; flashLoanPoolFeeBps = config.POOL_B_FEE_BPS;
+                swapPoolAddress = config.POOL_A_ADDRESS; swapPoolFeeBps = config.POOL_A_FEE_BPS;
+                console.log(`  [Monitor] Tick Check Result: Potential Start B`);
+            } else {
+                console.log(`  [Monitor] Tick Check Result: No significant tick difference.`);
+            }
         } else {
-            console.log("  [Monitor] Skipping Tick Check due to missing slot0 data.");
+            console.log("  [Monitor] Tick Check Skipped (should not happen if previous check passed).");
         }
+        console.log(`  [Monitor] Exiting Tick Check Block (startPoolId=${startPoolId}).`); // <<< ADD LOG
 
 
         // --- Accurate Pre-Simulation ---
-        // Requires startPoolId AND non-zero liquidity
+        // --- TEMPORARILY COMMENT OUT SIMULATION BLOCK --- >>>
+        /*
         if (startPoolId && liqA > 0n && liqB > 0n) {
              console.log(`  [Monitor] Performing multi-quote simulation...`);
-             // ... (The rest of the simulation logic using quoteExactInputSingle remains the same) ...
-             // ... (try/catch block for simulation) ...
+             const intendedBorrowAmount = config.BORROW_AMOUNT_WETH_WEI;
+             const simAmountInInitial = config.MULTI_QUOTE_SIM_AMOUNT_WETH_WEI;
+             // ... (rest of simulation setup) ...
+
+             try {
+                 // ... (paramsSwap1 definition) ...
+                 console.log(`    Sim: Swap 1 - Attempting staticCall (Single)...`);
+                 const quoteResult1 = await quoterContract.quoteExactInputSingle.staticCall(paramsSwap1);
+                 // ... (check output, log, define paramsSwap2) ...
+
+                 console.log(`    Sim: Swap 2 - Attempting staticCall (Single)...`);
+                 const quoteResult2 = await quoterContract.quoteExactInputSingle.staticCall(paramsSwap2);
+                 // ... (check output, log, scale result, check profit) ...
+                 // ... (set proceedToAttempt = true if profitable) ...
+
+             } catch (error) {
+                 console.error(`  [Monitor] ❌ Pre-Sim Error: ${error.reason || error.message}`);
+                 // ... (log details) ...
+             } // --- END Try Block ---
+
         } else if (startPoolId) {
-            console.log(`  [Monitor] Skipping simulation due to zero liquidity.`);
+            console.log(`  [Monitor] Skipping simulation due to zero liquidity (should not happen if previous check passed).`);
         }
+        */
+        // <<< --- END TEMPORARY COMMENT OUT ---
 
 
         // --- Trigger Arbitrage Attempt ---
-        if (proceedToAttempt && startPoolId) {
-             // ... (call attemptArbitrage) ...
+        console.log("  [Monitor] Entering Trigger Block..."); // <<< ADD LOG
+        if (proceedToAttempt && startPoolId) { // proceedToAttempt will be false now
+             console.log("  [Monitor] Conditions met. Triggering attemptArbitrage.");
+             state.opportunity = { startPool: startPoolId, profit: estimatedProfitWei };
+             await attemptArbitrage(state);
         } else if (startPoolId) {
-             console.log("  [Monitor] Not proceeding to attemptArbitrage.");
+             console.log("  [Monitor] Not proceeding to attemptArbitrage (Simulation commented out or unprofitable)."); // <<< THIS SHOULD LOG NOW >>>
+        } else {
+             console.log("  [Monitor] Not proceeding to attemptArbitrage (No opportunity found)."); // <<< OR THIS >>>
         }
+        console.log("  [Monitor] Exiting Trigger Block."); // <<< ADD LOG
+
 
     } catch (error) {
         console.error(`[Monitor] CRITICAL Error during monitoring cycle:`, error);
     } finally {
-         console.log(`[Monitor] ${new Date().toISOString()} - Cycle End.`);
+         console.log(`[Monitor] ${new Date().toISOString()} - Cycle End.`); // <<< THIS SHOULD LOG NOW >>>
     }
 }
 
