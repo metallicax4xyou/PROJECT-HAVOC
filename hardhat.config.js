@@ -40,7 +40,6 @@ task("checkBalance", "Prints the ETH balance of the deployer account configured 
     }
   });
 
-// <<< NEW TASK DEFINITION >>>
 task("testQuote", "Tests QuoterV2 quote")
   .setAction(async (taskArgs, hre) => {
     const quoterAddress = "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"; // Quoter V2 Address
@@ -54,7 +53,7 @@ task("testQuote", "Tests QuoterV2 quote")
       tokenIn: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", // WETH
       tokenOut: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // USDC
       amountIn: hre.ethers.parseEther("0.0001"), // Same sim amount
-      fee: 3000, // Pool B fee (3000 bps = 0.30%)
+      fee: 3000, // Pool B fee (3000 bps = 0.30%) - CURRENTLY FAILING
       sqrtPriceLimitX96: 0n // No price limit
     };
 
@@ -82,11 +81,60 @@ task("testQuote", "Tests QuoterV2 quote")
       console.error(`  Error Code: ${error.code}`);
       console.error(`  Reason: ${error.reason}`); // Often null for CALL_EXCEPTION without reason
       // Check if it's the same CALL_EXCEPTION
-      if (error.code === 'CALL_EXCEPTION') {
+      if (error.code === 'CALL_EXCEPTION' || (error.code === -32000 && error.message.includes("execution reverted"))) {
          console.error("  Revert Data:", error.data); // Often null if missing revert data
          console.error("  Transaction:", error.transaction); // Shows the call data
+         console.error("  ProviderError Message:", error.message); // Show full provider error
       } else {
          console.error("  Full Error:", error);
+      }
+    }
+  });
+
+// <<< NEW TASK: Check Pool Existence >>>
+task("checkPools", "Checks if specific WETH/USDC pools exist on the network")
+  .setAction(async (taskArgs, hre) => {
+    const factoryAddress = "0x1F98431c8aD98523631AE4a59f267346ea31F984"; // Uniswap V3 Factory
+    const tokenWETH = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"; // WETH Address (Arbitrum)
+    const tokenUSDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"; // USDC Address (Arbitrum)
+    const feesToCheck = [100, 500, 3000, 10000]; // Check common fee tiers
+
+    // Minimal ABI for getPool
+    const factoryABI = ["function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)"];
+    const factory = new hre.ethers.Contract(factoryAddress, factoryABI, hre.ethers.provider);
+
+    console.log(`[checkPools] Checking WETH/USDC pools on ${hre.network.name} using Factory ${factoryAddress}`);
+    console.log(`  WETH: ${tokenWETH}`);
+    console.log(`  USDC: ${tokenUSDC}`);
+
+    // Factory requires tokens sorted numerically by address
+    const [token0, token1] = tokenWETH.toLowerCase() < tokenUSDC.toLowerCase() ? [tokenWETH, tokenUSDC] : [tokenUSDC, tokenWETH];
+    console.log(`  Token0 (Sorted): ${token0}`);
+    console.log(`  Token1 (Sorted): ${token1}`);
+
+    for (const fee of feesToCheck) {
+      try {
+        console.log(`\n--- Checking Fee Tier: ${fee} (${fee / 10000}%) ---`);
+        const poolAddress = await factory.getPool(token0, token1, fee); // Use sorted tokens
+        console.log(`   Pool Address Found: ${poolAddress}`);
+        if (poolAddress === hre.ethers.ZeroAddress) {
+          console.log(`   Status: Pool DOES NOT EXIST.`);
+        } else {
+          console.log(`   Status: Pool EXISTS.`);
+          // Compare with config addresses
+          if (fee === 500 && poolAddress.toLowerCase() === "0xC6962004f452bE9203591991D15f6b388e09E8D0".toLowerCase()) {
+             console.log("     ✅ Matches Pool A address in current config.");
+          } else if (fee === 500) {
+             console.log(`     ⚠️ Mismatch: Config Pool A is 0xC69... but Factory returned ${poolAddress}`);
+          }
+          if (fee === 3000 && poolAddress.toLowerCase() === "0x17c14D2c404D167802b16C450d3c99F88F2c4F4d".toLowerCase()) {
+             console.log("     ✅ Matches Pool B address in current config.");
+          } else if (fee === 3000) {
+              console.log(`     ⚠️ Mismatch: Config Pool B is 0x17c... but Factory returned ${poolAddress}`);
+          }
+        }
+      } catch (error) {
+        console.error(`[checkPools] ❌ Error checking fee ${fee}:`, error);
       }
     }
   });
