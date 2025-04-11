@@ -35,40 +35,37 @@ task("checkBalance", "Prints the ETH balance of the deployer account configured 
     }
   });
 
-task("testQuote", "Tests QuoterV2 quote for a specific hardcoded scenario")
+task("testQuote", "Tests QuoterV2 quote for a specific hardcoded scenario using quoteExactInputSingle")
   .setAction(async (taskArgs, hre) => {
-    // ... (testQuote task code remains the same, useful for specific tests) ...
-    const quoterAddress = "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"; // Quoter V2 Address
-    const quoterAbi = require('./abis/IQuoterV2.json');
+    // NOTE: This task still uses the OLD Quoter address and quoteExactInputSingle
+    // It will likely continue to fail, kept for reference.
+    const quoterAddress = "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"; // INCORRECT for Arbitrum V2!
+    let quoterAbi;
+    try { quoterAbi = require('./abis/IQuoterV2.json'); } catch { console.error("Missing abis/IQuoterV2.json"); return; }
+
     const provider = hre.ethers.provider;
     const quoter = new hre.ethers.Contract(quoterAddress, quoterAbi, provider);
     const params = {
       tokenIn: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", // WETH
       tokenOut: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // USDC
       amountIn: hre.ethers.parseEther("0.0001"), // Sim amount
-      fee: 3000, // Pool B fee (3000 bps = 0.30%) - KNOWN TO FAIL CURRENTLY
+      fee: 3000,
       sqrtPriceLimitX96: 0n
     };
-    console.log(`[testQuote] Attempting static call to quoteExactInputSingle on ${quoterAddress} (Network: ${hre.network.name})`);
-    console.log("[testQuote] Parameters:", params);
+    console.log(`[testQuote - Single] Attempting static call on ${quoterAddress} (Network: ${hre.network.name})`);
+    console.log("[testQuote - Single] Parameters:", params);
     try {
       const result = await quoter.quoteExactInputSingle.staticCall(params);
-      console.log("[testQuote] ✅ Quote successful!");
+      console.log("[testQuote - Single] ✅ Quote successful!");
       console.log(`  Amount Out (USDC): ${hre.ethers.formatUnits(result.amountOut, 6)}`);
-      console.log(`  sqrtPriceX96After: ${result.sqrtPriceX96After.toString()}`);
-      console.log(`  initializedTicksCrossed: ${result.initializedTicksCrossed.toString()}`);
-      console.log(`  gasEstimate: ${result.gasEstimate.toString()}`);
     } catch (error) {
-      console.error("[testQuote] ❌ Quote failed:");
+      console.error("[testQuote - Single] ❌ Quote failed:");
       console.error(`  Error Code: ${error.code}`);
       console.error(`  Reason: ${error.reason}`);
       if (error.code === 'CALL_EXCEPTION' || (error.code === -32000 && error.message.includes("execution reverted"))) {
          console.error("  Revert Data:", error.data);
-         console.error("  Transaction:", error.transaction);
          console.error("  ProviderError Message:", error.message);
-      } else {
-         console.error("  Full Error:", error);
-      }
+      } else { console.error("  Full Error:", error); }
     }
   });
 
@@ -94,97 +91,87 @@ task("checkPools", "Checks if specific WETH/USDC pools exist on the network")
         console.log(`   Pool Address Found: ${poolAddress}`);
         if (poolAddress === hre.ethers.ZeroAddress) {
           console.log(`   Status: Pool DOES NOT EXIST.`);
-        } else {
-          console.log(`   Status: Pool EXISTS.`);
-          // Compare with config addresses (using corrected Pool B address now)
-          const configPoolA = "0xC6962004f452bE9203591991D15f6b388e09E8D0";
-          const configPoolB = "0xc473e2aEE3441BF9240Be85eb122aBB059A3B57c"; // Corrected
-          if (fee === 500 && poolAddress.toLowerCase() === configPoolA.toLowerCase()) {
-             console.log("     ✅ Matches Pool A address in current config.");
-          } else if (fee === 500) {
-             console.log(`     ⚠️ Mismatch: Config Pool A is ${configPoolA} but Factory returned ${poolAddress}`);
-          }
-          if (fee === 3000 && poolAddress.toLowerCase() === configPoolB.toLowerCase()) {
-             console.log("     ✅ Matches Pool B address in current config.");
-          } else if (fee === 3000) {
-              console.log(`     ⚠️ Mismatch: Config Pool B is ${configPoolB} but Factory returned ${poolAddress}`);
-          }
-        }
+        } else { console.log(`   Status: Pool EXISTS.`); }
       } catch (error) {
         console.error(`[checkPools] ❌ Error checking fee ${fee}:`, error);
       }
     }
   });
 
-// <<< NEW TASK: Debug Quote Across Fee Tiers >>>
-task("debugQuote", "Checks pool existence and attempts quotes across common fee tiers")
+// <<< UPDATED TASK: Use Arbitrum Quoter V2 (0x61f...) and quoteExactInput >>>
+task("debugQuote", "Debug quotes using Arbitrum Quoter V2 and quoteExactInput")
   .addParam("tokenIn", "Input token address")
   .addParam("tokenOut", "Output token address")
   .addParam("amount", "Amount in smallest units (wei)")
   .setAction(async (taskArgs, hre) => {
     const { ethers } = hre;
-    const factoryAddress = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
-    const quoterAddress = "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6";
+    // --- Use CORRECT Arbitrum Quoter V2 Address ---
+    const quoterV2Address = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e";
+    const factoryAddress = "0x1F98431c8aD98523631AE4a59f267346ea31F984"; // Keep factory for checks if needed
 
-    // Factory ABI
-    const factoryAbi = ["function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)"];
-    // Quoter ABI (ensure IQuoterV2.json is correct and cleaned)
-    const quoterAbi = require('./abis/IQuoterV2.json');
+    // --- ABI for Quoter V2 quoteExactInput ---
+    // Need to ensure this matches the actual QuoterV2 interface if using full ABI
+    // Or use a minimal ABI like this:
+    const quoterAbi_quoteExactInput = [
+      "function quoteExactInput(bytes path, uint256 amountIn) external returns (uint256 amountOut, uint160[] memory sqrtPriceX96AfterList, uint32[] memory initializedTicksCrossedList, uint256 gasEstimate)"
+    ];
+    // Factory ABI for pool check (optional within this task)
+    // const factoryAbi = ["function getPool(address, address, uint24) view returns (address)"];
 
     const fees = [100, 500, 3000, 10000]; // Common fee tiers
-    const factory = await ethers.getContractAt(factoryAbi, factoryAddress);
-    const quoter = await ethers.getContractAt(quoterAbi, quoterAddress); // Use full ABI
+    // const factory = await ethers.getContractAt(factoryAbi, factoryAddress); // Optional pool check
+    const quoter = await ethers.getContractAt(quoterAbi_quoteExactInput, quoterV2Address);
 
-    console.log(`\n[debugQuote] Checking quotes for ${ethers.formatUnits(taskArgs.amount, 18)} WETH -> USDC on ${hre.network.name}...`); // Assume WETH input for logging
-
-    // Sort tokens for factory call
-    const tokenA = taskArgs.tokenIn;
-    const tokenB = taskArgs.tokenOut;
-    const [token0, token1] = tokenA.toLowerCase() < tokenB.toLowerCase() ? [tokenA, tokenB] : [tokenB, tokenA];
+    console.log(`\n[debugQuote] Checking quotes for ${hre.ethers.formatUnits(taskArgs.amount, 18)} WETH -> USDC on ${hre.network.name} using QuoterV2 ${quoterV2Address}...`); // Assume WETH input for logging
 
     for (const fee of fees) {
-      console.log(`\n--- Checking Fee Tier: ${fee} (${fee / 10000}%) ---`);
+      console.log(`\n--- Attempting quote with fee ${fee} (${fee / 10000}%) ---`);
 
-      // Check pool existence
-      const poolAddress = await factory.getPool(token0, token1, fee);
-
-      if (poolAddress === ethers.ZeroAddress) {
-        console.log(`   ❌ Pool DOES NOT EXIST for fee tier ${fee}. Skipping quote.`);
-        continue;
-      }
-
-      console.log(`   ✅ Pool EXISTS at ${poolAddress}. Attempting quote...`);
-
-      // Prepare params for quoter
-      const params = {
-          tokenIn: taskArgs.tokenIn,
-          tokenOut: taskArgs.tokenOut,
-          amountIn: taskArgs.amount,
-          fee: fee,
-          sqrtPriceLimitX96: 0n
-      };
+      // --- Encode the path: tokenIn + fee + tokenOut ---
+      // Note: ethers.solidityPacked is correct in v6
+      const encodedPath = ethers.solidityPacked(
+        ["address", "uint24", "address"],
+        [taskArgs.tokenIn, fee, taskArgs.tokenOut]
+      );
+      console.log(`   Encoded Path: ${encodedPath}`);
 
       try {
-        // Attempt static call using the object param structure
-        const result = await quoter.quoteExactInputSingle.staticCall(params);
+        // --- Attempt static call to quoteExactInput ---
+        // The function returns multiple values, we destructure to get amountOut
+        const [amountOut] = await quoter.quoteExactInput.staticCall(
+          encodedPath,
+          taskArgs.amount // Pass amount directly
+        );
 
         // Assuming USDC output (6 decimals)
-        const amountOutFormatted = ethers.formatUnits(result.amountOut, 6);
+        const formattedOut = ethers.formatUnits(amountOut, 6);
+        const inputAmountFormatted = ethers.formatUnits(taskArgs.amount, 18);
+        const effectivePrice = parseFloat(formattedOut) / parseFloat(inputAmountFormatted);
 
         console.log(`   ✅ Quote Success!`);
-        console.log(`      Amount Out: ${amountOutFormatted} USDC`);
-        // Exit on first successful quote for simplicity, or remove 'return' to see all
+        console.log(`      Amount Out: ${formattedOut} USDC`);
+        console.log(`      Effective Price: ~${effectivePrice.toFixed(2)} USDC per WETH`);
+        // Exit on first successful quote for simplicity
+        // If you want to see all successful quotes, remove the 'return;' statement
         return;
 
       } catch (error) {
-        console.log(`   ❌ Quote Failed for fee ${fee}: ${error.reason || error.message}`);
-         if (error.code === 'CALL_EXCEPTION' || (error.code === -32000 && error.message.includes("execution reverted"))) {
-             // Don't log the full transaction object here, too verbose
-             console.log(`      (Revert Code: ${error.code}, Reason: ${error.reason || 'None provided'}, Data: ${error.data})`);
-         }
+        console.log(`   ❌ Quote Failed for fee ${fee}:`);
+        // Try to parse custom errors if possible (requires full ABI usually)
+        let reason = error.reason || "No reason provided";
+        if (error.data && error.data !== '0x') {
+            try {
+                // Attempt to parse with Quoter interface if available, otherwise just show data
+                // Note: Minimal ABI won't parse custom errors well. Need full ABI loaded.
+                // const decodedError = quoter.interface.parseError(error.data);
+                // reason = `${decodedError?.name}(${decodedError?.args})` || reason;
+                reason = `Revert data: ${error.data}`;
+            } catch (parseErr) { /* ignore if parsing fails */ }
+        }
+        console.log(`      Error: ${reason} (Code: ${error.code || 'N/A'})`);
       }
     }
-    console.log("\n[debugQuote] Finished checking all specified fee tiers.");
+    console.log("\n[debugQuote] Finished checking all specified fee tiers. No successful quote found.");
   });
 
 
