@@ -39,51 +39,56 @@ task("checkBalance", "Prints the ETH balance...")
 task("testQuote", "Tests QuoterV2 quote...")
   .setAction(async (taskArgs, hre) => { /* ...task code unchanged... */ });
 
-// <<< UPDATED checkPools Task with CORRECT Base Factory/Deployer Address >>>
-task("checkPools", "Checks if specific WETH/USDC pools exist on the network")
+// <<< MODIFIED checkPools Task to find USDC/USDT pools >>>
+task("checkPools", "Checks if specific USDC/USDT pools exist on the network") // Updated description
   .setAction(async (taskArgs, hre) => {
     // --- Standard V3 Factory Address (Default) ---
     let factoryAddress = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 
     // --- Define Tokens Per Network ---
-    let tokenWETH = "";
-    let tokenUSDC = "";
+    let tokenUSDC = ""; // Changed variable name
+    let tokenUSDT = ""; // Changed variable name
     const networkName = hre.network.name;
+
+    console.log(`\n[checkPools] Finding USDC/USDT pools on ${networkName}...`); // Updated log
 
     switch(networkName) {
         case 'arbitrum':
-            tokenWETH = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1";
-            tokenUSDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
+            tokenUSDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"; // Arbitrum USDC
+            tokenUSDT = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"; // Arbitrum USDT
             break;
         case 'polygon':
-            tokenWETH = "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619";
-            tokenUSDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+            tokenUSDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // Polygon USDC
+            tokenUSDT = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"; // Polygon USDT
             break;
         case 'base':
-            tokenWETH = "0x4200000000000000000000000000000000000006";
-            tokenUSDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-            // <<< Use CORRECT Base PoolDeployer/Factory Address >>>
-            factoryAddress = "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86"; // Correct Base Address
+             // <<< Use CORRECT Base PoolDeployer/Factory Address >>>
+             factoryAddress = "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86"; // Correct Base Address
+             tokenUSDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // Base USDC
+             tokenUSDT = "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"; // Base USDT (Verify this address)
+             console.warn("Verifying Base USDT address: ", tokenUSDT);
             break;
         case 'optimism':
-            tokenWETH = "0x4200000000000000000000000000000000000006";
-            tokenUSDC = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85";
+            tokenUSDC = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"; // Optimism USDC
+            tokenUSDT = "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58"; // Optimism USDT
             break;
         default:
             console.error(`❌ Network ${networkName} not configured in checkPools task.`);
             return;
     }
 
-    const feesToCheck = [100, 500, 3000, 10000];
-    // Minimal ABI for getPool - should work for standard factory/deployer interfaces
+    // --- Check only relevant stablecoin fees ---
+    const feesToCheck = [100, 500]; // 0.01% and 0.05% are most common for stable/stable
+
     const factoryABI = ["function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)"];
     const factory = new hre.ethers.Contract(factoryAddress, factoryABI, hre.ethers.provider);
 
-    console.log(`\n[checkPools] Checking WETH/USDC pools on ${networkName} using Factory/Deployer ${factoryAddress}`); // Log which factory is used
-    console.log(`  WETH: ${tokenWETH}`);
+    console.log(`  Using Factory/Deployer ${factoryAddress}`);
     console.log(`  USDC: ${tokenUSDC}`);
+    console.log(`  USDT: ${tokenUSDT}`);
 
-    const [token0, token1] = tokenWETH.toLowerCase() < tokenUSDC.toLowerCase() ? [tokenWETH, tokenUSDC] : [tokenUSDC, tokenWETH];
+    // Factory requires tokens sorted numerically by address
+    const [token0, token1] = tokenUSDC.toLowerCase() < tokenUSDT.toLowerCase() ? [tokenUSDC, tokenUSDT] : [tokenUSDT, tokenUSDC];
     console.log(`  Token0 (Sorted): ${token0}`);
     console.log(`  Token1 (Sorted): ${token1}`);
 
@@ -100,12 +105,11 @@ task("checkPools", "Checks if specific WETH/USDC pools exist on the network")
       } catch (error) {
         console.error(`[checkPools] ❌ Error checking fee ${fee}: ${error.message}`);
          if(error.code) console.error(`   Code: ${error.code}`);
-         // Don't log value/info if it's just '0x' or null
          if(error.value && error.value !== '0x') console.error(`   Value: ${error.value}`);
          if(error.info) console.error(`   Info: ${JSON.stringify(error.info)}`);
       }
     }
-     console.log("[checkPools] Finished checking pools.");
+     console.log("[checkPools] Finished checking USDC/USDT pools.");
   });
 
 
