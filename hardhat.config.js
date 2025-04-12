@@ -19,7 +19,7 @@ const MAINNET_FORK_URL = process.env.MAINNET_FORK_URL; // Optional
 
 // --- Custom Hardhat Tasks ---
 
-task("checkBalance", "Prints the ETH balance...")
+task("checkBalance", "Prints the ETH balance of the deployer account configured for the specified network")
   .setAction(async (taskArgs, hre) => {
     const networkName = hre.network.name;
     console.log(`🔎 Checking balance on network: ${networkName}`);
@@ -36,59 +36,87 @@ task("checkBalance", "Prints the ETH balance...")
     } catch (error) { console.error("\n❌ Error fetching balance:", error.message); }
   });
 
-task("testQuote", "Tests QuoterV2 quote...")
-  .setAction(async (taskArgs, hre) => { /* ...task code unchanged... */ });
+task("testQuote", "Tests QuoterV2 quote for a specific hardcoded scenario using quoteExactInputSingle")
+  .setAction(async (taskArgs, hre) => {
+    // This task uses quoteExactInputSingle and might fail, kept for reference.
+    console.warn("[testQuote - Single] This task uses quoteExactInputSingle and may fail.");
+    const quoterAddress = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"; // Correct L2 V2 Address
+    let quoterAbi;
+    try { quoterAbi = require('./abis/IQuoterV2.json'); } catch { console.error("Missing abis/IQuoterV2.json"); return; }
 
-// <<< MODIFIED checkPools Task to find USDC/USDT pools >>>
-task("checkPools", "Checks if specific USDC/USDT pools exist on the network") // Updated description
+    const provider = hre.ethers.provider;
+    const quoter = new hre.ethers.Contract(quoterAddress, quoterAbi, provider);
+    const params = {
+      tokenIn: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", // WETH on Arbitrum (Adjust if running on other networks)
+      tokenOut: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // USDC on Arbitrum (Adjust if running on other networks)
+      amountIn: hre.ethers.parseEther("0.0001"),
+      fee: 3000,
+      sqrtPriceLimitX96: 0n
+    };
+    console.log(`[testQuote - Single] Attempting static call on ${quoterAddress} (Network: ${hre.network.name})`);
+    console.log("[testQuote - Single] Parameters:", params);
+    try {
+      const result = await quoter.quoteExactInputSingle.staticCall(params);
+      console.log("[testQuote - Single] ✅ Quote successful!");
+      console.log(`  Amount Out (USDC): ${hre.ethers.formatUnits(result.amountOut, 6)}`);
+    } catch (error) {
+      console.error("[testQuote - Single] ❌ Quote failed:");
+      console.error(`  Error Code: ${error.code}`);
+      console.error(`  Reason: ${error.reason}`);
+      if (error.code === 'CALL_EXCEPTION' || (error.code === -32000 && error.message.includes("execution reverted"))) {
+         console.error("  Revert Data:", error.data);
+         console.error("  ProviderError Message:", error.message);
+      } else { console.error("  Full Error:", error); }
+    }
+  });
+
+// <<< RESTORED checkPools Task to check WETH/USDC and handle Base Factory >>>
+task("checkPools", "Checks if specific WETH/USDC pools exist on the network")
   .setAction(async (taskArgs, hre) => {
     // --- Standard V3 Factory Address (Default) ---
     let factoryAddress = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 
-    // --- Define Tokens Per Network ---
-    let tokenUSDC = ""; // Changed variable name
-    let tokenUSDT = ""; // Changed variable name
+    // --- Define WETH/USDC Tokens Per Network ---
+    let tokenWETH = "";
+    let tokenUSDC = "";
     const networkName = hre.network.name;
 
-    console.log(`\n[checkPools] Finding USDC/USDT pools on ${networkName}...`); // Updated log
+    console.log(`\n[checkPools] Finding WETH/USDC pools on ${networkName}...`); // Updated log
 
     switch(networkName) {
         case 'arbitrum':
-            tokenUSDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"; // Arbitrum USDC
-            tokenUSDT = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"; // Arbitrum USDT
+            tokenWETH = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1";
+            tokenUSDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
             break;
         case 'polygon':
-            tokenUSDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // Polygon USDC
-            tokenUSDT = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"; // Polygon USDT
+            tokenWETH = "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619";
+            tokenUSDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
             break;
         case 'base':
-             // <<< Use CORRECT Base PoolDeployer/Factory Address >>>
-             factoryAddress = "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86"; // Correct Base Address
-             tokenUSDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // Base USDC
-             tokenUSDT = "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"; // Base USDT (Verify this address)
-             console.warn("Verifying Base USDT address: ", tokenUSDT);
+            tokenWETH = "0x4200000000000000000000000000000000000006";
+            tokenUSDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+            // <<< Use CORRECT Base PoolDeployer/Factory Address >>>
+            factoryAddress = "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86"; // Correct Base Address
             break;
         case 'optimism':
-            tokenUSDC = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"; // Optimism USDC
-            tokenUSDT = "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58"; // Optimism USDT
+            tokenWETH = "0x4200000000000000000000000000000000000006";
+            tokenUSDC = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85";
             break;
         default:
             console.error(`❌ Network ${networkName} not configured in checkPools task.`);
             return;
     }
 
-    // --- Check only relevant stablecoin fees ---
-    const feesToCheck = [100, 500]; // 0.01% and 0.05% are most common for stable/stable
-
+    const feesToCheck = [100, 500, 3000, 10000]; // Check common fee tiers
     const factoryABI = ["function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)"];
     const factory = new hre.ethers.Contract(factoryAddress, factoryABI, hre.ethers.provider);
 
     console.log(`  Using Factory/Deployer ${factoryAddress}`);
+    console.log(`  WETH: ${tokenWETH}`);
     console.log(`  USDC: ${tokenUSDC}`);
-    console.log(`  USDT: ${tokenUSDT}`);
 
     // Factory requires tokens sorted numerically by address
-    const [token0, token1] = tokenUSDC.toLowerCase() < tokenUSDT.toLowerCase() ? [tokenUSDC, tokenUSDT] : [tokenUSDT, tokenUSDC];
+    const [token0, token1] = tokenWETH.toLowerCase() < tokenUSDC.toLowerCase() ? [tokenWETH, tokenUSDC] : [tokenUSDC, tokenWETH];
     console.log(`  Token0 (Sorted): ${token0}`);
     console.log(`  Token1 (Sorted): ${token1}`);
 
@@ -109,7 +137,7 @@ task("checkPools", "Checks if specific USDC/USDT pools exist on the network") //
          if(error.info) console.error(`   Info: ${JSON.stringify(error.info)}`);
       }
     }
-     console.log("[checkPools] Finished checking USDC/USDT pools.");
+     console.log("[checkPools] Finished checking WETH/USDC pools.");
   });
 
 
