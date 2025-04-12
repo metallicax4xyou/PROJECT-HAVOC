@@ -12,14 +12,14 @@ const NETWORK_CONFIGS = {
         EXPLORER_URL: "https://arbiscan.io",
         FLASH_SWAP_CONTRACT_ADDRESS: process.env.ARBITRUM_FLASH_SWAP_ADDRESS || "0x675BCDd612973C75cA682f9B8b0e27032A4B3FB6",
         WETH_ADDRESS: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-        USDC_ADDRESS: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-        QUOTER_V2_ADDRESS: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-        POOL_A_ADDRESS: "0xC6962004f452bE9203591991D15f6b388e09E8D0", // 0.05%
+        USDC_ADDRESS: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // Native USDC
+        QUOTER_V2_ADDRESS: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e", // Arbitrum Quoter V2
+        POOL_A_ADDRESS: "0xC6962004f452bE9203591991D15f6b388e09E8D0", // WETH/USDC 0.05%
         POOL_A_FEE_BPS: 500,
-        POOL_B_ADDRESS: "0xc473e2aEE3441BF9240Be85eb122aBB059A3B57c", // 0.30%
+        POOL_B_ADDRESS: "0xc473e2aEE3441BF9240Be85eb122aBB059A3B57c", // WETH/USDC 0.30% (Corrected)
         POOL_B_FEE_BPS: 3000,
         GAS_LIMIT_ESTIMATE: 1_000_000n,
-        MIN_NET_PROFIT_WEI: ethers.parseUnits("0.0001", 18),
+        MIN_NET_PROFIT_WEI: ethers.parseUnits("0.0001", 18), // WETH Wei
         BORROW_AMOUNT_WETH_STR: "0.1",
         MULTI_QUOTE_SIM_AMOUNT_WETH_STR: "0.0001",
         TICK_DELTA_WARNING_THRESHOLD: 20,
@@ -32,8 +32,8 @@ const NETWORK_CONFIGS = {
         SCAN_API_KEY: process.env.POLYGONSCAN_API_KEY,
         EXPLORER_URL: "https://polygonscan.com",
         FLASH_SWAP_CONTRACT_ADDRESS: process.env.POLYGON_FLASH_SWAP_ADDRESS || "",
-        WETH_ADDRESS: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
-        USDC_ADDRESS: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        WETH_ADDRESS: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619", // Polygon PoS WETH
+        USDC_ADDRESS: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", // Polygon PoS USDC (Native)
         QUOTER_V2_ADDRESS: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
         // <<< Updated Polygon Pool Addresses >>>
         POOL_A_ADDRESS: "0x45dDa9cb7c25131DF268515131f647d726f50608", // WETH/USDC 0.05%
@@ -41,11 +41,11 @@ const NETWORK_CONFIGS = {
         POOL_B_ADDRESS: "0x0e44cEb592AcFC5D3F09D996302eB4C499ff8c10", // WETH/USDC 0.30%
         POOL_B_FEE_BPS: 3000,
         GAS_LIMIT_ESTIMATE: 1_200_000n,
-        MIN_NET_PROFIT_WEI: ethers.parseUnits("0.00002", 18),
+        MIN_NET_PROFIT_WEI: ethers.parseUnits("0.00002", 18), // Lower threshold
         BORROW_AMOUNT_WETH_STR: "0.1",
         MULTI_QUOTE_SIM_AMOUNT_WETH_STR: "0.0001",
         TICK_DELTA_WARNING_THRESHOLD: 10,
-        POLLING_INTERVAL_MS: 5000,
+        POLLING_INTERVAL_MS: 5000, // Faster polling
     },
     // --- Base ---
     base: {
@@ -57,14 +57,14 @@ const NETWORK_CONFIGS = {
         WETH_ADDRESS: "0x4200000000000000000000000000000000000006",
         USDC_ADDRESS: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         QUOTER_V2_ADDRESS: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-         // <<< Base Pool Addresses Placeholder - Needs Factory Address Fix >>>
-        POOL_A_ADDRESS: "BASE_POOL_500_ADDRESS_PLACEHOLDER", // WETH/USDC 0.05% - FIND THIS
+         // <<< Base Pool Addresses Set to Zero - Not Found via Standard Factory >>>
+        POOL_A_ADDRESS: ethers.ZeroAddress, // WETH/USDC 0.05% - Not Found
         POOL_A_FEE_BPS: 500,
-        POOL_B_ADDRESS: "BASE_POOL_3000_ADDRESS_PLACEHOLDER", // WETH/USDC 0.30% - FIND THIS
+        POOL_B_ADDRESS: ethers.ZeroAddress, // WETH/USDC 0.30% - Not Found
         POOL_B_FEE_BPS: 3000,
         GAS_LIMIT_ESTIMATE: 1_000_000n,
         MIN_NET_PROFIT_WEI: ethers.parseUnits("0.00001", 18),
-        BORROW_AMOUNT_WETH_STR: "0.1",
+        BORROW_AMOUNT_WETH_STR: "0.1", // Bot logic should skip Base if pools are ZeroAddress
         MULTI_QUOTE_SIM_AMOUNT_WETH_STR: "0.0001",
         TICK_DELTA_WARNING_THRESHOLD: 5,
         POLLING_INTERVAL_MS: 3000,
@@ -77,7 +77,7 @@ const NETWORK_CONFIGS = {
         EXPLORER_URL: "https://optimistic.etherscan.io",
         FLASH_SWAP_CONTRACT_ADDRESS: process.env.OPTIMISM_FLASH_SWAP_ADDRESS || "",
         WETH_ADDRESS: "0x4200000000000000000000000000000000000006",
-        USDC_ADDRESS: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+        USDC_ADDRESS: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", // Note: OP Mainnet USDC address changed July 2024 - verify if using older tutorials
         QUOTER_V2_ADDRESS: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
          // <<< Updated Optimism Pool Addresses >>>
         POOL_A_ADDRESS: "0x1fb3cf6e48F1E7B10213E7b6d87D4c073C7Fdb7b", // WETH/USDC 0.05%
@@ -117,17 +117,22 @@ function getConfig(networkName) {
     networkConfig.BORROW_AMOUNT_WETH_WEI = ethers.parseUnits(networkConfig.BORROW_AMOUNT_WETH_STR, networkConfig.WETH_DECIMALS);
     networkConfig.MULTI_QUOTE_SIM_AMOUNT_WETH_WEI = ethers.parseUnits(networkConfig.MULTI_QUOTE_SIM_AMOUNT_WETH_STR, networkConfig.WETH_DECIMALS);
 
-    // Basic validation (can be expanded)
-    const required = ['RPC_URL', 'FLASH_SWAP_CONTRACT_ADDRESS', 'WETH_ADDRESS', 'USDC_ADDRESS', 'QUOTER_V2_ADDRESS', 'POOL_A_ADDRESS', 'POOL_B_ADDRESS'];
+    // Basic validation
+    const required = ['RPC_URL', 'WETH_ADDRESS', 'USDC_ADDRESS', 'QUOTER_V2_ADDRESS', 'POOL_A_ADDRESS', 'POOL_B_ADDRESS'];
     for (const key of required) {
-         if (!networkConfig[key] && networkConfig[key] !== "") { // Allow empty string for not-yet-deployed contracts
+         if (!networkConfig[key]) {
              console.warn(`[Config] Warning: Missing config key "${key}" for network "${lowerNetworkName}".`);
          }
-         // Check for remaining placeholders only if network is not Base (since we know Base failed)
-         if (lowerNetworkName !== 'base' && typeof networkConfig[key] === 'string' && networkConfig[key].includes("_ADDRESS")) {
-             console.warn(`[Config] Placeholder detected for ${key} on ${lowerNetworkName}. Please update.`);
+         // Check for zero address pools (specifically for Base in this case)
+         if ((key === 'POOL_A_ADDRESS' || key === 'POOL_B_ADDRESS') && networkConfig[key] === ethers.ZeroAddress) {
+              console.warn(`[Config] Pool address ${key} is ZeroAddress for ${lowerNetworkName}. Bot logic should handle this.`);
          }
     }
+     // Check Flash Swap Address separately
+     if (!networkConfig.FLASH_SWAP_CONTRACT_ADDRESS || networkConfig.FLASH_SWAP_CONTRACT_ADDRESS === "") {
+          console.warn(`[Config] FLASH_SWAP_CONTRACT_ADDRESS not set for network ${lowerNetworkName}. Execution will fail.`);
+     }
+
 
     return networkConfig;
 }
