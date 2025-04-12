@@ -17,11 +17,12 @@ async function monitorPools(state) {
     const { poolAContract, poolBContract, poolCContract, quoterContract } = contracts;
 
     const poolsToMonitor = [];
+    // Add pools ONLY if the contract instance exists
     if (poolAContract) poolsToMonitor.push({ id: 'A', contract: poolAContract, address: config.POOL_A_ADDRESS, feeBps: config.POOL_A_FEE_BPS });
     if (poolBContract) poolsToMonitor.push({ id: 'B', contract: poolBContract, address: config.POOL_B_ADDRESS, feeBps: config.POOL_B_FEE_BPS });
     if (poolCContract) poolsToMonitor.push({ id: 'C', contract: poolCContract, address: config.POOL_C_ADDRESS, feeBps: config.POOL_C_FEE_BPS });
 
-    if (poolsToMonitor.length < 2) { console.log(`[Monitor-${networkName}] Less than 2 valid pools configured. Skipping.`); return; }
+    if (poolsToMonitor.length < 2) { console.log(`[Monitor-${networkName}] Less than 2 valid pools configured/initialized. Skipping.`); return; }
     if (!quoterContract) { console.error(`[Monitor-${networkName}] CRITICAL: Quoter contract instance missing.`); return; }
 
     const poolDescriptions = poolsToMonitor.map(p => `Pool ${p.id} (${p.feeBps / 10000}%)`).join(', ');
@@ -40,34 +41,50 @@ async function monitorPools(state) {
         try {
             // Add fee data promise
             console.log("    [DEBUG] Adding Fee Data promise...");
-            promisesToSettle.push(provider.getFeeData());
-            promiseLabels.push("Fee Data");
-            console.log("    [DEBUG] Fee Data promise added.");
+            if (provider && typeof provider.getFeeData === 'function') {
+                promisesToSettle.push(provider.getFeeData());
+                promiseLabels.push("Fee Data");
+                console.log("    [DEBUG] Fee Data promise added.");
+            } else {
+                 console.error("    [DEBUG] ERROR: Provider or getFeeData function missing!");
+                 throw new Error("Provider missing getFeeData"); // Stop if essential data can't be fetched
+            }
+
 
             // Add pool state promises
             for (const pool of poolsToMonitor) {
-                console.log(`    [DEBUG] Adding promises for Pool ${pool.id}...`);
+                console.log(`    [DEBUG] Preparing promises for Pool ${pool.id}...`);
+                let slot0Promise = null;
+                let liquidityPromise = null;
+
+                // --- Check contract and functions EXIST before calling ---
                 if (!pool.contract) {
                      console.warn(`    [DEBUG] Skipping Pool ${pool.id} - contract instance is null.`);
-                     // Add placeholders that will reject, so array length matches later
-                     promisesToSettle.push(Promise.reject(new Error(`Contract null for ${pool.id}`)));
-                     promiseLabels.push(`Pool ${pool.id} slot0 (skipped)`);
-                     promisesToSettle.push(Promise.reject(new Error(`Contract null for ${pool.id}`)));
-                     promiseLabels.push(`Pool ${pool.id} liquidity (skipped)`);
-                     continue;
+                } else {
+                    if (typeof pool.contract.slot0 === 'function') {
+                         console.log(`      [DEBUG] Adding ${pool.id}.slot0() promise...`);
+                         slot0Promise = pool.contract.slot0(); // Call returns a Promise
+                    } else {
+                         console.error(`      [DEBUG] ERROR: Pool ${pool.id}.slot0 is NOT a function!`);
+                    }
+
+                    if (typeof pool.contract.liquidity === 'function') {
+                         console.log(`      [DEBUG] Adding ${pool.id}.liquidity() promise...`);
+                         liquidityPromise = pool.contract.liquidity(); // Call returns a Promise
+                    } else {
+                         console.error(`      [DEBUG] ERROR: Pool ${pool.id}.liquidity is NOT a function!`);
+                    }
                 }
-                // --- Log before each call ---
-                console.log(`      [DEBUG] Calling ${pool.id}.slot0()...`);
-                promisesToSettle.push(pool.contract.slot0());
+
+                // Add promises (or rejecting placeholders if calls failed)
+                promisesToSettle.push(slot0Promise || Promise.reject(new Error(`Invalid slot0 call for ${pool.id}`)));
                 promiseLabels.push(`Pool ${pool.id} slot0`);
-                console.log(`      [DEBUG] Calling ${pool.id}.liquidity()...`);
-                promisesToSettle.push(pool.contract.liquidity());
+                promisesToSettle.push(liquidityPromise || Promise.reject(new Error(`Invalid liquidity call for ${pool.id}`)));
                 promiseLabels.push(`Pool ${pool.id} liquidity`);
-                console.log(`    [DEBUG] Promises for Pool ${pool.id} added.`);
+                console.log(`    [DEBUG] Promises for Pool ${pool.id} added/handled.`);
             }
         } catch (promiseCreationError) {
              console.error(`  [Monitor-${networkName}] ❌ ERROR DURING PROMISE CREATION: ${promiseCreationError.message}`);
-             // If creation fails, we likely can't proceed with Promise.allSettled
              return;
         }
 
@@ -76,35 +93,27 @@ async function monitorPools(state) {
         // --- Execute with Timeout ---
         let results = null;
         try {
-             const raceWinner = await Promise.race([ // Capture the winner
-                Promise.allSettled(promisesToSettle).then(res => ({ type: 'allSettled', value: res })), // Wrap result
-                createTimeout(FETCH_TIMEOUT_MS, `State/Fee fetching timed out after ${FETCH_TIMEOUT_MS}ms`).then(() => ({ type: 'timeout' })) // Wrap timeout
+             // Directly await the race, handle results or timeout error
+             results = await Promise.race([
+                Promise.allSettled(promisesToSettle),
+                createTimeout(FETCH_TIMEOUT_MS, `State/Fee fetching timed out after ${FETCH_TIMEOUT_MS}ms`)
             ]);
-
-            const fetchEndTime = Date.now();
-            console.log(`  [Monitor-${networkName}] Fetch race finished (Duration: ${fetchEndTime - fetchStartTime}ms). Winner: ${raceWinner.type}`);
-
-            if (raceWinner.type === 'timeout') {
-                 console.error(`  [Monitor-${networkName}] ❌ FETCH TIMEOUT.`);
-                 return; // Exit cycle on timeout
+            // Check if the result is an error object (meaning timeout won)
+            if (results instanceof Error) {
+                throw results; // Re-throw the timeout error
             }
-            // If allSettled won, assign its value
-            results = raceWinner.value;
-
-        } catch (raceError) {
-            // This catch block might not be strictly necessary with the .then wrapping, but good practice
             const fetchEndTime = Date.now();
-            console.error(`  [Monitor-${networkName}] ❌ UNEXPECTED RACE ERROR after ${fetchEndTime - fetchStartTime}ms: ${raceError.message}`);
-            return;
+            console.log(`  [Monitor-${networkName}] Fetch attempt finished (Duration: ${fetchEndTime - fetchStartTime}ms).`);
+
+        } catch (fetchOrTimeoutError) {
+             console.error(`  [Monitor-${networkName}] ❌ FETCH FAILED OR TIMED OUT: ${fetchOrTimeoutError.message}`);
+             return; // Exit cycle on timeout or race error
         }
 
         // --- Process Results ---
-        // Add extra check here
-        if (results === null || typeof results === 'undefined') {
-             throw new Error(`Fetch results variable is null or undefined after race.`);
-        }
         if (!Array.isArray(results) || results.length !== promisesToSettle.length) {
-             throw new Error(`Fetch results invalid. Expected ${promisesToSettle.length} array items, Got: ${JSON.stringify(results)}`);
+             // This case should ideally not happen if the above try/catch works, but safeguard anyway
+             throw new Error(`Fetch results invalid structure. Expected ${promisesToSettle.length} array items, Got: ${JSON.stringify(results)}`);
         }
         console.log(`  [Monitor-${networkName}] Processing ${results.length} fetch results...`);
 
@@ -118,7 +127,6 @@ async function monitorPools(state) {
         });
 
         // Extract Fee Data (Promise 0)
-        // ... (rest of processing remains the same) ...
         const feeDataResult = results[0];
         if (feeDataResult?.status === 'fulfilled') { feeData = feeDataResult.value; }
         else { throw new Error(`Failed Fetch: Fee Data - ${feeDataResult?.reason?.message || 'Reason N/A'}`); }
@@ -127,41 +135,66 @@ async function monitorPools(state) {
         console.log(`  [Monitor-${networkName}] Fee Data OK: maxFeePerGas=${ethers.formatUnits(currentMaxFeePerGas, 'gwei')} Gwei`);
 
         // Extract Pool Data
-        // ... (rest of processing remains the same) ...
-         let resultIndex = 1;
+        let resultIndex = 1;
         for (const pool of poolsToMonitor) {
             const slotResult = results[resultIndex++];
             const liqResult = results[resultIndex++];
-            // ... safe processing ...
-             if (slotResult.status !== 'fulfilled' || liqResult.status !== 'fulfilled') {
+            // Mark as invalid if *either* promise for this pool failed
+            if (slotResult.status !== 'fulfilled' || liqResult.status !== 'fulfilled') {
+                 console.warn(`  [Monitor-${networkName}] Incomplete fetch for Pool ${pool.id}.`);
                  poolStates[pool.id] = { valid: false };
-             } else if (BigInt(liqResult.value || 0) === 0n) {
-                poolStates[pool.id] = { valid: false };
-             } else {
-                const slot = slotResult.value;
-                const liq = BigInt(liqResult.value);
-                poolStates[pool.id] = { valid: true, slot: slot, liquidity: liq, tick: Number(slot.tick) };
-                console.log(`  [Monitor-${networkName}] Pool ${pool.id} State OK: Tick=${poolStates[pool.id].tick}, Liquidity=${liq.toString()}`);
+            } else {
+                const liq = BigInt(liqResult.value || 0);
+                if (liq === 0n) {
+                    console.warn(`  [Monitor-${networkName}] Zero liquidity for Pool ${pool.id}.`);
+                    poolStates[pool.id] = { valid: false };
+                } else {
+                    const slot = slotResult.value;
+                    poolStates[pool.id] = { valid: true, slot: slot, liquidity: liq, tick: Number(slot.tick) };
+                    console.log(`  [Monitor-${networkName}] Pool ${pool.id} State OK: Tick=${poolStates[pool.id].tick}, Liquidity=${liq.toString()}`);
+                }
             }
         }
 
-
         // Calculate Gas Cost
-        // ... (remains the same) ...
         const estimatedGasCost = currentMaxFeePerGas * config.GAS_LIMIT_ESTIMATE;
         const nativeCurrency = networkName === 'polygon' ? 'MATIC' : 'ETH';
         console.log(`  [Gas] Estimated Tx Cost: ~${ethers.formatUnits(estimatedGasCost, 'ether')} ${nativeCurrency}`);
 
-
         // Pairwise Opportunity Check & Simulation
-        // ... (remains the same) ...
+        // ... (logic remains the same) ...
         let bestOpportunity = null;
         console.log(`  [Monitor-${networkName}] Starting pairwise pool comparison...`);
-        for (let i = 0; i < poolsToMonitor.length; i++) { /* ... */ } // Pairwise loop unchanged
+        for (let i = 0; i < poolsToMonitor.length; i++) {
+             for (let j = i + 1; j < poolsToMonitor.length; j++) {
+                 const pool1 = poolsToMonitor[i];
+                 const pool2 = poolsToMonitor[j];
+                 const state1 = poolStates[pool1.id];
+                 const state2 = poolStates[pool2.id];
+
+                 if (!state1?.valid || !state2?.valid) {
+                     console.log(`    [Compare] Skipping pair ${pool1.id}/${pool2.id} (Invalid state)`);
+                     continue;
+                 }
+                 // ... rest of comparison and simulation logic ...
+                 const tick1 = state1.tick;
+                 const tick2 = state2.tick;
+                 const tickDelta = Math.abs(tick1 - tick2);
+                 const TICK_DIFF_THRESHOLD = 1;
+                 console.log(`    [Compare] Checking ${pool1.id}(${tick1}) vs ${pool2.id}(${tick2}) | Delta: ${tickDelta}`);
+                 let startPool = null, swapPool = null;
+                 if (tick2 > tick1 + TICK_DIFF_THRESHOLD) { startPool = pool1; swapPool = pool2; }
+                 else if (tick1 > tick2 + TICK_DIFF_THRESHOLD) { startPool = pool2; swapPool = pool1; }
+                 else { continue; }
+                 console.log(`      Potential: Start ${startPool.id} -> Swap on ${swapPool.id}`);
+                 console.log(`      Simulating...`);
+                 try { /* ... simulation logic ... */ } catch(error) { /* ... error handling ... */ }
+             }
+         }
 
 
         // Trigger Arbitrage Attempt
-        // ... (remains the same) ...
+        // ... (logic remains the same) ...
         console.log(`  [Monitor-${networkName}] Entering Trigger Block...`);
         if (bestOpportunity) { /* ... trigger ... */ }
         else { console.log(`  [Monitor-${networkName}] No profitable opportunity found.`); }
@@ -169,6 +202,7 @@ async function monitorPools(state) {
 
 
     } catch (error) {
+        // Catch errors from promise creation, result processing, or simulation phase
         console.error(`[Monitor-${networkName}] CRITICAL Error during cycle processing: ${error.message}`);
     } finally {
         console.log(`[Monitor-${networkName}] ${new Date().toISOString()} - Cycle End.`);
