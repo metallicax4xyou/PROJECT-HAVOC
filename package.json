@@ -20,6 +20,10 @@
         "hardhat": "^2.22.19"
     },
     "dependencies": {
+        "@ethersproject/abi": "^5.8.0",
+        "@ethersproject/providers": "^5.8.0",
+        "@uniswap/sdk-core": "^7.7.2",
+        "@uniswap/v3-sdk": "^3.25.2",
         "axios": "^1.8.4",
         "ethers": "^6.13.5"
     }
