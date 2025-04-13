@@ -1,8 +1,10 @@
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const readline = require("readline");
 
-// --- UPDATED Uniswap V3 Subgraph for Polygon ---
-const GRAPH_API = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3-polygon";
+// --- UPDATED Uniswap V3 Subgraph for Polygon (Messari) ---
+const GRAPH_API = "https://api.thegraph.com/subgraphs/name/messari/uniswap-v3-polygon";
+// --- Explicitly log the endpoint being used ---
+console.log(`[Debug] Using Graph API Endpoint: ${GRAPH_API}`);
 // --- END UPDATE ---
 
 async function fetchPools(token0, token1) {
@@ -17,28 +19,31 @@ async function fetchPools(token0, token1) {
         { token0: "${token0Lower}", token1: "${token1Lower}" },
         { token0: "${token1Lower}", token1: "${token0Lower}" }
       ]}) {
-      id
+      id # Pool address
       feeTier
       liquidity
-      sqrtPrice  # Might be useful later
+      sqrtPrice  # Current price state
       token0 { id symbol decimals }
       token1 { id symbol decimals }
-      totalValueLockedUSD # Can indicate pool significance
+      totalValueLockedUSD # TVL can indicate pool significance
     }
   }
   `;
 
   try { // Add try...catch for network errors
+    console.log(`[Debug] Sending query to ${GRAPH_API}...`); // Log before fetch
     const res = await fetch(GRAPH_API, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query }),
     });
+    console.log(`[Debug] Received response status: ${res.status}`); // Log response status
 
     const responseBody = await res.json(); // Get the full response body
 
     // Check if the expected data structure exists
     if (responseBody && responseBody.data && responseBody.data.pools) {
+      console.log("[Debug] API response contains expected data structure."); // Log success
       // Expected structure found, return pools
       return responseBody.data.pools || [];
     } else {
