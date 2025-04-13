@@ -1,4 +1,4 @@
-const fetch = require("node-fetch");
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const readline = require("readline");
 
 // Uniswap V3 Subgraph for Polygon
