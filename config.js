@@ -6,20 +6,30 @@ const { Token } = require('@uniswap/sdk-core');
 // Helper function to create pool config objects
 // Ensures address checksum and converts fee to integer
 function pool(address, feeBps) {
-  if (!address) {
-    // console.warn(`Pool address is undefined for fee ${feeBps}. Skipping.`);
-    return null; // Return null if address is missing
+  // --- DEBUG LOGGING START ---
+  console.log(`[Debug Config Pool] feeBps: ${feeBps}, Input Address: '${address}' (Type: ${typeof address})`);
+  if (!address || typeof address !== 'string' || address.trim() === '') {
+    console.warn(`[Debug Config Pool] Null/Empty/Invalid Address for fee ${feeBps}. Returning null.`);
+    return null; // Return null if address is missing or empty string
   }
+  // --- DEBUG LOGGING END ---
   try {
+    const checksummedAddress = ethers.getAddress(address.trim()); // Validate and checksum address (added trim)
+    // --- DEBUG LOGGING START ---
+    console.log(`[Debug Config Pool] Valid Address for fee ${feeBps}. Checksummed: ${checksummedAddress}`);
+    // --- DEBUG LOGGING END ---
     return {
-      address: ethers.getAddress(address), // Validate and checksum address
+      address: checksummedAddress,
       feeBps: parseInt(feeBps, 10), // Store fee tier in basis points
     };
   } catch (error) {
-    console.error(`Invalid address format for fee ${feeBps}: ${address}`, error);
+    // --- DEBUG LOGGING START ---
+    console.error(`[Debug Config Pool] Invalid Address Format for fee ${feeBps}: '${address}'. Error: ${error.message}. Returning null.`);
+    // --- DEBUG LOGGING END ---
     return null; // Return null for invalid addresses
   }
 }
+
 
 // --- Constants ---
 const UNISWAP_V3_FACTORY = '0x1F98431c8aD98523631AE4a59f267346ea31F984';
@@ -43,8 +53,8 @@ const ARBITRUM = {
   CHAIN_ID: 42161,
   RPC_URL: process.env.ARBITRUM_RPC_URL,
   FACTORY_ADDRESS: UNISWAP_V3_FACTORY,
-  QUOTER_ADDRESS: QUOTER_V2_ADDRESS,
-  FLASH_SWAP_CONTRACT_ADDRESS: ethers.getAddress(process.env.ARBITRUM_FLASH_SWAP_CONTRACT || '0x0000000000000000000000000000000000000000'),
+  QUOTER_ADDRESS: QUOTER_V2_ADDRESS, // Use QUOTER_ADDRESS consistently
+  FLASH_SWAP_CONTRACT_ADDRESS: ethers.getAddress(process.env.ARBITRUM_FLASH_SWAP_CONTRACT || ethers.ZeroAddress), // Use ZeroAddress as default
   TOKENS: {
     WETH: { address: ethers.getAddress('0x82aF49447D8a07e3bd95BD0d56f35241523fBab1'), decimals: 18, symbol: 'WETH' },
     USDC: { address: ethers.getAddress('0xaf88d065e77c8cC2239327C5EDb3A432268e5831'), decimals: 6, symbol: 'USDC' },
@@ -74,20 +84,20 @@ const POLYGON = {
   CHAIN_ID: 137,
   RPC_URL: process.env.POLYGON_RPC_URL,
   FACTORY_ADDRESS: UNISWAP_V3_FACTORY,
-  QUOTER_ADDRESS: QUOTER_V2_ADDRESS,
-  FLASH_SWAP_CONTRACT_ADDRESS: ethers.getAddress(process.env.POLYGON_FLASH_SWAP_CONTRACT || '0x0000000000000000000000000000000000000000'),
+  QUOTER_ADDRESS: QUOTER_V2_ADDRESS, // Use QUOTER_ADDRESS consistently
+  FLASH_SWAP_CONTRACT_ADDRESS: ethers.getAddress(process.env.POLYGON_FLASH_SWAP_CONTRACT || ethers.ZeroAddress), // Use ZeroAddress as default
   TOKENS: {
     WETH: { address: ethers.getAddress('0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619'), decimals: 18, symbol: 'WETH' },
-    USDC: { address: ethers.getAddress('0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'), decimals: 6, symbol: 'USDC' }, // USDC.e (Bridged)
-    // USDC_NATIVE: { address: ethers.getAddress('0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'), decimals: 6, symbol: 'USDC' }, // Native USDC - Use the one relevant for pools
+    USDC: { address: ethers.getAddress('0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'), decimals: 6, symbol: 'USDC' }, // USDC.e (Bridged) on Polygon PoS - common one
+    // USDC_NATIVE: { address: ethers.getAddress('0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'), decimals: 6, symbol: 'USDC' }, // Native USDC on Polygon PoS - less common in pools? Check V3 info
     USDT: { address: ethers.getAddress('0xc2132D05D31c914a87C6611C10748AEb04B58e8F'), decimals: 6, symbol: 'USDT' },
   },
   POOL_GROUPS: {
     WETH_USDC: {
       token0: 'WETH',
-      token1: 'USDC',
+      token1: 'USDC', // Assumes the bridged USDC above is used in pools
       pools: [
-        pool(process.env.POLYGON_WETH_USDC_100_ADDRESS, 100), // 0.01% - Often for stable/stable
+        pool(process.env.POLYGON_WETH_USDC_100_ADDRESS, 100), // 0.01% - Less common for WETH/USDC
         pool(process.env.POLYGON_WETH_USDC_500_ADDRESS, 500), // 0.05%
         pool(process.env.POLYGON_WETH_USDC_3000_ADDRESS, 3000), // 0.3%
         // pool(process.env.POLYGON_WETH_USDC_10000_ADDRESS, 10000), // 1% - if exists
@@ -95,13 +105,11 @@ const POLYGON = {
       quoteTokenSymbol: 'USDC',
     },
     USDC_USDT: {
-      token0: 'USDC',
+      token0: 'USDC', // Assumes the bridged USDC above is used in pools
       token1: 'USDT',
       pools: [
-        // --- CORRECTED LINES HERE ---
         pool(process.env.POLYGON_USDC_USDT_100_ADDRESS, 100), // 0.01%
         pool(process.env.POLYGON_USDC_USDT_500_ADDRESS, 500), // 0.05%
-        // --- END CORRECTION ---
       ].filter(p => p !== null),
       quoteTokenSymbol: 'USDT', // Or USDC, depending on how you measure profit
     }
@@ -115,8 +123,8 @@ const OPTIMISM = {
   CHAIN_ID: 10,
   RPC_URL: process.env.OPTIMISM_RPC_URL,
   FACTORY_ADDRESS: UNISWAP_V3_FACTORY,
-  QUOTER_ADDRESS: QUOTER_V2_ADDRESS,
-  FLASH_SWAP_CONTRACT_ADDRESS: ethers.getAddress(process.env.OPTIMISM_FLASH_SWAP_CONTRACT || '0x0000000000000000000000000000000000000000'),
+  QUOTER_ADDRESS: QUOTER_V2_ADDRESS, // Use QUOTER_ADDRESS consistently
+  FLASH_SWAP_CONTRACT_ADDRESS: ethers.getAddress(process.env.OPTIMISM_FLASH_SWAP_CONTRACT || ethers.ZeroAddress), // Use ZeroAddress as default
   TOKENS: {
     WETH: { address: ethers.getAddress('0x4200000000000000000000000000000000000006'), decimals: 18, symbol: 'WETH' },
     USDC: { address: ethers.getAddress('0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'), decimals: 6, symbol: 'USDC' }, // Native USDC on Optimism
@@ -126,7 +134,7 @@ const OPTIMISM = {
   POOL_GROUPS: {
     WETH_USDC: {
       token0: 'WETH',
-      token1: 'USDC',
+      token1: 'USDC', // Assumes Native USDC above
       pools: [
         pool(process.env.OPTIMISM_WETH_USDC_100_ADDRESS, 100), // 0.01%
         pool(process.env.OPTIMISM_WETH_USDC_500_ADDRESS, 500), // 0.05%
@@ -136,7 +144,7 @@ const OPTIMISM = {
       quoteTokenSymbol: 'USDC',
     },
      USDC_USDT: {
-       token0: 'USDC',
+       token0: 'USDC', // Assumes Native USDC above
        token1: 'USDT',
        pools: [
          pool(process.env.OPTIMISM_USDC_USDT_100_ADDRESS, 100), // 0.01%
@@ -154,8 +162,8 @@ const BASE = {
   CHAIN_ID: 8453,
   RPC_URL: process.env.BASE_RPC_URL,
   FACTORY_ADDRESS: '0x33128a8fC17869897dcE68Ed026d694621f6FDfD', // Uniswap V3 Factory on Base
-  QUOTER_ADDRESS: QUOTER_V2_ADDRESS,
-  FLASH_SWAP_CONTRACT_ADDRESS: ethers.getAddress(process.env.BASE_FLASH_SWAP_CONTRACT || '0x0000000000000000000000000000000000000000'),
+  QUOTER_ADDRESS: QUOTER_V2_ADDRESS, // Use QUOTER_ADDRESS consistently
+  FLASH_SWAP_CONTRACT_ADDRESS: ethers.getAddress(process.env.BASE_FLASH_SWAP_CONTRACT || ethers.ZeroAddress), // Use ZeroAddress as default
   TOKENS: {
     WETH: { address: ethers.getAddress('0x4200000000000000000000000000000000000006'), decimals: 18, symbol: 'WETH' },
     USDC: { address: ethers.getAddress('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'), decimals: 6, symbol: 'USDC' }, // Native USDC on Base
