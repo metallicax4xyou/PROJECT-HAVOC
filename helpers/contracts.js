@@ -14,7 +14,8 @@ function initializeContracts(provider, signer, config) {
 
     if (!provider || !signer || !config) throw new Error("[Contracts] Provider, Signer, and Config required.");
     if (!FlashSwapABI || !IUniswapV3PoolABI || !IQuoterV2ABI) throw new Error("[Contracts] Failed to load required static ABIs.");
-    if (!config.QUOTER_V2_ADDRESS) throw new Error("[Contracts] QUOTER_V2_ADDRESS missing in config.");
+    // --- CORRECTED LINE HERE (check) ---
+    if (!config.QUOTER_ADDRESS) throw new Error("[Contracts] QUOTER_ADDRESS missing in config.");
 
     try {
         const contracts = {
@@ -24,12 +25,13 @@ function initializeContracts(provider, signer, config) {
         };
 
         // Instantiate FlashSwap contract (if address provided)
-        if (config.FLASH_SWAP_CONTRACT_ADDRESS && config.FLASH_SWAP_CONTRACT_ADDRESS !== "") {
+        if (config.FLASH_SWAP_CONTRACT_ADDRESS && config.FLASH_SWAP_CONTRACT_ADDRESS !== ethers.ZeroAddress) { // Check against ZeroAddress
              contracts.flashSwapContract = new ethers.Contract(config.FLASH_SWAP_CONTRACT_ADDRESS, FlashSwapABI, signer);
-        } else { console.log("[Contracts] FlashSwap contract instance skipped (address not configured)."); }
+        } else { console.log("[Contracts] FlashSwap contract instance skipped (address not configured or is ZeroAddress)."); }
 
         // Instantiate Quoter V2
-        contracts.quoterContract = new ethers.Contract(config.QUOTER_V2_ADDRESS, IQuoterV2ABI, provider);
+        // --- CORRECTED LINE HERE (instantiation) ---
+        contracts.quoterContract = new ethers.Contract(config.QUOTER_ADDRESS, IQuoterV2ABI, provider);
 
         // Instantiate ALL defined pools from ALL groups
         console.log("[Contracts] Initializing pool contracts...");
