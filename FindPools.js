@@ -1,21 +1,29 @@
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const readline = require("readline");
 
-// Uniswap V3 Subgraph for Polygon
-const GRAPH_API = "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-polygon";
+// --- UPDATED Uniswap V3 Subgraph for Polygon ---
+const GRAPH_API = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3-polygon";
+// --- END UPDATE ---
 
 async function fetchPools(token0, token1) {
+  // Ensure addresses are lowercase for consistent matching in subgraph
+  const token0Lower = token0.toLowerCase();
+  const token1Lower = token1.toLowerCase();
+
+  // Query pools where the pair matches in either order
   const query = `
   {
-    pools(where: {
-      token0: "${token0.toLowerCase()}",
-      token1: "${token1.toLowerCase()}"
-    }) {
+    pools(where: { or: [
+        { token0: "${token0Lower}", token1: "${token1Lower}" },
+        { token0: "${token1Lower}", token1: "${token0Lower}" }
+      ]}) {
       id
       feeTier
       liquidity
-      token0 { symbol }
-      token1 { symbol }
+      sqrtPrice  # Might be useful later
+      token0 { id symbol decimals }
+      token1 { id symbol decimals }
+      totalValueLockedUSD # Can indicate pool significance
     }
   }
   `;
@@ -29,7 +37,6 @@ async function fetchPools(token0, token1) {
 
     const responseBody = await res.json(); // Get the full response body
 
-    // --- DEBUGGING ---
     // Check if the expected data structure exists
     if (responseBody && responseBody.data && responseBody.data.pools) {
       // Expected structure found, return pools
@@ -40,7 +47,6 @@ async function fetchPools(token0, token1) {
       console.error("API Response Body:", JSON.stringify(responseBody, null, 2)); // Log the raw response
       return []; // Return empty array on error
     }
-    // --- END DEBUGGING ---
 
   } catch (error) {
     console.error("Error fetching data from The Graph API:", error);
@@ -80,13 +86,16 @@ function promptInput(query) {
   }
 
   console.log("Found pools:\n");
+  pools.sort((a, b) => Number(a.feeTier) - Number(b.feeTier)); // Sort by fee tier
+
   pools.forEach(pool => {
     console.log(`Pool Address: ${pool.id}`);
-    console.log(`Fee Tier: ${Number(pool.feeTier) / 10000}%`); // Fee tier is in ppm (parts per million), divide by 10000 for %
+    console.log(`Fee Tier: ${Number(pool.feeTier) / 10000}% (${pool.feeTier} ppm)`); // Fee tier is in ppm
     console.log(`Liquidity: ${pool.liquidity}`);
+    console.log(`TVL (USD): ${pool.totalValueLockedUSD ? parseFloat(pool.totalValueLockedUSD).toFixed(2) : 'N/A'}`);
     // Check if token symbols exist before accessing
-    const token0Symbol = pool.token0 && pool.token0.symbol ? pool.token0.symbol : 'Unknown';
-    const token1Symbol = pool.token1 && pool.token1.symbol ? pool.token1.symbol : 'Unknown';
+    const token0Symbol = pool.token0 && pool.token0.symbol ? pool.token0.symbol : pool.token0.id; // Fallback to ID
+    const token1Symbol = pool.token1 && pool.token1.symbol ? pool.token1.symbol : pool.token1.id; // Fallback to ID
     console.log(`Pair: ${token0Symbol}/${token1Symbol}`);
     console.log("-".repeat(40));
   });
