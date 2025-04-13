@@ -4,7 +4,7 @@ const readline = require("readline");
 // --- Use Chainbase Uniswap V3 Polygon Subgraph Endpoint ---
 const GRAPH_API = "https://api.chainbase.online/subgraphs/name/uniswap/uniswap-v3-polygon";
 // --- Explicitly log the endpoint being used ---
-console.log(`[Debug] Using Graph API Endpoint: ${GRAPH_API}`);
+console.log(`*** CONFIRMING ENDPOINT *** Using Graph API Endpoint: ${GRAPH_API}`); // Added more visible log
 
 async function fetchPools(token0, token1) {
   // Ensure addresses are lowercase for consistent matching in subgraph
@@ -33,7 +33,6 @@ async function fetchPools(token0, token1) {
       token0 { id symbol decimals }
       token1 { id symbol decimals }
       totalValueLockedUSD # TVL can indicate pool significance
-      # Add volumeUSD if needed: volumeUSD
     }
   }
   `;
@@ -48,8 +47,7 @@ async function fetchPools(token0, token1) {
     console.log(`[Debug] Sending query to ${GRAPH_API}...`);
     const res = await fetch(GRAPH_API, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" }, // Added Accept header
-      // Send query and variables separately
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify({
         query: query,
         variables: variables
@@ -59,12 +57,11 @@ async function fetchPools(token0, token1) {
 
     const responseBody = await res.json();
 
-    // Chainbase might wrap data slightly differently, check common structures
     const poolsData = responseBody?.data?.pools ?? responseBody?.pools;
 
-    if (poolsData) { // Check if poolsData is not null/undefined
+    if (poolsData) {
       console.log("[Debug] API response contains pools data.");
-      return poolsData || []; // Return data or empty array
+      return poolsData || [];
     } else {
       console.error("Error: Unexpected response structure from The Graph API.");
       console.error("API Response Body:", JSON.stringify(responseBody, null, 2));
