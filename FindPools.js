@@ -1,8 +1,8 @@
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const readline = require("readline");
 
-// --- Use Official Uniswap V3 Cross-Chain Subgraph ---
-const GRAPH_API = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3";
+// --- Use Chainbase Uniswap V3 Polygon Subgraph Endpoint ---
+const GRAPH_API = "https://api.chainbase.online/subgraphs/name/uniswap/uniswap-v3-polygon";
 // --- Explicitly log the endpoint being used ---
 console.log(`[Debug] Using Graph API Endpoint: ${GRAPH_API}`);
 
@@ -11,7 +11,7 @@ async function fetchPools(token0, token1) {
   const token0Lower = token0.toLowerCase();
   const token1Lower = token1.toLowerCase();
 
-  // --- Updated Query for Cross-Chain Subgraph, filtering by network ---
+  // --- Query for a dedicated Polygon subgraph (no network filter needed) ---
   const query = `
   query GetPolygonPools($token0: String!, $token1: String!) {
     pools(
@@ -19,8 +19,6 @@ async function fetchPools(token0, token1) {
       orderBy: totalValueLockedUSD
       orderDirection: desc
       where: {
-        # Filter by network explicitly
-        network: "POLYGON",
         # Match token pairs in either order
         or: [
           { token0: $token0, token1: $token1 },
@@ -39,7 +37,7 @@ async function fetchPools(token0, token1) {
     }
   }
   `;
-  // --- End Updated Query ---
+  // --- End Query ---
 
   const variables = {
       token0: token0Lower,
@@ -47,7 +45,7 @@ async function fetchPools(token0, token1) {
   };
 
   try {
-    console.log(`[Debug] Sending query to ${GRAPH_API} for network POLYGON...`);
+    console.log(`[Debug] Sending query to ${GRAPH_API}...`);
     const res = await fetch(GRAPH_API, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" }, // Added Accept header
@@ -61,9 +59,12 @@ async function fetchPools(token0, token1) {
 
     const responseBody = await res.json();
 
-    if (responseBody && responseBody.data && responseBody.data.pools) {
-      console.log("[Debug] API response contains expected data structure.");
-      return responseBody.data.pools || [];
+    // Chainbase might wrap data slightly differently, check common structures
+    const poolsData = responseBody?.data?.pools ?? responseBody?.pools;
+
+    if (poolsData) { // Check if poolsData is not null/undefined
+      console.log("[Debug] API response contains pools data.");
+      return poolsData || []; // Return data or empty array
     } else {
       console.error("Error: Unexpected response structure from The Graph API.");
       console.error("API Response Body:", JSON.stringify(responseBody, null, 2));
