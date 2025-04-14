@@ -6,49 +6,44 @@ const { handleError } = require('./utils/errorHandler');
 
 // Core Components
 const FlashSwapManager = require('./core/flashSwapManager');
-const PoolScanner = require('./core/poolScanner');
-const ProfitCalculator = require('./core/profitCalculator');
-const TxExecutor = require('./core/txExecutor');
-const ArbitrageEngine = require('./core/arbitrageEngine');
+// --->>> UPDATED IMPORT: Use destructuring <<<---
+const { PoolScanner } = require('./core/poolScanner');
+const ProfitCalculator = require('./core/profitCalculator'); // Assuming this exports directly (module.exports = ProfitCalculator)
+const TxExecutor = require('./core/txExecutor');         // Assuming this exports directly
+const ArbitrageEngine = require('./core/arbitrageEngine'); // Exports directly
 
 // Utilities
-// --->>> UPDATED IMPORT: Import the function, not a class <<<---
-const { getSimpleGasParams } = require('./utils/gasEstimator');
-// NonceManager is handled internally by FlashSwapManager
+const { getSimpleGasParams } = require('./utils/gasEstimator'); // Imports function correctly
 
 async function main() {
     logger.info(`>>> PROJECT HAVOC ARBITRAGE BOT STARTING <<<`);
     logger.info(`==============================================`);
 
-    let engine = null; // Define engine here so it's accessible in catch/finally
+    let engine = null;
 
     try {
-        // 1. Initialize FlashSwapManager (handles provider, signer, core contracts, nonce manager)
+        // 1. Initialize FlashSwapManager
         const flashSwapManager = new FlashSwapManager();
-        await flashSwapManager.initialize(); // Must await initialization
+        await flashSwapManager.initialize();
 
-        // --->>> Instantiate Dependencies <<<---
-
-        // Get components from flashSwapManager AFTER it's initialized
+        // Get components from flashSwapManager
         const provider = flashSwapManager.getProvider();
         const signer = flashSwapManager.getSigner();
         const flashSwapContract = flashSwapManager.getFlashSwapContract();
         const nonceManager = flashSwapManager.getNonceManager();
 
-        // --->>> REMOVED instantiation of GasEstimator <<<---
-        // const gasEstimator = new GasEstimator(provider); // THIS WAS WRONG
+        // 2. Initialize other components
+        // --->>> Instantiate PoolScanner correctly <<<---
+        // Need to check PoolScanner constructor arguments - it expects (config, provider)
+        const poolScanner = new PoolScanner(config, provider); // Pass config and provider
 
-        // Initialize other components, passing necessary dependencies
-        // Pass the provider instead of a GasEstimator instance.
-        // They might need adjustments internally if they expected a specific GasEstimator API.
-        const poolScanner = new PoolScanner(provider);
-        // --->>> UPDATED: Pass provider to ProfitCalculator (assuming it needs it) <<<---
-        const profitCalculator = new ProfitCalculator(provider, getSimpleGasParams); // Pass provider and the gas price function
-        // --->>> UPDATED: Pass provider to TxExecutor (assuming it needs it) <<<---
-        const txExecutor = new TxExecutor(flashSwapManager, nonceManager, provider, getSimpleGasParams); // Pass relevant components + provider + gas price function
+        // Pass provider and gas function to calculator/executor
+        // Need to check their constructors too! Let's assume they are correct for now.
+        // If they fail next, we'll check their constructors and exports.
+        const profitCalculator = new ProfitCalculator(provider, getSimpleGasParams);
+        const txExecutor = new TxExecutor(flashSwapManager, nonceManager, provider, getSimpleGasParams);
 
-
-        // --->>> Instantiate ArbitrageEngine with ALL dependencies <<<---
+        // 3. Instantiate ArbitrageEngine
         engine = new ArbitrageEngine(
             flashSwapManager,
             poolScanner,
@@ -56,10 +51,10 @@ async function main() {
             txExecutor
         );
 
-        // 2. Start the Engine's Monitoring Loop
+        // 4. Start the Engine's Monitoring Loop
         await engine.startMonitoring();
 
-        // 3. Graceful Shutdown Handling (remains the same)
+        // 5. Graceful Shutdown Handling (remains the same)
         const shutdownHandler = async (signal) => {
             logger.info(`${signal} received. Shutting down gracefully...`);
             if (engine && typeof engine.shutdown === 'function') {
