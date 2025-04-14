@@ -9,11 +9,12 @@ const FlashSwapManager = require('./core/flashSwapManager');
 const PoolScanner = require('./core/poolScanner');
 const ProfitCalculator = require('./core/profitCalculator');
 const TxExecutor = require('./core/txExecutor');
-const ArbitrageEngine = require('./core/arbitrageEngine'); // Correct import for direct export
+const ArbitrageEngine = require('./core/arbitrageEngine');
 
-// Utilities (GasEstimator might be used by ProfitCalculator or TxExecutor)
-const GasEstimator = require('./utils/gasEstimator');
-const NonceManager = require('./utils/nonceManager'); // Likely managed within FlashSwapManager or TxExecutor now
+// Utilities
+// --->>> UPDATED IMPORT: Import the function, not a class <<<---
+const { getSimpleGasParams } = require('./utils/gasEstimator');
+// NonceManager is handled internally by FlashSwapManager
 
 async function main() {
     logger.info(`>>> PROJECT HAVOC ARBITRAGE BOT STARTING <<<`);
@@ -27,51 +28,53 @@ async function main() {
         await flashSwapManager.initialize(); // Must await initialization
 
         // --->>> Instantiate Dependencies <<<---
-        // These might need the initialized flashSwapManager components (provider, signer, etc.)
 
         // Get components from flashSwapManager AFTER it's initialized
         const provider = flashSwapManager.getProvider();
         const signer = flashSwapManager.getSigner();
         const flashSwapContract = flashSwapManager.getFlashSwapContract();
-        const nonceManager = flashSwapManager.getNonceManager(); // Get the initialized nonce manager
+        const nonceManager = flashSwapManager.getNonceManager();
+
+        // --->>> REMOVED instantiation of GasEstimator <<<---
+        // const gasEstimator = new GasEstimator(provider); // THIS WAS WRONG
 
         // Initialize other components, passing necessary dependencies
-        const gasEstimator = new GasEstimator(provider); // Pass provider
-        const poolScanner = new PoolScanner(provider); // Pass provider
-        const profitCalculator = new ProfitCalculator(gasEstimator); // Pass gas estimator
-        const txExecutor = new TxExecutor(flashSwapManager, nonceManager, gasEstimator); // Pass manager, nonceManager, gasEstimator
+        // Pass the provider instead of a GasEstimator instance.
+        // They might need adjustments internally if they expected a specific GasEstimator API.
+        const poolScanner = new PoolScanner(provider);
+        // --->>> UPDATED: Pass provider to ProfitCalculator (assuming it needs it) <<<---
+        const profitCalculator = new ProfitCalculator(provider, getSimpleGasParams); // Pass provider and the gas price function
+        // --->>> UPDATED: Pass provider to TxExecutor (assuming it needs it) <<<---
+        const txExecutor = new TxExecutor(flashSwapManager, nonceManager, provider, getSimpleGasParams); // Pass relevant components + provider + gas price function
+
 
         // --->>> Instantiate ArbitrageEngine with ALL dependencies <<<---
-        // Assign to the engine variable defined outside the try block
         engine = new ArbitrageEngine(
-            flashSwapManager, // Pass the initialized manager instance
-            poolScanner,      // Pass the initialized scanner instance
-            profitCalculator, // Pass the initialized calculator instance
-            txExecutor        // Pass the initialized executor instance
+            flashSwapManager,
+            poolScanner,
+            profitCalculator,
+            txExecutor
         );
 
         // 2. Start the Engine's Monitoring Loop
         await engine.startMonitoring();
 
-        // 3. Graceful Shutdown Handling
+        // 3. Graceful Shutdown Handling (remains the same)
         const shutdownHandler = async (signal) => {
             logger.info(`${signal} received. Shutting down gracefully...`);
             if (engine && typeof engine.shutdown === 'function') {
-                await engine.shutdown(); // Call engine's shutdown method
+                await engine.shutdown();
             } else {
                 logger.warn('Engine not available or shutdown method missing during signal handling.');
             }
             process.exit(0);
         };
-
         process.on('SIGINT', shutdownHandler.bind(null, 'SIGINT'));
         process.on('SIGTERM', shutdownHandler.bind(null, 'SIGTERM'));
 
         process.on('uncaughtException', async (error) => {
-            // --- Use logger.error instead of logger.fatal ---
             logger.error('!!! UNCAUGHT EXCEPTION !!! Shutting down...', error);
             handleError(error, 'UncaughtException');
-            // Attempt graceful shutdown if possible, otherwise force exit
             try {
                  if (engine && typeof engine.shutdown === 'function') {
                       await engine.shutdown();
@@ -79,31 +82,24 @@ async function main() {
             } catch (shutdownError) {
                  logger.error('Error during emergency shutdown:', shutdownError);
             }
-            process.exit(1); // Exit with error code
+            process.exit(1);
         });
 
         process.on('unhandledRejection', async (reason, promise) => {
-             // --- Use logger.error instead of logger.fatal ---
              logger.error('!!! UNHANDLED REJECTION !!!', { reason });
              handleError(reason instanceof Error ? reason : new Error(String(reason)), 'UnhandledRejection');
-             // Optional: Add shutdown logic here too? Might depend on the rejection reason.
-             // process.exit(1); // Consider if this should be fatal
         });
 
 
     } catch (error) {
-         // --- Use logger.error instead of logger.fatal ---
         logger.error('Error during bot initialization or startup:', error);
         handleError(error, 'BotInitialization');
-        process.exit(1); // Exit if initialization fails
+        process.exit(1);
     }
 }
 
-// Execute main function
+// Execute main function (remains the same)
 main().catch((error) => {
-    // This catch is for errors thrown directly from main() before async error handlers are set up
-    // or if main itself has a synchronous error before try block completes.
-    // --- Use logger.error instead of logger.fatal ---
     logger.error('Critical error executing main function promise:', error);
     process.exit(1);
 });
