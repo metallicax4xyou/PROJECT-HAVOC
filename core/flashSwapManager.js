@@ -4,7 +4,9 @@ const config = require('../config/index.js');
 const logger = require('../utils/logger');
 const { handleError } = require('../utils/errorHandler');
 const { ABIS } = require('../constants/abis');
-const NonceManager = require('../utils/nonceManager'); // Assuming NonceManager is used here or by TxExecutor
+
+// --->>> UPDATED IMPORT: Use destructuring for named export <<<---
+const { NonceManager } = require('../utils/nonceManager');
 
 class FlashSwapManager {
     constructor() {
@@ -12,14 +14,13 @@ class FlashSwapManager {
         this.provider = null;
         this.signer = null;
         this.flashSwapContract = null;
-        this.quoterContract = null; // Keep quoter if still needed elsewhere
+        this.quoterContract = null;
         this.nonceManager = null;
     }
 
     async initialize() {
         try {
             logger.info('[Manager] Setting up Provider...');
-            // Use JsonRpcProvider for explicit clarity
             this.provider = new JsonRpcProvider(config.RPC_URL);
             const network = await this.provider.getNetwork();
             if (network.chainId !== BigInt(config.CHAIN_ID)) {
@@ -38,9 +39,10 @@ class FlashSwapManager {
                  logger.warn(`[Manager] Configured BOT_ADDRESS (${config.BOT_ADDRESS}) does not match derived Signer address (${this.signer.address})!`);
             }
 
-
             logger.info('[Manager] Initializing Nonce Manager...');
-            this.nonceManager = new NonceManager(this.provider, this.signer.address);
+             // --->>> UPDATED INSTANTIATION: Pass the signer instance <<<---
+             // The custom NonceManager class expects the signer object
+            this.nonceManager = new NonceManager(this.signer);
             await this.nonceManager.initialize(); // Fetch initial nonce
 
 
@@ -52,9 +54,9 @@ class FlashSwapManager {
             this.flashSwapContract = new Contract(config.FLASH_SWAP_CONTRACT_ADDRESS, ABIS.FlashSwap, this.signer);
             logger.info(`[Manager] FlashSwap Contract Initialized: ${await this.flashSwapContract.getAddress()}`);
 
-            // Quoter Contract (V2) - Keep if needed for other purposes or future expansion
+            // Quoter Contract (V2)
             if (config.UNISWAP_V3_QUOTER_ADDRESS && ABIS.IQuoterV2) {
-                 this.quoterContract = new Contract(config.UNISWAP_V3_QUOTER_ADDRESS, ABIS.IQuoterV2, this.provider); // Usually use provider for quotes
+                 this.quoterContract = new Contract(config.UNISWAP_V3_QUOTER_ADDRESS, ABIS.IQuoterV2, this.provider);
                  logger.info(`[Manager] Quoter Contract Initialized: ${await this.quoterContract.getAddress()}`);
             } else {
                  logger.warn('[Manager] Quoter V2 address or ABI missing, Quoter contract not initialized.');
@@ -64,20 +66,18 @@ class FlashSwapManager {
             logger.info('[Manager] FlashSwapManager Initialized Successfully.');
 
         } catch (error) {
-            logger.fatal('[Manager] CRITICAL ERROR during FlashSwapManager initialization:', error);
+            logger.fatal('[Manager] CRITICAL ERROR during FlashSwapManager initialization:', error); // Using fatal here is okay since logger now defines it
             handleError(error, 'FlashSwapManager.initialize');
             throw error; // Re-throw to prevent application start
         }
     }
 
-    // --->>> ADDED: Getter for the provider instance <<<---
     getProvider() {
         if (!this.provider) {
             logger.error("[Manager] getProvider() called before provider was initialized!");
         }
         return this.provider;
     }
-    // --->>> END ADDED SECTION <<<---
 
     getSigner() {
         if (!this.signer) {
@@ -99,10 +99,6 @@ class FlashSwapManager {
          }
          return this.nonceManager;
      }
-
-    // Other methods related to flash swap interactions (if any direct ones are needed)
-    // e.g., maybe a method to fetch contract state, though likely handled by TxExecutor now.
-
 }
 
 module.exports = FlashSwapManager;
