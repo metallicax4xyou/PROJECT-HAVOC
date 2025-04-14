@@ -1,191 +1,174 @@
 // core/arbitrageEngine.js
+const { ethers } = require('ethers');
 const config = require('../config/index.js');
 const logger = require('../utils/logger');
-const { ArbitrageError, handleError } = require('../utils/errorHandler');
-const { FlashSwapManager } = require('./flashSwapManager');
-const { PoolScanner } = require('./poolScanner');
-const { simulateArbitrage } = require('./quoteSimulator');
-const { checkProfitability } = require('./profitCalculator');
-const { executeTransaction } = require('./txExecutor');
+const { handleError } = require('../utils/errorHandler');
+
+// Require necessary core components
+const PoolScanner = require('./poolScanner');
+const QuoteSimulator = require('./quoteSimulator');
+const ProfitCalculator = require('./profitCalculator');
+const TxExecutor = require('./txExecutor');
+// FlashSwapManager is needed for provider and eventual execution via TxExecutor
+const FlashSwapManager = require('./flashSwapManager');
 
 class ArbitrageEngine {
-    constructor() {
-        this.config = config;
-        this.manager = new FlashSwapManager(); // Manager handles provider, signer, contracts, nonce
-        this.scanner = null; // Will be initialized after manager
-        this.isRunning = false;
-        this.isProcessing = false; // Simple lock to prevent overlapping cycles
-        this.cycleCount = 0;
-        this.lastErrorTimestamp = 0;
-        this.errorBackoffMs = 5000; // Start backoff at 5 seconds
-    }
+    constructor(flashSwapManager, poolScanner, profitCalculator, txExecutor) {
+        this.flashSwapManager = flashSwapManager; // Store FlashSwapManager instance
+        this.poolScanner = poolScanner;
+        this.profitCalculator = profitCalculator;
+        this.txExecutor = txExecutor;
 
-    async initialize() {
-        logger.log('[Engine] Initializing Arbitrage Engine...');
-        try {
-            await this.manager.initialize(); // Initialize provider, signer, contracts, nonce manager
-            // Pass the initialized provider to the scanner
-            this.scanner = new PoolScanner(this.config, this.manager.getProvider());
-            logger.log('[Engine] Arbitrage Engine Initialized Successfully.');
-            return true;
-        } catch (error) {
-            // Initialization errors are critical
-            handleError(error, 'ArbitrageEngine Initialization');
-            logger.error('[Engine] CRITICAL: Engine initialization failed. Exiting.');
-            return false; // Indicate failure
+        // --->>> ADDED: Get provider from FlashSwapManager <<<---
+        this.provider = this.flashSwapManager.getProvider();
+        if (!this.provider) {
+            const errorMsg = "ArbitrageEngine CRITICAL: Could not get Provider instance from FlashSwapManager during initialization!";
+            logger.fatal(errorMsg); // Use fatal to indicate critical setup failure
+            throw new Error(errorMsg);
         }
+        // --->>> END ADDED SECTION <<<---
+
+
+        this.isMonitoring = false;
+        this.cycleCount = 0;
+        this.lastCycleTimestamp = 0;
+        this.cycleInterval = config.CYCLE_INTERVAL_MS || 5000; // Default 5 seconds
+
+        logger.info('[Engine] Initializing Arbitrage Engine...');
+        // Validate dependencies
+        if (!this.flashSwapManager || !this.poolScanner || !this.profitCalculator || !this.txExecutor) {
+            logger.fatal('[Engine] CRITICAL: Missing one or more core dependencies!');
+            throw new Error('ArbitrageEngine missing core dependencies.');
+        }
+        logger.info('[Engine] Arbitrage Engine Initialized Successfully.');
     }
 
-    /**
-     * Starts the main arbitrage monitoring loop.
-     */
-    start() {
-        if (this.isRunning) {
-            logger.warn('[Engine] Engine is already running.');
+    async startMonitoring() {
+        if (this.isMonitoring) {
+            logger.warn('[Engine] Monitoring is already active.');
             return;
         }
-        if (!this.scanner || !this.manager.isInitialized) {
-             logger.error('[Engine] Cannot start, initialization failed or not complete.');
-             return;
-        }
+        this.isMonitoring = true;
+        this.cycleCount = 0; // Reset cycle count on start
+        logger.info(`[Engine] Starting arbitrage monitoring loop for ${config.NETWORK_NAME}...`);
+        logger.info(`[Engine] Cycle Interval: ${this.cycleInterval / 1000} seconds.`);
+        logger.info('>>> Engine started. Monitoring for opportunities... (Press Ctrl+C to stop) <<<');
 
-        logger.log(`[Engine] Starting arbitrage monitoring loop for ${this.config.NAME}...`);
-        this.isRunning = true;
-        this.runCycle(); // Run the first cycle immediately
+        // Initial cycle immediate run
+        await this.runCycle();
 
         // Set interval for subsequent cycles
-        const pollingIntervalMs = this.config.BLOCK_TIME_MS || 5000; // Use config or default
-        logger.log(`[Engine] Cycle Interval: ${pollingIntervalMs / 1000} seconds.`);
-        setInterval(async () => {
-            if (this.isRunning && !this.isProcessing) {
-                 await this.runCycle();
-            } else if (this.isProcessing) {
-                 logger.debug('[Engine] Skipping cycle run - previous cycle still processing.');
-            }
-        }, pollingIntervalMs);
+        this.monitorInterval = setInterval(async () => {
+            await this.runCycle();
+        }, this.cycleInterval);
     }
 
-    /**
-     * Stops the main arbitrage monitoring loop.
-     */
-    stop() {
-        logger.log('[Engine] Stopping arbitrage engine...');
-        this.isRunning = false;
-        // TODO: Add any cleanup logic if necessary (e.g., clear timeouts/intervals explicitly if needed)
-    }
-
-    /**
-     * Executes a single arbitrage check cycle.
-     */
-    async runCycle() {
-        if (this.isProcessing) {
-             logger.warn('[Engine] Attempted to run cycle while already processing.');
-             return; // Prevent overlap
+    stopMonitoring() {
+        if (!this.isMonitoring) {
+            logger.warn('[Engine] Monitoring is not active.');
+            return;
         }
-        // Simple error backoff mechanism
-        if (Date.now() < this.lastErrorTimestamp + this.errorBackoffMs) {
-            logger.warn(`[Engine] In error backoff period. Skipping cycle. Waiting ${this.errorBackoffMs}ms...`);
+        this.isMonitoring = false;
+        if (this.monitorInterval) {
+            clearInterval(this.monitorInterval);
+            this.monitorInterval = null;
+        }
+        logger.info('[Engine] Arbitrage monitoring stopped.');
+    }
+
+    async runCycle() {
+        if (!this.isMonitoring) {
+            logger.warn('[Engine] runCycle called but monitoring is stopped.');
             return;
         }
 
-        this.isProcessing = true;
         this.cycleCount++;
-        const startTime = Date.now();
-        logger.log(`\n===== [Engine] Starting Cycle #${this.cycleCount} =====`);
+        const cycleStartTime = Date.now();
+        this.lastCycleTimestamp = cycleStartTime;
+        logger.info(`\n===== [Engine] Starting Cycle #${this.cycleCount} =====`);
 
         try {
-            // 1. Scan for Pools & Find Raw Opportunities
-            // Get all pool configurations from the loaded config
-            const allPoolInfos = this.config.POOL_GROUPS.flatMap(group =>
-                 group.pools.map(p => ({ ...p, groupName: group.name })) // Ensure groupName is included
-            );
-            const livePoolStates = await this.scanner.fetchPoolStates(allPoolInfos);
-            const potentialOpportunities = this.scanner.findOpportunities(livePoolStates);
-
-            if (!potentialOpportunities || potentialOpportunities.length === 0) {
-                logger.log('[Engine] No potential opportunities found in this cycle.');
-                this.resetErrorBackoff(); // Reset backoff on a successful (even if no opps) cycle
-                return; // End cycle early
+            // 1. Scan for Potential Opportunities
+            const opportunities = await this.poolScanner.scan();
+            if (!opportunities || opportunities.length === 0) {
+                logger.info('[Engine] No potential opportunities found by scanner in this cycle.');
+                this.logCycleEnd(cycleStartTime);
+                return;
             }
+            logger.info(`[Engine] Found ${opportunities.length} potential opportunities. Simulating...`);
 
-            logger.log(`[Engine] Found ${potentialOpportunities.length} potential opportunities. Simulating...`);
+            // 2. Simulate Each Opportunity
+            const simulationPromises = opportunities.map(opportunity =>
+                // --->>> UPDATED: Pass this.provider to simulateArbitrage <<<---
+                QuoteSimulator.simulateArbitrage(this.provider, opportunity)
+                    .then(simResult => ({ ...opportunity, simResult })) // Attach result to opportunity
+                    .catch(error => {
+                        // Catch errors *during* simulation promise itself
+                        logger.error(`[Engine] Unexpected error during simulation promise for opportunity ${opportunity.groupName}: ${error.message}`);
+                        handleError(error, `Engine.SimulationPromise (${opportunity.groupName})`);
+                        return { ...opportunity, simResult: null }; // Ensure it returns null result on error
+                    })
+            );
 
-            // 2. Simulate and Check Profitability for each opportunity
-            let bestProfitableOpportunity = null;
-            let maxNetProfit = -1n; // Use -1n to handle potential zero profit scenarios correctly
+            const simulationResults = await Promise.all(simulationPromises);
 
-            for (const opportunity of potentialOpportunities) {
-                const simulationResult = await simulateArbitrage(opportunity);
-                if (simulationResult && simulationResult.grossProfit > 0n) {
-                    // Pass the specific group config for minProfit check
-                    const groupConfig = this.config.POOL_GROUPS.find(g => g.name === opportunity.groupName);
-                    if (!groupConfig) {
-                         logger.error(`[Engine] Internal Error: Could not find group config for ${opportunity.groupName} during profitability check.`);
-                         continue;
-                    }
+            // Filter out failed simulations (where simResult is null)
+            const successfulSimulations = simulationResults.filter(res => res.simResult !== null);
 
-                    const profitabilityResult = await checkProfitability(simulationResult, this.manager.getProvider(), groupConfig);
+            if (successfulSimulations.length === 0) {
+                logger.info('[Engine] No opportunities passed simulation phase.');
+                this.logCycleEnd(cycleStartTime);
+                return;
+            }
+            logger.info(`[Engine] ${successfulSimulations.length} opportunities passed simulation. Checking profitability...`);
 
-                    if (profitabilityResult.isProfitable) {
-                         logger.log(`[Engine] ✅ PROFITABLE Opportunity found for ${opportunity.groupName}! Net Profit: ~${profitabilityResult.netProfit >= 0n ? ethers.formatUnits(profitabilityResult.netProfit, opportunity.sdkTokenBorrowed.decimals) : 'N/A'} ${opportunity.sdkTokenBorrowed.symbol}`);
-                        // Track the best one found so far
-                        // TODO: Add more sophisticated ranking (e.g., ROI, consider non-native accuracy)
-                        if (profitabilityResult.netProfit > maxNetProfit) {
-                            maxNetProfit = profitabilityResult.netProfit;
-                            bestProfitableOpportunity = {
-                                ...opportunity, // Carry over opportunity details
-                                ...simulationResult, // Add trade1, trade2, grossProfit etc.
-                                ...profitabilityResult // Add netProfit, isProfitable, estimatedGasCost
-                            };
-                        }
-                    }
+
+            // 3. Calculate Profitability (Including Gas Costs)
+            // We need to pass the simulation results (which now include gross profit)
+            // to the ProfitCalculator, which will estimate gas and determine net profit.
+            const profitableTrades = await this.profitCalculator.findMostProfitable(successfulSimulations); // Assuming this method exists and takes simulations
+
+            // 4. Execute Best Opportunity if Found
+            if (profitableTrades && profitableTrades.length > 0) {
+                // Assuming findMostProfitable returns an array sorted by profitability
+                const bestTrade = profitableTrades[0]; // Take the top one
+                logger.info(`[Engine] Profitable opportunity found! Group: ${bestTrade.groupName}, Est. Net Profit: ${bestTrade.netProfitEth} ETH. Attempting execution...`);
+
+                // TODO: Implement Dry Run Check
+                if (config.DRY_RUN) {
+                     logger.warn(`[Engine] --- DRY RUN MODE --- Would execute trade: Group ${bestTrade.groupName}, Start Pool: ${bestTrade.startPoolInfo.address}, Swap Pool: ${bestTrade.swapPoolInfo.address}, Borrow: ${ethers.formatUnits(bestTrade.borrowAmount, bestTrade.sdkTokenBorrowed.decimals)} ${bestTrade.sdkTokenBorrowed.symbol}`);
+                } else {
+                    // Pass the fully prepared trade object to the executor
+                    await this.txExecutor.executeTrade(bestTrade);
                 }
-            } // End loop through opportunities
 
-            // 3. Execute the Best Opportunity (if any)
-            if (bestProfitableOpportunity) {
-                 logger.log(`[Engine] Attempting to execute best opportunity: ${bestProfitableOpportunity.groupName} (Net: ~${maxNetProfit})`);
-                 const executionResult = await executeTransaction(bestProfitableOpportunity, this.manager, bestProfitableOpportunity); // Pass manager and profitability result
-
-                 if (executionResult.success) {
-                     logger.log(`[Engine] Execution successful (or simulation passed). TxHash/Status: ${executionResult.txHash}`);
-                     // Consider adding a cooldown period after successful execution
-                 } else {
-                      logger.error('[Engine] Execution failed.', executionResult.error);
-                      // Implement error handling strategies (e.g., circuit breaker, specific backoff)
-                      this.increaseErrorBackoff();
-                 }
             } else {
-                 logger.log('[Engine] No profitable opportunities found after simulation and profit check.');
-                 this.resetErrorBackoff(); // Reset backoff if cycle completed without execution errors
+                logger.info('[Engine] No profitable opportunities found after simulation and profit check.');
             }
 
         } catch (error) {
-            handleError(error, `Engine Cycle #${this.cycleCount}`);
-            this.increaseErrorBackoff(); // Increase backoff on any cycle error
+            logger.error('[Engine] Critical error during cycle execution:', error);
+            handleError(error, `Engine.runCycle (${this.cycleCount})`);
+            // Decide if we should stop monitoring on critical errors
+            // this.stopMonitoring();
         } finally {
-            const endTime = Date.now();
-            logger.log(`===== [Engine] Cycle #${this.cycleCount} Finished (${endTime - startTime}ms) =====\n`);
-            this.isProcessing = false; // Release lock
+             this.logCycleEnd(cycleStartTime);
         }
     }
 
-    // Simple exponential backoff for errors
-    increaseErrorBackoff() {
-        this.lastErrorTimestamp = Date.now();
-        // Increase backoff, cap at ~1 minute
-        this.errorBackoffMs = Math.min(this.errorBackoffMs * 2, 60000);
-        logger.log(`[Engine] Increasing error backoff to ${this.errorBackoffMs / 1000} seconds.`);
+    logCycleEnd(startTime) {
+         const duration = Date.now() - startTime;
+         logger.info(`===== [Engine] Cycle #${this.cycleCount} Finished (${duration}ms) =====`);
     }
 
-    resetErrorBackoff() {
-        if (this.errorBackoffMs > 5000) {
-             logger.log('[Engine] Resetting error backoff period.');
-        }
-        this.errorBackoffMs = 5000; // Reset to base
-        this.lastErrorTimestamp = 0;
+    // Graceful shutdown handler
+    async shutdown() {
+        logger.info('[Engine] Initiating graceful shutdown...');
+        this.stopMonitoring();
+        // Add any other cleanup tasks if needed
+        logger.info('[Engine] Shutdown complete.');
+        process.exit(0); // Exit cleanly
     }
-
 }
 
-module.exports = { ArbitrageEngine };
+module.exports = ArbitrageEngine;
