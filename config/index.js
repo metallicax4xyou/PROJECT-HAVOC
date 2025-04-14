@@ -1,5 +1,5 @@
 // config/index.js
-// Main configuration loader - Enhanced Validation
+// Main configuration loader - FINAL VERSION
 
 require('dotenv').config(); // Load .env file first
 const { ethers } = require('ethers');
@@ -9,60 +9,43 @@ const { getNetworkMetadata } = require('./networks');
 const { PROTOCOL_ADDRESSES } = require('../constants/addresses');
 
 // --- Global Settings & Defaults (from .env or defaults) ---
-// (These remain the same as before)
-const MIN_NET_PROFIT_WEI = { WETH: ethers.parseUnits(process.env.MIN_PROFIT_WETH || '0.0005', 18), USDC: ethers.parseUnits(process.env.MIN_PROFIT_USDC || '1', 6), USDT: ethers.parseUnits(process.env.MIN_PROFIT_USDT || '1', 6) };
-const FLASH_LOAN_FEE_BPS = parseInt(process.env.FLASH_LOAN_FEE_BPS || '9', 10);
+
+const MIN_NET_PROFIT_WEI = {
+    WETH: ethers.parseUnits(process.env.MIN_PROFIT_WETH || '0.0005', 18),
+    USDC: ethers.parseUnits(process.env.MIN_PROFIT_USDC || '1', 6),
+    USDT: ethers.parseUnits(process.env.MIN_PROFIT_USDT || '1', 6),
+    // Add other tokens if needed
+};
+
+const FLASH_LOAN_FEE_BPS = parseInt(process.env.FLASH_LOAN_FEE_BPS || '9', 10); // Default 0.09%
+
 const GAS_LIMIT_ESTIMATE = BigInt(process.env.GAS_LIMIT_ESTIMATE || '1000000');
-const BORROW_AMOUNTS_WEI = { WETH: ethers.parseUnits(process.env.BORROW_AMOUNT_WETH_WEI || '100000000000000000', 18), USDC: ethers.parseUnits(process.env.BORROW_AMOUNT_USDC_WEI || '100000000', 6), USDT: ethers.parseUnits(process.env.BORROW_AMOUNT_USDT_WEI || '100000000', 6) };
+
+const BORROW_AMOUNTS_WEI = {
+    WETH: ethers.parseUnits(process.env.BORROW_AMOUNT_WETH_WEI || '100000000000000000', 18), // Default 0.1 WETH
+    USDC: ethers.parseUnits(process.env.BORROW_AMOUNT_USDC_WEI || '100000000', 6),          // Default 100 USDC
+    USDT: ethers.parseUnits(process.env.BORROW_AMOUNT_USDT_WEI || '100000000', 6),          // Default 100 USDT
+    // Add other tokens if needed
+};
+
+// Default Slippage Tolerance (in basis points, e.g., 10 = 0.1%)
 const SLIPPAGE_TOLERANCE_BPS = parseInt(process.env.SLIPPAGE_TOLERANCE_BPS || '10', 10);
 // --- End Global Settings ---
 
 
-// +++ Enhanced Address Validation Function (inspired by Deepseek) +++
+// +++ Address Validation Function (from Action 16) +++
 function validateAndNormalizeAddress(rawAddress, envVarName) {
-    // Ensure input is treated as a string
     const addressString = String(rawAddress || '').trim();
-
-    if (!addressString) {
-        // console.warn(`[Config] ${envVarName}: Raw value is empty or missing.`);
-        return null; // Return null if empty after trim
-    }
-
+    if (!addressString) { return null; }
     try {
-        // Clean common formatting issues more aggressively
-        const cleanAddress = addressString
-            .replace(/^['"]+|['"]+$/g, '') // Remove surrounding quotes
-            .replace(/[^a-zA-Z0-9x]/g, ''); // Remove potentially problematic non-alphanumeric chars (except x)
-
-        // console.log(`[DEBUG] ${envVarName}: Cleaned value for validation: "${cleanAddress}"`);
-
-        // Basic validation: Check prefix and length AFTER cleaning
-        if (!cleanAddress.startsWith('0x')) {
-            console.warn(`[Config] Validation FAILED for ${envVarName} ("${cleanAddress}"): Missing 0x prefix.`);
-            return null;
-        }
-        if (cleanAddress.length !== 42) {
-            console.warn(`[Config] Validation FAILED for ${envVarName} ("${cleanAddress}"): Invalid length (${cleanAddress.length} chars).`);
-            return null;
-        }
-
-        // Use ethers.isAddress for basic format/checksum check (more forgiving of case)
-        if (!ethers.isAddress(cleanAddress)) {
-             console.warn(`[Config] Validation FAILED for ${envVarName} ("${cleanAddress}"): Failed ethers.isAddress() check (likely invalid hex or checksum).`);
-             return null;
-        }
-
-        // **Crucially, return the CHECK SUMMED version using getAddress**
-        // This ensures consistent casing for comparisons later if needed
+        const cleanAddress = addressString.replace(/^['"]+|['"]+$/g, '').replace(/[^a-zA-Z0-9x]/g, '');
+        if (!cleanAddress.startsWith('0x')) { console.warn(`[Config] Validation FAILED for ${envVarName} ("${cleanAddress}"): Missing 0x prefix.`); return null; }
+        if (cleanAddress.length !== 42) { console.warn(`[Config] Validation FAILED for ${envVarName} ("${cleanAddress}"): Invalid length (${cleanAddress.length} chars).`); return null; }
+        if (!ethers.isAddress(cleanAddress)) { console.warn(`[Config] Validation FAILED for ${envVarName} ("${cleanAddress}"): Failed ethers.isAddress() check (likely invalid hex or checksum).`); return null; }
         return ethers.getAddress(cleanAddress);
-
-    } catch (error) {
-        // Catch any unexpected errors during validation/cleaning
-        console.warn(`[Config] ${envVarName}: Unexpected validation error for raw value "${rawAddress}" - ${error.message}`);
-        return null;
-    }
+    } catch (error) { console.warn(`[Config] ${envVarName}: Unexpected validation error for raw value "${rawAddress}" - ${error.message}`); return null; }
 }
-// +++ End Enhanced Validation Function +++
+// +++ End Validation Function +++
 
 
 // --- Config Loading Function ---
@@ -117,54 +100,69 @@ function loadConfig() {
 
         // Load pool addresses from .env using enhanced validation
         group.pools = [];
-        console.log(`[Config] Processing Pool Group: ${group.name}`);
+        // console.log(`[Config] Processing Pool Group: ${group.name}`); // Optional: Keep for debug
         for (const feeTier in group.feeTierToEnvMap) {
             const envVarKey = group.feeTierToEnvMap[feeTier];
             const rawAddress = process.env[envVarKey];
-
-            console.log(`[DEBUG] Checking env var: ${envVarKey}`);
-            console.log(`  - Raw value: "${rawAddress}"`); // Keep logging raw
+            // console.log(`[DEBUG] Checking env var: ${envVarKey}`); // Optional: Keep for debug
+            // console.log(`  - Raw value: "${rawAddress}"`); // Optional: Keep for debug
 
             if (rawAddress) {
-                // +++ Use the NEW enhanced validation function +++
                 const validatedAddress = validateAndNormalizeAddress(rawAddress, envVarKey);
-
-                if (validatedAddress) { // Check if validation returned a valid address
-                    const poolConfig = {
-                        address: validatedAddress, // Use the validated & checksummed address
-                        feeBps: parseInt(feeTier, 10),
-                        groupName: group.name,
-                    };
+                if (validatedAddress) {
+                    const poolConfig = { address: validatedAddress, feeBps: parseInt(feeTier, 10), groupName: group.name };
                     group.pools.push(poolConfig);
                     totalPoolsLoaded++;
-                    console.log(`  - SUCCESS: Loaded Pool: ${group.name} Fee ${feeTier} -> ${poolConfig.address}`);
+                    // console.log(`  - SUCCESS: Loaded Pool: ${group.name} Fee ${feeTier} -> ${poolConfig.address}`); // Optional: Keep for debug
                 } else {
-                    // Validation function already printed specific warnings
-                    console.log(`  - SKIPPED: ${envVarKey} due to validation failure (see warnings above).`);
+                    // console.log(`  - SKIPPED: ${envVarKey} due to validation failure.`); // Optional: Keep for debug
                 }
-                // +++ End using enhanced validation +++
             } else {
-                 console.log(`  - Env var not found for ${envVarKey}. Skipping.`);
+                 // console.log(`  - Env var not found for ${envVarKey}. Skipping.`); // Optional: Keep for debug
             }
-             console.log("---"); // Separator
+            // console.log("---"); // Optional: Keep for debug
         }
         console.log(`[Config] Group ${group.name} initialized with ${group.pools.length} pools.`);
-        console.log("=====================================");
-    });
+        // console.log("====================================="); // Optional: Keep for debug
+
+    }); // End loop through POOL_GROUPS
 
     console.log(`[Config] Total unique pools loaded from .env: ${totalPoolsLoaded}`);
     if (totalPoolsLoaded === 0) { console.warn("[Config] WARNING: No pool addresses were loaded..."); }
 
-    // --- Add Provider/Signer Info ---
+    // --- Add Provider/Signer Info & Flash Swap Address ---
     combinedConfig.RPC_URL = process.env[`${networkName.toUpperCase()}_RPC_URL`];
     combinedConfig.PRIVATE_KEY = process.env.PRIVATE_KEY;
-    if (!combinedConfig.RPC_URL) { throw new Error(`RPC URL env var (${networkName.toUpperCase()}_RPC_URL) not set.`); }
-    if (!combinedConfig.PRIVATE_KEY || !combinedConfig.PRIVATE_KEY.startsWith('0x')) { throw new Error(`PRIVATE_KEY env var not set or missing '0x' prefix.`); }
+    // +++ Load Flash Swap Address +++
+    const flashSwapEnvKey = `${networkName.toUpperCase()}_FLASH_SWAP_ADDRESS`;
+    const rawFlashSwapAddress = process.env[flashSwapEnvKey];
 
+    if (!combinedConfig.RPC_URL) { throw new Error(`RPC URL environment variable (${networkName.toUpperCase()}_RPC_URL) not set.`); }
+    if (!combinedConfig.PRIVATE_KEY || !combinedConfig.PRIVATE_KEY.startsWith('0x')) { throw new Error(`PRIVATE_KEY environment variable not set or missing '0x' prefix.`); }
+
+    if (rawFlashSwapAddress) {
+        const validatedFlashSwapAddress = validateAndNormalizeAddress(rawFlashSwapAddress, flashSwapEnvKey);
+        if (validatedFlashSwapAddress) {
+            combinedConfig.FLASH_SWAP_CONTRACT_ADDRESS = validatedFlashSwapAddress;
+            console.log(`[Config] Loaded Flash Swap Address: ${combinedConfig.FLASH_SWAP_CONTRACT_ADDRESS}`);
+        } else {
+             // Validation function already warned, throw critical error here
+             throw new Error(`Invalid address format provided for ${flashSwapEnvKey}: "${rawFlashSwapAddress}"`);
+        }
+    } else {
+         // Set to ZeroAddress if not found, FlashSwapManager should handle this if required
+         console.warn(`[Config] WARNING: ${flashSwapEnvKey} not set in environment variables. Setting FlashSwap address to ZeroAddress.`);
+         combinedConfig.FLASH_SWAP_CONTRACT_ADDRESS = ethers.ZeroAddress;
+         // Throwing error here instead, as manager expects it now
+         // throw new Error(`${flashSwapEnvKey} environment variable not set.`);
+    }
+    // +++ End Load Flash Swap Address +++
+
+    // Return the final, fully populated config object
     return combinedConfig;
-}
+} // End loadConfig function
 
 // Load the config immediately and export it
 const config = loadConfig();
 console.log(`[Config] Configuration loaded successfully for network: ${config.NAME}`);
-module.exports = config;
+module.exports = config; // Export the loaded config object directly
