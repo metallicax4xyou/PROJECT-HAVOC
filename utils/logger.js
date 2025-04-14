@@ -27,6 +27,9 @@ function debug(...args) {
 
 module.exports = {
     log,
+    // --->>> ADDED THIS LINE <<<---
+    info: log, // Map the 'info' standard name to the 'log' function
+    // --->>> --- <<<---
     warn,
     error,
     debug,
