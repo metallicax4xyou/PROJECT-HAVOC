@@ -19,6 +19,8 @@ async function main() {
     logger.info(`>>> PROJECT HAVOC ARBITRAGE BOT STARTING <<<`);
     logger.info(`==============================================`);
 
+    let engine = null; // Define engine here so it's accessible in catch/finally
+
     try {
         // 1. Initialize FlashSwapManager (handles provider, signer, core contracts, nonce manager)
         const flashSwapManager = new FlashSwapManager();
@@ -40,7 +42,8 @@ async function main() {
         const txExecutor = new TxExecutor(flashSwapManager, nonceManager, gasEstimator); // Pass manager, nonceManager, gasEstimator
 
         // --->>> Instantiate ArbitrageEngine with ALL dependencies <<<---
-        const engine = new ArbitrageEngine(
+        // Assign to the engine variable defined outside the try block
+        engine = new ArbitrageEngine(
             flashSwapManager, // Pass the initialized manager instance
             poolScanner,      // Pass the initialized scanner instance
             profitCalculator, // Pass the initialized calculator instance
@@ -51,24 +54,26 @@ async function main() {
         await engine.startMonitoring();
 
         // 3. Graceful Shutdown Handling
-        process.on('SIGINT', async () => {
-            logger.info('SIGINT received. Shutting down gracefully...');
-            await engine.shutdown(); // Call engine's shutdown method
+        const shutdownHandler = async (signal) => {
+            logger.info(`${signal} received. Shutting down gracefully...`);
+            if (engine && typeof engine.shutdown === 'function') {
+                await engine.shutdown(); // Call engine's shutdown method
+            } else {
+                logger.warn('Engine not available or shutdown method missing during signal handling.');
+            }
             process.exit(0);
-        });
+        };
 
-        process.on('SIGTERM', async () => {
-            logger.info('SIGTERM received. Shutting down gracefully...');
-            await engine.shutdown(); // Call engine's shutdown method
-            process.exit(0);
-        });
+        process.on('SIGINT', shutdownHandler.bind(null, 'SIGINT'));
+        process.on('SIGTERM', shutdownHandler.bind(null, 'SIGTERM'));
 
         process.on('uncaughtException', async (error) => {
-            logger.fatal('!!! UNCAUGHT EXCEPTION !!! Shutting down...', error);
+            // --- Use logger.error instead of logger.fatal ---
+            logger.error('!!! UNCAUGHT EXCEPTION !!! Shutting down...', error);
             handleError(error, 'UncaughtException');
             // Attempt graceful shutdown if possible, otherwise force exit
             try {
-                 if (engine && engine.isMonitoring) {
+                 if (engine && typeof engine.shutdown === 'function') {
                       await engine.shutdown();
                  }
             } catch (shutdownError) {
@@ -78,6 +83,7 @@ async function main() {
         });
 
         process.on('unhandledRejection', async (reason, promise) => {
+             // --- Use logger.error instead of logger.fatal ---
              logger.error('!!! UNHANDLED REJECTION !!!', { reason });
              handleError(reason instanceof Error ? reason : new Error(String(reason)), 'UnhandledRejection');
              // Optional: Add shutdown logic here too? Might depend on the rejection reason.
@@ -86,7 +92,8 @@ async function main() {
 
 
     } catch (error) {
-        logger.fatal('Error during bot initialization or startup:', error);
+         // --- Use logger.error instead of logger.fatal ---
+        logger.error('Error during bot initialization or startup:', error);
         handleError(error, 'BotInitialization');
         process.exit(1); // Exit if initialization fails
     }
@@ -95,6 +102,8 @@ async function main() {
 // Execute main function
 main().catch((error) => {
     // This catch is for errors thrown directly from main() before async error handlers are set up
-    logger.fatal('Critical error executing main function:', error);
+    // or if main itself has a synchronous error before try block completes.
+    // --- Use logger.error instead of logger.fatal ---
+    logger.error('Critical error executing main function promise:', error);
     process.exit(1);
 });
