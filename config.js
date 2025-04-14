@@ -71,6 +71,16 @@ const ARBITRUM = {
             token1Symbol: 'USDC',
             borrowTokenSymbol: 'WETH', // Suggest borrowing WETH for this pair
             quoteTokenSymbol: 'USDC', // Used for MIN_NET_PROFIT_WEI lookup if needed, or profit reporting
+            // +++ DEBUG LOGGING START +++
+            debug_env_vars: (() => { // IIFE to log during object creation
+                console.log('[DEBUG] Reading ARBITRUM_WETH_USDC env vars:');
+                console.log(`  - 100: ${process.env.ARBITRUM_WETH_USDC_100_ADDRESS}`);
+                console.log(`  - 500: ${process.env.ARBITRUM_WETH_USDC_500_ADDRESS}`);
+                console.log(`  - 3000: ${process.env.ARBITRUM_WETH_USDC_3000_ADDRESS}`);
+                console.log(`  - 10000: ${process.env.ARBITRUM_WETH_USDC_10000_ADDRESS}`);
+                return true; // Return value doesn't matter, just need the side effect
+            })(),
+            // +++ DEBUG LOGGING END +++
             pools: [
                 pool(process.env.ARBITRUM_WETH_USDC_100_ADDRESS, 100), // 0.01%
                 pool(process.env.ARBITRUM_WETH_USDC_500_ADDRESS, 500), // 0.05%
@@ -83,9 +93,17 @@ const ARBITRUM = {
             token1Symbol: 'USDT',
             borrowTokenSymbol: 'USDC', // Suggest borrowing USDC (often higher liquidity)
             quoteTokenSymbol: 'USDC', // Or USDT, define how you measure profit
+            // +++ DEBUG LOGGING START +++
+             debug_env_vars_stable: (() => {
+                 console.log('[DEBUG] Reading ARBITRUM_USDC_USDT env vars:');
+                 console.log(`  - 100: ${process.env.ARBITRUM_USDC_USDT_100_ADDRESS}`);
+                 console.log(`  - 500: ${process.env.ARBITRUM_USDC_USDT_500_ADDRESS}`); // Will likely be undefined
+                 return true;
+             })(),
+            // +++ DEBUG LOGGING END +++
             pools: [
                 pool(process.env.ARBITRUM_USDC_USDT_100_ADDRESS, 100), // 0.01%
-                pool(process.env.ARBITRUM_USDC_USDT_500_ADDRESS, 500), // 0.05%
+                pool(process.env.ARBITRUM_USDC_USDT_500_ADDRESS, 500), // 0.05% - Expect null here
             ].filter(p => p !== null),
         }
     },
@@ -96,7 +114,7 @@ const ARBITRUM = {
 const POLYGON = {
     NAME: 'polygon',
     CHAIN_ID: 137,
-    NATIVE_SYMBOL: 'MATIC', // Added for gas cost display
+    NATIVE_SYMBOL: 'MATIC',
     RPC_URL: process.env.POLYGON_RPC_URL,
     FACTORY_ADDRESS: UNISWAP_V3_FACTORY,
     QUOTER_ADDRESS: QUOTER_V2_ADDRESS,
@@ -135,7 +153,7 @@ const POLYGON = {
 const OPTIMISM = {
     NAME: 'optimism',
     CHAIN_ID: 10,
-    NATIVE_SYMBOL: 'ETH', // Added for gas cost display
+    NATIVE_SYMBOL: 'ETH',
     RPC_URL: process.env.OPTIMISM_RPC_URL,
     FACTORY_ADDRESS: UNISWAP_V3_FACTORY,
     QUOTER_ADDRESS: QUOTER_V2_ADDRESS,
@@ -174,7 +192,7 @@ const OPTIMISM = {
 const BASE = {
     NAME: 'base',
     CHAIN_ID: 8453,
-    NATIVE_SYMBOL: 'ETH', // Added for gas cost display
+    NATIVE_SYMBOL: 'ETH',
     RPC_URL: process.env.BASE_RPC_URL,
     FACTORY_ADDRESS: '0x33128a8fC17869897dcE68Ed026d694621f6FDfD', // Uniswap V3 Factory on Base
     QUOTER_ADDRESS: QUOTER_V2_ADDRESS,
@@ -232,6 +250,10 @@ activeConfig.computePoolAddress = computePoolAddress; // Add util
 // --- Add Token Objects to POOL_GROUPS for easier access ---
 for (const groupKey in activeConfig.POOL_GROUPS) {
     const group = activeConfig.POOL_GROUPS[groupKey];
+    // Remove debug properties if they exist (optional)
+    delete group.debug_env_vars;
+    delete group.debug_env_vars_stable;
+
     group.token0 = activeConfig.TOKENS[group.token0Symbol];
     group.token1 = activeConfig.TOKENS[group.token1Symbol];
     group.borrowToken = activeConfig.TOKENS[group.borrowTokenSymbol];
