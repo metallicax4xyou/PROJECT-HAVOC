@@ -1,5 +1,5 @@
 // config/index.js
-// Main configuration loader - FINAL VERSION
+// Main configuration loader - Includes MIN_LIQUIDITY_REQUIREMENTS
 
 require('dotenv').config(); // Load .env file first
 const { ethers } = require('ethers');
@@ -30,10 +30,27 @@ const BORROW_AMOUNTS_WEI = {
 
 // Default Slippage Tolerance (in basis points, e.g., 10 = 0.1%)
 const SLIPPAGE_TOLERANCE_BPS = parseInt(process.env.SLIPPAGE_TOLERANCE_BPS || '10', 10);
+
+// +++ ADDED: Minimum Liquidity Threshold Section +++
+// Define how much liquidity (in terms of one of the tokens) a pool needs to be considered for simulation.
+// This helps avoid simulating on very shallow pools. Values need tuning.
+// Keyed by Pool Group Name. Values are APPROXIMATE targets.
+const MIN_LIQUIDITY_REQUIREMENTS = {
+    WETH_USDC: { // For WETH/USDC pools
+        // Using raw liquidity value requires significant tuning, placeholder for now
+        MIN_RAW_LIQUIDITY: BigInt(process.env.MIN_LIQ_WETH_USDC_RAW || '10000000000000000') // Example: 1e16 - NEEDS TUNING!
+    },
+    USDC_USDT: { // For USDC/USDT pools
+        MIN_RAW_LIQUIDITY: BigInt(process.env.MIN_LIQ_USDC_USDT_RAW || '1000000000000000') // Example: 1e15 - NEEDS TUNING!
+    }
+    // Add other groups if needed
+};
+// +++ END ADDED SECTION +++
+
 // --- End Global Settings ---
 
 
-// +++ Address Validation Function (from Action 16) +++
+// Address Validation Function (from Action 16)
 function validateAndNormalizeAddress(rawAddress, envVarName) {
     const addressString = String(rawAddress || '').trim();
     if (!addressString) { return null; }
@@ -45,7 +62,6 @@ function validateAndNormalizeAddress(rawAddress, envVarName) {
         return ethers.getAddress(cleanAddress);
     } catch (error) { console.warn(`[Config] ${envVarName}: Unexpected validation error for raw value "${rawAddress}" - ${error.message}`); return null; }
 }
-// +++ End Validation Function +++
 
 
 // --- Config Loading Function ---
@@ -77,6 +93,7 @@ function loadConfig() {
         SLIPPAGE_TOLERANCE_BPS: SLIPPAGE_TOLERANCE_BPS,
         MIN_NET_PROFIT_WEI: MIN_NET_PROFIT_WEI,
         BORROW_AMOUNTS_WEI: BORROW_AMOUNTS_WEI,
+        MIN_LIQUIDITY_REQUIREMENTS: MIN_LIQUIDITY_REQUIREMENTS, // Add the thresholds object
     };
 
     // 4. Process POOL_GROUPS: Use enhanced validation
@@ -100,12 +117,10 @@ function loadConfig() {
 
         // Load pool addresses from .env using enhanced validation
         group.pools = [];
-        // console.log(`[Config] Processing Pool Group: ${group.name}`); // Optional: Keep for debug
+        // console.log(`[Config] Processing Pool Group: ${group.name}`);
         for (const feeTier in group.feeTierToEnvMap) {
             const envVarKey = group.feeTierToEnvMap[feeTier];
             const rawAddress = process.env[envVarKey];
-            // console.log(`[DEBUG] Checking env var: ${envVarKey}`); // Optional: Keep for debug
-            // console.log(`  - Raw value: "${rawAddress}"`); // Optional: Keep for debug
 
             if (rawAddress) {
                 const validatedAddress = validateAndNormalizeAddress(rawAddress, envVarKey);
@@ -113,17 +128,12 @@ function loadConfig() {
                     const poolConfig = { address: validatedAddress, feeBps: parseInt(feeTier, 10), groupName: group.name };
                     group.pools.push(poolConfig);
                     totalPoolsLoaded++;
-                    // console.log(`  - SUCCESS: Loaded Pool: ${group.name} Fee ${feeTier} -> ${poolConfig.address}`); // Optional: Keep for debug
-                } else {
-                    // console.log(`  - SKIPPED: ${envVarKey} due to validation failure.`); // Optional: Keep for debug
-                }
-            } else {
-                 // console.log(`  - Env var not found for ${envVarKey}. Skipping.`); // Optional: Keep for debug
-            }
-            // console.log("---"); // Optional: Keep for debug
+                    // console.log(`  - SUCCESS: Loaded Pool: ${group.name} Fee ${feeTier} -> ${poolConfig.address}`);
+                } else { /* Validation failed, already warned */ }
+            } else { /* Var not found */ }
         }
         console.log(`[Config] Group ${group.name} initialized with ${group.pools.length} pools.`);
-        // console.log("====================================="); // Optional: Keep for debug
+        // console.log("=====================================");
 
     }); // End loop through POOL_GROUPS
 
@@ -133,7 +143,6 @@ function loadConfig() {
     // --- Add Provider/Signer Info & Flash Swap Address ---
     combinedConfig.RPC_URL = process.env[`${networkName.toUpperCase()}_RPC_URL`];
     combinedConfig.PRIVATE_KEY = process.env.PRIVATE_KEY;
-    // +++ Load Flash Swap Address +++
     const flashSwapEnvKey = `${networkName.toUpperCase()}_FLASH_SWAP_ADDRESS`;
     const rawFlashSwapAddress = process.env[flashSwapEnvKey];
 
@@ -145,20 +154,13 @@ function loadConfig() {
         if (validatedFlashSwapAddress) {
             combinedConfig.FLASH_SWAP_CONTRACT_ADDRESS = validatedFlashSwapAddress;
             console.log(`[Config] Loaded Flash Swap Address: ${combinedConfig.FLASH_SWAP_CONTRACT_ADDRESS}`);
-        } else {
-             // Validation function already warned, throw critical error here
-             throw new Error(`Invalid address format provided for ${flashSwapEnvKey}: "${rawFlashSwapAddress}"`);
-        }
+        } else { throw new Error(`Invalid address format provided for ${flashSwapEnvKey}: "${rawFlashSwapAddress}"`); }
     } else {
-         // Set to ZeroAddress if not found, FlashSwapManager should handle this if required
          console.warn(`[Config] WARNING: ${flashSwapEnvKey} not set in environment variables. Setting FlashSwap address to ZeroAddress.`);
          combinedConfig.FLASH_SWAP_CONTRACT_ADDRESS = ethers.ZeroAddress;
-         // Throwing error here instead, as manager expects it now
-         // throw new Error(`${flashSwapEnvKey} environment variable not set.`);
+         // We'll let the FlashSwapManager throw the error if it's actually needed and wasn't set.
     }
-    // +++ End Load Flash Swap Address +++
 
-    // Return the final, fully populated config object
     return combinedConfig;
 } // End loadConfig function
 
