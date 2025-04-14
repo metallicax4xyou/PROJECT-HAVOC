@@ -1,284 +1,379 @@
 // helpers/monitor.js
 const { ethers } = require('ethers');
-const { attemptArbitrage } = require('./arbitrage'); // Assuming arbitrage.js is also updated
+const { CurrencyAmount, TradeType } = require('@uniswap/sdk-core');
+const { Pool, Route, Trade } = require('@uniswap/v3-sdk');
+const IUniswapV3PoolABI = require('@uniswap/v3-core/artifacts/contracts/interfaces/IUniswapV3Pool.sol/IUniswapV3Pool.json').abi;
+const { attemptArbitrage } = require('./arbitrage');
 
 // --- Constants ---
-const QUOTE_TIMEOUT_MS = 5000;
-const FETCH_TIMEOUT_MS = 30000;
+const FETCH_TIMEOUT_MS = 15000; // Shorter timeout for data fetching per cycle
+const MAX_UINT128 = (1n << 128n) - 1n; // Used for liquidity check
 
-// --- Helper Functions ---
-function calculateFlashFee(amountBorrowed, feeBps) { /* ... same ... */ }
-function createTimeout(ms, message = 'Operation timed out') { /* ... same ... */ }
+// --- Helper: Timeout Promise ---
+function createTimeout(ms, message = 'Operation timed out') {
+    return new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(message)), ms)
+    );
+}
 
-// --- Main Monitoring Function ---
-async function monitorPools(state) {
-    const { contracts, config, provider, networkName } = state;
-    const { poolContracts, quoterContract } = contracts; // Get map of pool contracts
+// --- Helper: Calculate Flash Loan Repayment ---
+function calculateRepaymentAmount(borrowAmount, flashLoanFeeBps) {
+    const fee = (borrowAmount * BigInt(flashLoanFeeBps)) / 10000n; // Basis points calculation
+    return borrowAmount + fee;
+}
 
-    if (Object.keys(poolContracts).length < 2) { console.log(`[Monitor-${networkName}] Less than 2 pool contracts initialized. Skipping.`); return; }
-    if (!quoterContract) { console.error(`[Monitor-${networkName}] CRITICAL: Quoter contract instance missing.`); return; }
+// --- Helper: Estimate Gas Cost ---
+function estimateGasCost(feeData, gasLimitEstimate) {
+    // Use maxFeePerGas for EIP-1559 transactions if available, else gasPrice
+    const effectiveGasPrice = feeData.maxFeePerGas || feeData.gasPrice || 0n;
+    if (effectiveGasPrice <= 0n) {
+        console.warn("  [Gas] Warning: Could not determine effective gas price from feeData.");
+        return 0n; // Return 0 if gas price is unknown/invalid
+    }
+    return effectiveGasPrice * gasLimitEstimate;
+}
 
-    console.log(`\n[Monitor-${networkName}] ${new Date().toISOString()} - Checking ${Object.keys(config.POOL_GROUPS).length} pool groups...`);
-
-    let feeData = null;
-    const fetchStartTime = Date.now();
-
+// --- Core Simulation Function ---
+async function simulateTrade(
+    poolForTrade, // Uniswap SDK Pool object for the swap pool
+    tokenIn,      // Uniswap SDK Token object for input token
+    tokenOut,     // Uniswap SDK Token object for output token
+    amountIn      // Amount of tokenIn (as CurrencyAmount)
+) {
     try {
-        // --- Fetch Global Fee Data ---
-        console.log(`  [Monitor-${networkName}] Fetching fee data...`);
-        try {
-            feeData = await Promise.race([
-                provider.getFeeData(),
-                createTimeout(FETCH_TIMEOUT_MS / 2, 'Fee data fetch timeout') // Shorter timeout for just fee data
-            ]);
-            if (feeData instanceof Error) throw feeData; // Throw timeout error
-        } catch (err) { throw new Error(`Failed Fetch: Fee Data - ${err.message}`); }
-
-        const currentMaxFeePerGas = feeData?.maxFeePerGas || 0n;
-        if (currentMaxFeePerGas <= 0n) { throw new Error(`Invalid maxFeePerGas (${currentMaxFeePerGas})`); }
-        console.log(`  [Monitor-${networkName}] Fee Data OK: maxFeePerGas=${ethers.formatUnits(currentMaxFeePerGas, 'gwei')} Gwei`);
-        const estimatedGasCost = currentMaxFeePerGas * config.GAS_LIMIT_ESTIMATE; // Calculate once
-        const nativeCurrency = networkName === 'polygon' ? 'MATIC' : 'ETH';
-        console.log(`  [Gas] Base Estimated Tx Cost: ~${ethers.formatUnits(estimatedGasCost, 'ether')} ${nativeCurrency}`);
-
-        // --- Iterate Through Pool Groups ---
-        let bestOpportunityOverall = null;
-
-        for (const groupKey in config.POOL_GROUPS) {
-            const group = config.POOL_GROUPS[groupKey];
-            console.log(`\n  --- Group: ${groupKey} (${group.token0Address.substring(0,6)}... / ${group.token1Address.substring(0,6)}...) ---`);
-
-            if (!group || !Array.isArray(group.pools) || group.pools.length < 2) {
-                console.log(`    Skipping group ${groupKey} - requires at least 2 pools.`);
-                continue;
-            }
-
-            // --- Fetch States for Pools in this Group ---
-            const poolStates = {}; // { poolAddress: { valid, slot, liquidity, tick } }
-            const promisesThisGroup = [];
-            const labelsThisGroup = [];
-            const poolsInGroup = []; // Store poolInfo objects { address, feeBps }
-
-            group.pools.forEach(poolInfo => {
-                const poolContract = poolContracts[poolInfo.address]; // Get instance from map
-                if (poolContract && typeof poolContract.slot0 === 'function' && typeof poolContract.liquidity === 'function') {
-                     promisesThisGroup.push(poolContract.slot0());
-                     labelsThisGroup.push(`${groupKey}-${poolInfo.feeBps}-slot0`);
-                     promisesThisGroup.push(poolContract.liquidity());
-                     labelsThisGroup.push(`${groupKey}-${poolInfo.feeBps}-liq`);
-                     poolsInGroup.push(poolInfo); // Add valid pool to list for this group
-                } else {
-                    console.warn(`    Skipping pool ${poolInfo.address} in group ${groupKey} - contract invalid or missing functions.`);
-                }
-            });
-
-            if (poolsInGroup.length < 2) {
-                 console.log(`    Skipping group ${groupKey} - less than 2 valid pools found.`);
-                 continue;
-            }
-
-            console.log(`    Fetching states for ${poolsInGroup.length} pools in group ${groupKey}...`);
-            let groupResults = null;
-            try {
-                 groupResults = await Promise.race([
-                     Promise.allSettled(promisesThisGroup),
-                     createTimeout(FETCH_TIMEOUT_MS / 2, `Pool state fetch timeout for group ${groupKey}`) // Shorter timeout per group
-                 ]);
-                 if (groupResults instanceof Error) throw groupResults; // Throw timeout error
-            } catch (groupFetchError) {
-                 console.error(`    ❌ FETCH FAILED for group ${groupKey}: ${groupFetchError.message}`);
-                 continue; // Skip to next group
-            }
-
-            if (!Array.isArray(groupResults) || groupResults.length !== promisesThisGroup.length) {
-                  console.error(`    ❌ Invalid results structure for group ${groupKey}.`);
-                  continue; // Skip to next group
-            }
-
-             // Process results for this group
-             let resultIndex = 0;
-             let groupFetchOk = true;
-             for (const poolInfo of poolsInGroup) {
-                  const slotResult = groupResults[resultIndex++];
-                  const liqResult = groupResults[resultIndex++];
-
-                  if (slotResult.status !== 'fulfilled' || liqResult.status !== 'fulfilled') {
-                      const reason = slotResult.reason?.message || liqResult.reason?.message || 'Unknown';
-                      console.warn(`      Pool ${poolInfo.feeBps}bps Fetch FAIL: ${reason}`);
-                      poolStates[poolInfo.address] = { valid: false };
-                      groupFetchOk = false;
-                  } else {
-                      const liq = BigInt(liqResult.value || 0);
-                      const slot = slotResult.value;
-                       if (!slot || typeof slot.tick === 'undefined' || liq === 0n) {
-                           console.warn(`      Pool ${poolInfo.feeBps}bps Invalid State: Liquidity=${liq}, Slot invalid=${!slot || typeof slot.tick === 'undefined'}`);
-                           poolStates[poolInfo.address] = { valid: false };
-                           groupFetchOk = false;
-                       } else {
-                           poolStates[poolInfo.address] = { valid: true, slot: slot, liquidity: liq, tick: Number(slot.tick), feeBps: poolInfo.feeBps };
-                           console.log(`      Pool ${poolInfo.feeBps}bps State OK: Tick=${poolStates[poolInfo.address].tick}, Liq=${liq.toString()}`);
-                       }
-                  }
-             }
-             if (!groupFetchOk) { console.log(`    Skipping comparisons for group ${groupKey} due to fetch errors.`); continue; }
-
-
-            // --- Pairwise Comparison within the Group ---
-            console.log(`    Comparing pairs in group ${groupKey}...`);
-            for (let i = 0; i < poolsInGroup.length; i++) {
-                for (let j = i + 1; j < poolsInGroup.length; j++) {
-                    const poolInfo1 = poolsInGroup[i];
-                    const poolInfo2 = poolsInGroup[j];
-                    const state1 = poolStates[poolInfo1.address];
-                    const state2 = poolStates[poolInfo2.address];
-
-                    // Should be valid based on check above, but double-check
-                    if (!state1?.valid || !state2?.valid) continue;
-
-                    const tick1 = state1.tick;
-                    const tick2 = state2.tick;
-                    const tickDelta = Math.abs(tick1 - tick2);
-                    const TICK_DIFF_THRESHOLD = 1; // Could make this group-specific
-
-                    console.log(`      Compare ${poolInfo1.feeBps}bps(${tick1}) vs ${poolInfo2.feeBps}bps(${tick2}) | Delta: ${tickDelta}`);
-
-                    let startPoolInfo = null, swapPoolInfo = null; // Pool definitions from config
-                    let startPoolState = null, swapPoolState = null; // Live states
-
-                    if (tick2 > tick1 + TICK_DIFF_THRESHOLD) { // Price Pool2 > Price Pool1 => Borrow T0/T1 from Pool1, Swap on Pool2
-                        startPoolInfo = poolInfo1; startPoolState = state1;
-                        swapPoolInfo = poolInfo2; swapPoolState = state2;
-                    } else if (tick1 > tick2 + TICK_DIFF_THRESHOLD) { // Price Pool1 > Price Pool2 => Borrow T0/T1 from Pool2, Swap on Pool1
-                        startPoolInfo = poolInfo2; startPoolState = state2;
-                        swapPoolInfo = poolInfo1; swapPoolState = state1;
-                    } else { continue; } // No opportunity
-
-                    console.log(`        Potential: Start ${startPoolInfo.feeBps}bps -> Swap on ${swapPoolInfo.feeBps}bps`);
-                    console.log(`        Simulating...`);
-
-                    // --- Simulation Logic ---
-                    try {
-                        // Determine which token to borrow (assume WETH for WETH/USDC, Token0 for USDC/USDT for now)
-                        // More robust logic needed for generic pairs
-                        let tokenToBorrowAddress, tokenIntermediateAddress, borrowAmount, borrowDecimals, intermediateDecimals;
-                        if (groupKey === 'WETH_USDC') {
-                             tokenToBorrowAddress = config.TOKENS.WETH;
-                             tokenIntermediateAddress = config.TOKENS.USDC;
-                             borrowAmount = config.BORROW_AMOUNT_WEI; // Assumes WETH borrow amount
-                             borrowDecimals = config.DECIMALS[tokenToBorrowAddress];
-                             intermediateDecimals = config.DECIMALS[tokenIntermediateAddress];
-                             // Multi quote sim amount also needs context
-                             simAmountInInitial = config.MULTI_QUOTE_SIM_AMOUNT_WEI; // Assumes WETH
-                        } else if (groupKey === 'USDC_USDT') {
-                             // For stable/stable, flash loaning USDC might make sense
-                             tokenToBorrowAddress = config.TOKENS.USDC;
-                             tokenIntermediateAddress = config.TOKENS.USDT;
-                             borrowDecimals = config.DECIMALS[tokenToBorrowAddress];
-                             intermediateDecimals = config.DECIMALS[tokenIntermediateAddress];
-                             // *** NEED TO DEFINE BORROW AMOUNT FOR STABLES ***
-                             // Let's use a fixed USD value for simulation? e.g., $1000
-                             borrowAmount = ethers.parseUnits("1000", borrowDecimals); // Borrow 1000 USDC
-                             simAmountInInitial = ethers.parseUnits("1", borrowDecimals); // Simulate with 1 USDC
-                             console.log(`        Stable Sim: Borrow ${ethers.formatUnits(borrowAmount, borrowDecimals)} ${groupKey.split('_')[0]}`);
-                        } else {
-                             console.warn(`        Skipping simulation - unsupported group key ${groupKey}`);
-                             continue;
-                        }
-
-                        const flashFee = calculateFlashFee(borrowAmount, startPoolInfo.feeBps);
-                        const requiredRepaymentAmount = borrowAmount + flashFee;
-
-                        // Swap 1: Borrowed -> Intermediate on swapPool
-                        const path1 = ethers.solidityPacked(["address", "uint24", "address"], [tokenToBorrowAddress, swapPoolInfo.feeBps, tokenIntermediateAddress]);
-                        const quoteResult1 = await Promise.race([ quoterContract.quoteExactInput.staticCall(path1, simAmountInInitial), createTimeout(QUOTE_TIMEOUT_MS, 'Swap 1 quote timeout') ]);
-                        const simAmountIntermediateOut = quoteResult1[0];
-                        if (simAmountIntermediateOut === 0n) throw new Error("Swap 1 sim: 0 output.");
-
-                        // Swap 2: Intermediate -> Borrowed on swapPool
-                        const path2 = ethers.solidityPacked(["address", "uint24", "address"], [tokenIntermediateAddress, swapPoolInfo.feeBps, tokenToBorrowAddress]);
-                        const quoteResult2 = await Promise.race([ quoterContract.quoteExactInput.staticCall(path2, simAmountIntermediateOut), createTimeout(QUOTE_TIMEOUT_MS, 'Swap 2 quote timeout') ]);
-                        const simFinalAmountOut = quoteResult2[0];
-                        if (simFinalAmountOut === 0n) throw new Error("Swap 2 sim: 0 output.");
-
-                        let estimatedFinalAmountActual = 0n;
-                        if (simAmountInInitial > 0n) estimatedFinalAmountActual = (simFinalAmountOut * borrowAmount) / simAmountInInitial;
-
-                        console.log(`        Sim Out1: ${ethers.formatUnits(simAmountIntermediateOut, intermediateDecimals)} | Sim Out2: ${ethers.formatUnits(simFinalAmountOut, borrowDecimals)}`);
-                        console.log(`        Est Final: ${ethers.formatUnits(estimatedFinalAmountActual, borrowDecimals)} | Repay Req: ${ethers.formatUnits(requiredRepaymentAmount, borrowDecimals)}`);
-
-                        if (estimatedFinalAmountActual <= requiredRepaymentAmount) { console.log(`        -> Gross Profit Check FAIL.`); continue; }
-                        const simGrossProfit = estimatedFinalAmountActual - requiredRepaymentAmount;
-                        console.log(`        -> Gross Profit: ${ethers.formatUnits(simGrossProfit, borrowDecimals)}`);
-
-                        // Convert gross profit to WETH for net profit check if needed (requires price feed)
-                        // For now, compare gross profit in its own token vs gas cost in native token (approximation)
-                        // TODO: Implement price conversion for accurate net profit check across pairs
-                        const minNetProfitWei = config.MIN_NET_PROFIT_WEI_CALCULATED; // Use the calculated one
-
-                        // Very rough check: Is gross profit (in borrow token) > gas cost (in native)?
-                        // This isn't ideal but avoids needing a price feed immediately
-                        // Let's assume 1 borrow token ~= X native token for check
-                        // A better check requires converting gas cost to borrow token value
-                        const TEMP_PROFIT_CHECK_THRESHOLD_WEI = estimatedGasCost + minNetProfitWei;
-
-                         // If borrowing WETH, compare directly
-                         if (tokenToBorrowAddress.toLowerCase() === config.TOKENS.WETH.toLowerCase()) {
-                              if (simGrossProfit > TEMP_PROFIT_CHECK_THRESHOLD_WEI) {
-                                   const simNetProfit = simGrossProfit - estimatedGasCost; // Approx net profit in WETH
-                                   console.log(`        -> ✅✅ NET Profit Check SUCCESS (WETH): ~${ethers.formatUnits(simNetProfit, borrowDecimals)} WETH`);
-                                    if (bestOpportunityOverall === null || simNetProfit > bestOpportunityOverall.estimatedNetProfit) { // Compare WETH net profit
-                                         console.log(`        ---> New best overall opportunity!`);
-                                         bestOpportunityOverall = { groupKey, startPoolInfo, swapPoolInfo, estimatedGrossProfit: simGrossProfit, estimatedNetProfit: simNetProfit, tokenBorrowedAddress, tokenIntermediateAddress, borrowAmount };
-                                    }
-                              } else { console.log(`        -> ❌ NET Profit Check FAIL (WETH vs Gas+Min).`); }
-                         } else {
-                             // If borrowing stables, need price feed for accurate check vs gas
-                             console.log(`        -> Net Profit Check SKIPPED (Requires price feed for ${groupKey})`);
-                             // Could potentially trigger if gross profit is very high as a heuristic
-                             const HIGH_STABLE_PROFIT_THRESHOLD = ethers.parseUnits("0.5", borrowDecimals); // e.g., > $0.50 gross profit?
-                             if (simGrossProfit > HIGH_STABLE_PROFIT_THRESHOLD) {
-                                  console.log(`        -> ✅ Gross Profit High (Stablecoin) - CONSIDERED OPPORTUNITY (Net check approximate)`);
-                                  // Store this, but maybe prioritize WETH profits? Need ranking logic.
-                                  // For now, just log, don't set bestOpportunityOverall unless we refine ranking
-                             } else {
-                                 console.log(`        -> Gross Profit Low (Stablecoin)`);
-                             }
-                         }
-
-                    } catch(error) { console.error(`      ❌ Simulation Error (${startPoolInfo.feeBps}->${swapPoolInfo.feeBps}): ${error.message}`); }
-                    // --- End Simulation Logic ---
-
-                } // End inner loop (j)
-            } // End outer loop (i) for group
-
-        } // End group loop
-
-        // --- Trigger Arbitrage Attempt for the BEST overall opportunity ---
-        console.log(`\n  [Monitor-${networkName}] Entering Trigger Block...`);
-        if (bestOpportunityOverall) {
-            console.log(`  [Monitor] Best overall opportunity: ${bestOpportunityOverall.groupKey} Start ${bestOpportunityOverall.startPoolInfo.feeBps}bps -> Swap ${bestOpportunityOverall.swapPoolInfo.feeBps}bps.`);
-            console.log(`          Est Net: ${ethers.formatUnits(bestOpportunityOverall.estimatedNetProfit, 18)} WETH`); // Assuming WETH profit for now
-            state.opportunity = {
-                 startPoolId: bestOpportunityOverall.startPoolInfo.feeBps, // Pass fee as ID? Or need unique ID
-                 tokenBorrowedAddress: bestOpportunityOverall.tokenBorrowedAddress,
-                 tokenIntermediateAddress: bestOpportunityOverall.tokenIntermediateAddress,
-                 borrowAmount: bestOpportunityOverall.borrowAmount,
-                 flashLoanPoolAddress: bestOpportunityOverall.startPoolInfo.address,
-                 swapPoolAddress: bestOpportunityOverall.swapPoolInfo.address,
-                 swapFeeBps: bestOpportunityOverall.swapPoolInfo.feeBps,
-                 estimatedGrossProfit: bestOpportunityOverall.estimatedGrossProfit,
-                 estimatedNetProfit: bestOpportunityOverall.estimatedNetProfit
-             };
-            await attemptArbitrage(state);
-            state.opportunity = null;
-        } else { console.log(`  [Monitor-${networkName}] No profitable opportunity found this cycle.`); }
-        console.log(`  [Monitor-${networkName}] Exiting Trigger Block.`);
-
+        // Create a route using the single pool
+        const route = new Route([poolForTrade], tokenIn, tokenOut);
+        // Create a trade object for an exact input trade
+        const trade = await Trade.fromRoute(route, amountIn, TradeType.EXACT_INPUT);
+        return trade;
     } catch (error) {
-        console.error(`[Monitor-${networkName}] CRITICAL Error during cycle processing: ${error.message}`);
-    } finally {
-        console.log(`[Monitor-${networkName}] ${new Date().toISOString()} - Cycle End.`);
+        // Often catches insufficient liquidity errors from the SDK
+        // console.debug(`    [Simulate SDK] SDK Error creating trade (${tokenIn.symbol} -> ${tokenOut.symbol}): ${error.message}`);
+        return null; // Return null if trade simulation fails
     }
 }
 
+// --- Main Monitoring Function ---
+async function monitorPools(state) {
+    const { provider, signer, contracts, config, networkName } = state;
+    const { quoterContract } = contracts; // Only need quoter for basic checks now, not core sim
+
+    // --- Pre-checks ---
+    if (!quoterContract) { console.error(`[Monitor-${networkName}] CRITICAL: Quoter contract instance missing.`); return; }
+    if (!config || !config.POOL_GROUPS || Object.keys(config.POOL_GROUPS).length === 0) {
+        console.log(`[Monitor-${networkName}] No pool groups configured. Skipping cycle.`); return;
+    }
+
+    console.log(`\n[Monitor-${networkName}] ${new Date().toISOString()} - Checking ${Object.keys(config.POOL_GROUPS).length} pool groups...`);
+    const cycleStartTime = Date.now();
+
+    // --- Fetch Global Data (Gas Price) ---
+    let feeData;
+    try {
+        feeData = await Promise.race([
+            provider.getFeeData(),
+            createTimeout(FETCH_TIMEOUT_MS / 3, 'Fee data fetch timeout')
+        ]);
+        if (feeData instanceof Error) throw feeData;
+    } catch (err) {
+        console.error(`[Monitor-${networkName}] FAILED Fetch: Fee Data - ${err.message}`);
+        return; // Cannot proceed without fee data
+    }
+
+    // Calculate estimated gas cost ONCE per cycle
+    const estimatedGasCostWei = estimateGasCost(feeData, config.GAS_LIMIT_ESTIMATE);
+    if (estimatedGasCostWei <= 0n) {
+        console.error(`[Monitor-${networkName}] FAILED: Invalid estimated gas cost. Skipping cycle.`);
+        return;
+    }
+    console.log(`  [Gas] Est. Tx Cost: ~${ethers.formatUnits(estimatedGasCostWei, config.NATIVE_SYMBOL === 'MATIC' ? 18 : 18)} ${config.NATIVE_SYMBOL}`);
+
+
+    // --- Iterate Through Pool Groups ---
+    let bestOpportunityOverall = null;
+
+    for (const groupKey in config.POOL_GROUPS) {
+        const group = config.POOL_GROUPS[groupKey];
+        const { token0, token1, borrowToken, quoteToken, borrowAmount, minNetProfit, pools: poolInfos } = group; // Destructure group config
+
+        console.log(`\n  --- Group: ${groupKey} (${token0.symbol}/${token1.symbol}) ---`);
+        console.log(`      Borrowing ${ethers.formatUnits(borrowAmount, borrowToken.decimals)} ${borrowToken.symbol}`);
+
+        if (!poolInfos || poolInfos.length < 2) {
+            console.log(`    Skipping group ${groupKey} - requires at least 2 configured pools.`);
+            continue;
+        }
+
+        // --- Fetch Live Pool States for this Group ---
+        const poolStatePromises = poolInfos.map(poolInfo => {
+            const poolContract = new ethers.Contract(poolInfo.address, IUniswapV3PoolABI, provider);
+            // Fetch slot0 and liquidity concurrently
+            return Promise.allSettled([
+                poolContract.slot0(),
+                poolContract.liquidity(),
+                // Optional: Add poolContract.tickSpacing() if needed, but fee tier usually implies it
+            ]).then(results => ({
+                poolInfo: poolInfo, // Include original info
+                slot0Result: results[0],
+                liquidityResult: results[1]
+            }));
+        });
+
+        let poolStatesRaw;
+        try {
+            console.log(`    Fetching states for ${poolInfos.length} pools in group ${groupKey}...`);
+            poolStatesRaw = await Promise.race([
+                Promise.all(poolStatePromises), // Wait for all state fetches for the group
+                createTimeout(FETCH_TIMEOUT_MS * 2 / 3, `Pool state fetch timeout for group ${groupKey}`)
+            ]);
+            if (poolStatesRaw instanceof Error) throw poolStatesRaw;
+        } catch (groupFetchError) {
+            console.error(`    ❌ FETCH FAILED for group ${groupKey}: ${groupFetchError.message}`);
+            continue; // Skip to next group if fetching fails
+        }
+
+        // Process fetched states and create SDK Pool objects
+        const livePools = {}; // { poolAddress: { sdkPool: Pool, tick: number, ...poolInfo } }
+        let validPoolsFound = 0;
+
+        for (const stateResult of poolStatesRaw) {
+            const { poolInfo, slot0Result, liquidityResult } = stateResult;
+            if (slot0Result.status !== 'fulfilled' || liquidityResult.status !== 'fulfilled') {
+                console.warn(`      Pool ${poolInfo.feeBps}bps (${poolInfo.address.substring(0,6)}...) Fetch FAIL: ${slot0Result.reason?.message || liquidityResult.reason?.message || 'Unknown reason'}`);
+                continue;
+            }
+
+            const slot0 = slot0Result.value;
+            const liquidity = liquidityResult.value;
+
+            // Basic validation of fetched data
+            if (slot0 == null || typeof slot0.sqrtPriceX96 === 'undefined' || typeof slot0.tick === 'undefined' || liquidity == null || liquidity > MAX_UINT128) {
+                 console.warn(`      Pool ${poolInfo.feeBps}bps (${poolInfo.address.substring(0,6)}...) Invalid State Data: SqrtPrice=${slot0?.sqrtPriceX96}, Tick=${slot0?.tick}, Liquidity=${liquidity}`);
+                 continue;
+            }
+            // Optional: Check if liquidity is zero, though SDK might handle this
+            if (liquidity === 0n) {
+                 console.log(`      Pool ${poolInfo.feeBps}bps (${poolInfo.address.substring(0,6)}...) has zero liquidity.`);
+                 continue;
+            }
+
+            try {
+                const tickCurrent = Number(slot0.tick);
+                const sqrtPriceX96 = slot0.sqrtPriceX96;
+
+                // Create Uniswap SDK Pool object
+                const sdkPool = new Pool(
+                    token0, // Group's token0 (SDK object)
+                    token1, // Group's token1 (SDK object)
+                    poolInfo.feeBps,
+                    sqrtPriceX96.toString(), // Must be string
+                    liquidity.toString(),    // Must be string
+                    tickCurrent
+                );
+
+                livePools[poolInfo.address] = {
+                    ...poolInfo, // Keep original address and feeBps
+                    sdkPool: sdkPool,
+                    tick: tickCurrent,
+                    liquidity: liquidity,
+                };
+                validPoolsFound++;
+                console.log(`      Pool ${poolInfo.feeBps}bps (${poolInfo.address.substring(0,6)}...) State OK: Tick=${tickCurrent}, Liq=${liquidity.toString()}`);
+
+            } catch (sdkError) {
+                console.error(`      Pool ${poolInfo.feeBps}bps (${poolInfo.address.substring(0,6)}...) SDK Error: ${sdkError.message}`);
+            }
+        } // End processing fetched states
+
+        if (validPoolsFound < 2) {
+            console.log(`    Skipping comparisons for group ${groupKey} - less than 2 valid live pools found.`);
+            continue;
+        }
+
+        // --- Pairwise Comparison within the Group ---
+        const livePoolAddresses = Object.keys(livePools);
+        for (let i = 0; i < livePoolAddresses.length; i++) {
+            for (let j = i + 1; j < livePoolAddresses.length; j++) {
+                const poolAddress1 = livePoolAddresses[i];
+                const poolAddress2 = livePoolAddresses[j];
+                const livePool1 = livePools[poolAddress1];
+                const livePool2 = livePools[poolAddress2];
+
+                const tick1 = livePool1.tick;
+                const tick2 = livePool2.tick;
+                const tickDelta = Math.abs(tick1 - tick2);
+                const TICK_DIFF_THRESHOLD = 1; // Minimum tick difference to consider
+
+                console.log(`      Compare ${livePool1.feeBps}bps(${tick1}) vs ${livePool2.feeBps}bps(${tick2}) | Delta: ${tickDelta}`);
+
+                let startPoolLive = null, swapPoolLive = null; // Live pool objects { sdkPool, tick, feeBps, address }
+                let intermediateToken = null; // SDK Token object
+
+                // Determine direction based on price (tick)
+                // Price is higher in the pool with the higher tick (for token0 relative to token1)
+                // If tick2 > tick1, Pool2 price is higher. Borrow from Pool1 (lower price), swap on Pool2 (higher price).
+                if (tick2 > tick1 + TICK_DIFF_THRESHOLD) {
+                    startPoolLive = livePool1;
+                    swapPoolLive = livePool2;
+                } else if (tick1 > tick2 + TICK_DIFF_THRESHOLD) {
+                    startPoolLive = livePool2;
+                    swapPoolLive = livePool1;
+                } else {
+                    continue; // Ticks too close, no opportunity
+                }
+
+                // Determine the intermediate token (the one NOT being borrowed)
+                if (borrowToken.equals(token0)) {
+                    intermediateToken = token1;
+                } else if (borrowToken.equals(token1)) {
+                    intermediateToken = token0;
+                } else {
+                    console.error(`        Configuration Error: Borrow token ${borrowToken.symbol} is not token0 or token1 of group ${groupKey}.`);
+                    continue; // Skip this pair if config is wrong
+                }
+
+                console.log(`        Potential: Borrow ${borrowToken.symbol} from ${startPoolLive.feeBps}bps -> Swap on ${swapPoolLive.feeBps}bps`);
+                console.log(`        Simulating with ${ethers.formatUnits(borrowAmount, borrowToken.decimals)} ${borrowToken.symbol}...`);
+
+                // --- Accurate Simulation using Uniswap SDK ---
+                try {
+                    // 1. Calculate Required Repayment
+                    const flashFee = (borrowAmount * BigInt(config.FLASH_LOAN_FEE_BPS)) / 10000n;
+                    const requiredRepaymentAmount = borrowAmount + flashFee;
+
+                    // 2. Simulate Swap 1: borrowToken -> intermediateToken on swapPoolLive
+                    const amountInSwap1 = CurrencyAmount.fromRawAmount(borrowToken, borrowAmount.toString());
+                    const trade1 = await simulateTrade(swapPoolLive.sdkPool, borrowToken, intermediateToken, amountInSwap1);
+
+                    if (!trade1) { console.log(`        -> Sim Swap 1 FAIL (likely insufficient liquidity on swap pool ${swapPoolLive.feeBps}bps)`); continue; }
+                    const amountOutSwap1 = trade1.outputAmount; // Amount of intermediateToken received
+                    console.log(`        Sim Swap 1 OK: ${amountInSwap1.toSignificant(6)} ${borrowToken.symbol} -> ${amountOutSwap1.toSignificant(6)} ${intermediateToken.symbol} (Pool ${swapPoolLive.feeBps}bps)`);
+
+                    // 3. Simulate Swap 2: intermediateToken -> borrowToken on swapPoolLive
+                    // Input for Swap 2 is the output amount from Swap 1
+                    const amountInSwap2 = amountOutSwap1;
+                    const trade2 = await simulateTrade(swapPoolLive.sdkPool, intermediateToken, borrowToken, amountInSwap2);
+
+                    if (!trade2) { console.log(`        -> Sim Swap 2 FAIL (likely insufficient liquidity on swap pool ${swapPoolLive.feeBps}bps)`); continue; }
+                    const amountOutSwap2 = trade2.outputAmount; // Final amount of borrowToken received
+                    const finalAmountReceived = BigInt(amountOutSwap2.quotient.toString()); // Convert SDK CurrencyAmount back to BigInt
+
+                    console.log(`        Sim Swap 2 OK: ${amountInSwap2.toSignificant(6)} ${intermediateToken.symbol} -> ${amountOutSwap2.toSignificant(6)} ${borrowToken.symbol} (Pool ${swapPoolLive.feeBps}bps)`);
+                    console.log(`        Sim Final Out: ${ethers.formatUnits(finalAmountReceived, borrowToken.decimals)} ${borrowToken.symbol} | Repay Req: ${ethers.formatUnits(requiredRepaymentAmount, borrowToken.decimals)} ${borrowToken.symbol}`);
+
+                    // 4. Calculate Gross Profit
+                    if (finalAmountReceived <= requiredRepaymentAmount) {
+                        console.log(`        -> Gross Profit Check FAIL.`);
+                        continue;
+                    }
+                    const grossProfit = finalAmountReceived - requiredRepaymentAmount;
+                    console.log(`        -> Gross Profit: ${ethers.formatUnits(grossProfit, borrowToken.decimals)} ${borrowToken.symbol}`);
+
+                    // 5. Calculate Net Profit (Compare Gross Profit vs Gas Cost)
+                    let netProfit = -1n; // Sentinel value for unknown net profit
+                    let netProfitCheckPassed = false;
+
+                    // If borrowToken is the native network token, comparison is direct
+                    if (borrowToken.symbol === config.NATIVE_SYMBOL) {
+                        if (grossProfit > estimatedGasCostWei) {
+                            netProfit = grossProfit - estimatedGasCostWei;
+                            if (netProfit >= minNetProfit) { // Check against configured minimum
+                                console.log(`        -> ✅✅ NET Profit Check SUCCESS (Native): ~${ethers.formatUnits(netProfit, borrowToken.decimals)} ${borrowToken.symbol} (>= min ${ethers.formatUnits(minNetProfit, borrowToken.decimals)})`);
+                                netProfitCheckPassed = true;
+                            } else {
+                                console.log(`        -> ❌ NET Profit Check FAIL (Native): ~${ethers.formatUnits(netProfit, borrowToken.decimals)} ${borrowToken.symbol} (< min ${ethers.formatUnits(minNetProfit, borrowToken.decimals)})`);
+                            }
+                        } else {
+                            console.log(`        -> ❌ NET Profit Check FAIL (Native): Gross Profit (${ethers.formatUnits(grossProfit, borrowToken.decimals)}) <= Gas Cost (${ethers.formatUnits(estimatedGasCostWei, borrowToken.decimals)})`);
+                        }
+                    } else {
+                        // If borrowToken is NOT native, need a price feed for accurate check.
+                        // ** TEMPORARY HEURISTIC: Assume profit if grossProfit seems significant **
+                        // Replace this with a real price feed check later!
+                        const TEMP_STABLE_PROFIT_THRESHOLD_WEI = config.MIN_NET_PROFIT_WEI[borrowToken.symbol] || ethers.parseUnits('0.5', borrowToken.decimals); // Use config min profit or default $0.50
+                        if (grossProfit >= TEMP_STABLE_PROFIT_THRESHOLD_WEI) {
+                             console.log(`        -> ✅ NET Profit Check APPROX SUCCESS (Non-Native): Gross Profit ${ethers.formatUnits(grossProfit, borrowToken.decimals)} ${borrowToken.symbol} seems significant (>= ${ethers.formatUnits(TEMP_STABLE_PROFIT_THRESHOLD_WEI, borrowToken.decimals)}). Requires Price Feed for accuracy.`);
+                             // For now, consider it a potential opportunity based on gross profit heuristic
+                             netProfitCheckPassed = true;
+                             netProfit = grossProfit; // Store gross as proxy net until price feed
+                        } else {
+                             console.log(`        -> ❌ NET Profit Check APPROX FAIL (Non-Native): Gross Profit ${ethers.formatUnits(grossProfit, borrowToken.decimals)} ${borrowToken.symbol} is too low (< ${ethers.formatUnits(TEMP_STABLE_PROFIT_THRESHOLD_WEI, borrowToken.decimals)}).`);
+                        }
+                    }
+
+                    // 6. Update Best Opportunity if this one is better
+                    if (netProfitCheckPassed) {
+                        // Prioritize native token profits? Or just highest net profit?
+                        // For now, just take the best found so far based on calculated/estimated netProfit.
+                        if (bestOpportunityOverall === null || netProfit > bestOpportunityOverall.estimatedNetProfit) {
+                            console.log(`        ---> New best overall opportunity!`);
+                            bestOpportunityOverall = {
+                                groupKey: groupKey,
+                                startPoolInfo: startPoolLive, // Includes address, feeBps, tick etc.
+                                swapPoolInfo: swapPoolLive,   // Includes address, feeBps, tick etc.
+                                tokenBorrowed: borrowToken,     // SDK Token object
+                                tokenIntermediate: intermediateToken, // SDK Token object
+                                borrowAmount: borrowAmount,     // BigInt
+                                requiredRepayment: requiredRepaymentAmount, // BigInt
+                                estimatedGrossProfit: grossProfit, // BigInt
+                                estimatedNetProfit: netProfit, // BigInt (can be estimate for non-native)
+                                // Store minimum amounts out from SDK Trades for slippage control in arbitrage.js
+                                // Use a small buffer (e.g., 0.1% = 10 basis points)
+                                // Ensure SLIPPAGE_TOLERANCE is defined in config or use Percent directly
+                                amountOutMinimum1: trade1.minimumAmountOut(config.SLIPPAGE_TOLERANCE || new Percent(10, 10000)).quotient, // trade1 output (intermediate)
+                                amountOutMinimum2: trade2.minimumAmountOut(config.SLIPPAGE_TOLERANCE || new Percent(10, 10000)).quotient, // trade2 output (borrowed)
+                                swapFeeA: swapPoolLive.feeBps, // Fee for swap1 (X->Y on swapPool)
+                                swapFeeB: swapPoolLive.feeBps, // Fee for swap2 (Y->X on swapPool)
+                                estimatedGasCost: estimatedGasCostWei // Store for reference
+                            };
+                        }
+                    }
+
+                } catch (simError) {
+                    console.error(`      ❌ Simulation Error (${startPoolLive.feeBps}->${swapPoolLive.feeBps}): ${simError.message}`);
+                    // Don't log full stack trace usually, just message
+                }
+                // --- End Accurate Simulation ---
+
+            } // End inner loop (j)
+        } // End outer loop (i)
+
+    } // End group loop
+
+    // --- Trigger Arbitrage Attempt for the BEST overall opportunity ---
+    if (bestOpportunityOverall) {
+        console.log(`\n[Monitor-${networkName}] Best opportunity found: ${bestOpportunityOverall.groupKey} | Start ${bestOpportunityOverall.startPoolInfo.feeBps}bps -> Swap ${bestOpportunityOverall.swapPoolInfo.feeBps}bps`);
+        console.log(`  Borrow: ${ethers.formatUnits(bestOpportunityOverall.borrowAmount, bestOpportunityOverall.tokenBorrowed.decimals)} ${bestOpportunityOverall.tokenBorrowed.symbol}`);
+        console.log(`  Est. Gross Profit: ${ethers.formatUnits(bestOpportunityOverall.estimatedGrossProfit, bestOpportunityOverall.tokenBorrowed.decimals)} ${bestOpportunityOverall.tokenBorrowed.symbol}`);
+        console.log(`  Est. Net Profit:   ${bestOpportunityOverall.estimatedNetProfit >= 0n ? '~' + ethers.formatUnits(bestOpportunityOverall.estimatedNetProfit, bestOpportunityOverall.tokenBorrowed.decimals) : 'N/A (Non-Native)'} ${bestOpportunityOverall.tokenBorrowed.symbol}`);
+        console.log(`  Min Amount Out Swap1: ${ethers.formatUnits(bestOpportunityOverall.amountOutMinimum1, bestOpportunityOverall.tokenIntermediate.decimals)} ${bestOpportunityOverall.tokenIntermediate.symbol}`);
+        console.log(`  Min Amount Out Swap2: ${ethers.formatUnits(bestOpportunityOverall.amountOutMinimum2, bestOpportunityOverall.tokenBorrowed.decimals)} ${bestOpportunityOverall.tokenBorrowed.symbol}`);
+
+        try {
+            // Pass the necessary parts of state and the detailed opportunity
+            await attemptArbitrage({
+                provider,
+                signer,
+                contracts,
+                config, // Pass full active config
+                networkName,
+                opportunity: bestOpportunityOverall, // Pass the structured opportunity object
+                feeData // Pass current fee data for potential use in execution
+            });
+        } catch (arbitrageError) {
+             console.error(`[Monitor-${networkName}] Error during attemptArbitrage call: ${arbitrageError.message}`);
+        }
+
+    } else {
+        console.log(`\n[Monitor-${networkName}] No profitable opportunity found this cycle.`);
+    }
+
+    const cycleEndTime = Date.now();
+    console.log(`[Monitor-${networkName}] ${new Date().toISOString()} - Cycle End (${cycleEndTime - cycleStartTime}ms).`);
+}
+
 module.exports = { monitorPools };
+
+// Helper to add Percent class if not globally available (or adjust import strategy)
+// Ensure Percent is imported correctly
+const { Percent } = require('@uniswap/sdk-core');
