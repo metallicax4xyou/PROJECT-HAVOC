@@ -3,7 +3,7 @@ require('dotenv').config(); // Load environment variables first
 const { ethers } = require('ethers');
 // --- CORRECTED IMPORT ---
 // Import the entire exported config object directly
-const config = require('./config');
+const config = require('./config/index.js')
 // --- Access constants from the imported config ---
 const MIN_NET_PROFIT_WEI = config.MIN_NET_PROFIT_WEI;
 const FLASH_LOAN_FEE_BPS = config.FLASH_LOAN_FEE_BPS;
