@@ -4,10 +4,16 @@ const { CurrencyAmount, TradeType, Percent, Token } = require('@uniswap/sdk-core
 const { Pool, Route, Trade } = require('@uniswap/v3-sdk');
 const logger = require('../utils/logger');
 const { ArbitrageError, handleError } = require('../utils/errorHandler');
-const config = require('../config/index.js'); // Load config for FLASH_LOAN_FEE_BPS etc.
+const config = require('../config/index.js');
+const { ABIS } = require('../constants/abis'); // Need ABI for Quoter call structure
 
-// --- Helper: Simulate a single swap using Uniswap V3 SDK ---
-async function simulateSingleTrade(
+// --- Helper: Simulate a single swap using Uniswap V3 SDK OR Quoter Contract ---
+// We were using the SDK's Trade.fromRoute, let's stick with that for now as it handles
+// multi-hop eventually and provides more data. The INVALID_ARGUMENT error likely
+// happened *after* this, when processing the results. Let's re-verify the results processing.
+// If SDK continues to cause issues, we can switch to direct Quoter calls.
+
+async function simulateSingleTradeSDK(
     poolForTrade, // Uniswap SDK Pool object for the swap
     tokenIn,      // SDK Token object for input token
     tokenOut,     // SDK Token object for output token
@@ -17,164 +23,128 @@ async function simulateSingleTrade(
          logger.debug(`[Simulator SDK] Cannot simulate with zero input amount.`);
          return null;
     }
+    logger.debug(`[Simulator SDK] Simulating ${amountIn.toSignificant(8)} ${tokenIn.symbol} -> ${tokenOut.symbol} on pool ${poolForTrade.token0.address}/${poolForTrade.token1.address} Fee ${poolForTrade.fee}`);
     try {
         const route = new Route([poolForTrade], tokenIn, tokenOut);
         const trade = await Trade.fromRoute(route, amountIn, TradeType.EXACT_INPUT);
+        // ** Check the trade object **
+        if (!trade || !trade.outputAmount || typeof trade.outputAmount.quotient === 'undefined') {
+             logger.warn(`[Simulator SDK] Trade simulation returned invalid trade object or outputAmount.`);
+             return null;
+        }
+        logger.debug(`[Simulator SDK] Trade successful. Output: ${trade.outputAmount.toSignificant(8)} ${tokenOut.symbol}`);
         return trade;
     } catch (error) {
-        // Log specific SDK errors if helpful
-        if (error.message.includes('liquidity') || error.message.includes('SPL')) {
-            // logger.debug(`[Simulator SDK] Trade simulation failed (${tokenIn.symbol} -> ${tokenOut.symbol}): ${error.message}`);
+        if (error.message.includes('liquidity') || error.message.includes('SPL') || error.code === 'RUNTIME_ERROR') {
+             logger.warn(`[Simulator SDK] Trade simulation failed (${tokenIn.symbol} -> ${tokenOut.symbol}): ${error.message}`);
         } else {
-            handleError(error, `simulateSingleTrade (${tokenIn.symbol} -> ${tokenOut.symbol})`);
-            logger.warn(`[Simulator SDK] Unexpected SDK Error simulating trade (${tokenIn.symbol} -> ${tokenOut.symbol}): ${error.message}`);
+             // *** Potential Source of Error: Is the error object itself being passed incorrectly? ***
+             // Let's ensure we handle the error object itself correctly.
+             handleError(error, `simulateSingleTradeSDK (${tokenIn.symbol} -> ${tokenOut.symbol})`);
+             // Log the error structure if it's not a typical EthersError code
+             if (!error.code) {
+                  logger.error("[Simulator SDK] Unexpected non-ethers error structure:", error);
+             }
         }
-        return null; // Indicate simulation failure
+        return null;
     }
 }
 
-/**
- * Calculates a dynamic simulation amount based on a percentage of the pool's liquidity.
- * Aims for a small percentage to minimize impact on simulation results while being feasible.
- * @param {Pool} poolSDK The Uniswap SDK Pool object (usually the swapPool).
- * @param {Token} tokenIn The SDK Token object for the input token (the one borrowed).
- * @param {number} percentageOfLiquidity The percentage (e.g., 1 for 1%) to use.
- * @returns {CurrencyAmount|null} The calculated amount as CurrencyAmount or null.
- */
+
+// calculateDynamicSimAmount function remains the same
 function calculateDynamicSimAmount(poolSDK, tokenIn, percentageOfLiquidity = 0.5) {
-     // V3 liquidity is complex. A simple proxy is sqrtPrice * liquidity value, but that's not reserves.
-     // A safer approach for simulation might be to use a very small fixed amount first,
-     // or derive amount based on a small desired output.
-     // Let's try a different approach: Simulate based on a *small fraction* of the configured *borrowAmount*.
-     // This avoids needing reserves and tests if *even a small part* of the intended trade works.
-
      const configuredBorrowAmount = config.BORROW_AMOUNTS_WEI[tokenIn.symbol];
-     if (!configuredBorrowAmount || configuredBorrowAmount === 0n) {
-          logger.warn(`[Simulator] Configured borrow amount for ${tokenIn.symbol} is zero or missing.`);
-          return null;
-     }
-
-     // Simulate with a small fraction (e.g., 1/100th) of the configured borrow amount
-     const fraction = 100n; // Simulate with 1% of the configured amount
+     if (!configuredBorrowAmount || configuredBorrowAmount === 0n) { logger.warn(`[Simulator] Configured borrow amount for ${tokenIn.symbol} is zero or missing.`); return null; }
+     const fraction = 100n; // Simulate with 1%
      const simAmountRaw = configuredBorrowAmount / fraction;
-
-     if (simAmountRaw === 0n) {
-          logger.warn(`[Simulator] Calculated simulation amount is zero for ${tokenIn.symbol}. Using a minimal unit.`);
-          // Use the smallest possible unit of the token if calculation resulted in zero
-          return CurrencyAmount.fromRawAmount(tokenIn, 1n);
-     }
-
-     // logger.debug(`[Simulator] Using dynamic sim amount: ${ethers.formatUnits(simAmountRaw, tokenIn.decimals)} ${tokenIn.symbol} (1/${fraction.toString()} of configured borrow)`);
+     if (simAmountRaw === 0n) { logger.warn(`[Simulator] Calculated simulation amount is zero for ${tokenIn.symbol}. Using a minimal unit.`); return CurrencyAmount.fromRawAmount(tokenIn, 1n); }
      return CurrencyAmount.fromRawAmount(tokenIn, simAmountRaw.toString());
 }
 
-/**
- * Simulates the arbitrage opportunity using Uniswap SDK Trades to account for slippage.
- * Uses a dynamically calculated small amount for simulation based on configured borrow amount.
- * @param {object} opportunity The opportunity object from PoolScanner.
- * @returns {Promise<object|null>} Returns an object with simulation results { finalAmountReceived, requiredRepayment, grossProfit, trade1, trade2, simulatedAmountIn } or null if simulation fails.
- */
 async function simulateArbitrage(opportunity) {
-    // ... (previous null checks for opportunity data) ...
      if (!opportunity || !opportunity.swapPoolInfo?.sdkPool || !opportunity.sdkTokenBorrowed || !opportunity.sdkTokenIntermediate || !opportunity.borrowAmount) {
          logger.warn('[Simulator] Invalid opportunity object received for simulation.', opportunity);
          return null;
      }
 
-    const {
-        startPoolInfo,
-        swapPoolInfo,
-        sdkTokenBorrowed,
-        sdkTokenIntermediate,
-        borrowAmount // The *actual* amount we intend to borrow/flash loan
-    } = opportunity;
-
+    const { startPoolInfo, swapPoolInfo, sdkTokenBorrowed, sdkTokenIntermediate, borrowAmount } = opportunity;
     const swapPoolSDK = swapPoolInfo.sdkPool;
 
-    // +++ Calculate Dynamic Simulation Amount +++
-    // Simulate with a small fraction of the intended borrow amount
     const amountInForSimulation = calculateDynamicSimAmount(swapPoolSDK, sdkTokenBorrowed);
-    if (!amountInForSimulation) {
-         logger.warn(`[Simulator] Failed to calculate simulation amount for ${sdkTokenBorrowed.symbol}. Aborting simulation.`);
-         return null;
-    }
-    const simAmountRaw = amountInForSimulation.quotient; // Get the raw BigInt amount used for simulation
+    if (!amountInForSimulation) { logger.warn(`[Simulator] Failed to calculate simulation amount for ${sdkTokenBorrowed.symbol}. Aborting simulation.`); return null; }
+    const simAmountRaw = amountInForSimulation.quotient;
     logger.log(`[Simulator] Simulating: ${opportunity.groupName} | Start ${startPoolInfo.feeBps}bps -> Swap ${swapPoolInfo.feeBps}bps | Sim Input ${ethers.formatUnits(simAmountRaw, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}`);
-    // +++ End Calculation +++
 
     try {
-        // 1. Calculate Required Repayment (for the *actual* borrowAmount)
         const flashFeePercent = BigInt(config.FLASH_LOAN_FEE_BPS);
         const flashFee = (borrowAmount * flashFeePercent) / 10000n;
         const requiredRepaymentAmount = borrowAmount + flashFee;
         logger.debug(`[Simulator] Actual Intended Borrow: ${ethers.formatUnits(borrowAmount, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}`);
         logger.debug(`[Simulator] Required Repayment (for actual borrow): ${ethers.formatUnits(requiredRepaymentAmount, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}`);
 
-        // 2. Simulate Swap 1 (using the small dynamic amount)
-        const trade1 = await simulateSingleTrade(swapPoolSDK, sdkTokenBorrowed, sdkTokenIntermediate, amountInForSimulation);
-        if (!trade1) {
-            logger.log(`[Simulator] Simulation FAIL Swap 1 (${sdkTokenBorrowed.symbol}->${sdkTokenIntermediate.symbol} on ${swapPoolInfo.feeBps}bps pool).`);
-            return null;
+        // --- Swap 1 ---
+        logger.debug("[Simulator] ---> Simulating Swap 1...");
+        const trade1 = await simulateSingleTradeSDK(swapPoolSDK, sdkTokenBorrowed, sdkTokenIntermediate, amountInForSimulation); // Using SDK helper
+        if (!trade1) { logger.log(`[Simulator] Simulation FAIL Swap 1 (${sdkTokenBorrowed.symbol}->${sdkTokenIntermediate.symbol} on ${swapPoolInfo.feeBps}bps pool).`); return null; }
+        const amountOutSwap1 = trade1.outputAmount; // Should be CurrencyAmount
+        // +++ Check amountOutSwap1 type +++
+        if (!(amountOutSwap1 instanceof CurrencyAmount)) {
+            logger.error('[Simulator] ERROR: amountOutSwap1 is not a CurrencyAmount!', amountOutSwap1);
+            throw new ArbitrageError('Internal simulation error: Invalid type for amountOutSwap1.', 'SIMULATION_ERROR');
         }
-        const amountOutSwap1 = trade1.outputAmount;
         logger.debug(`[Simulator] Sim Swap 1 OK: Input ${amountInForSimulation.toSignificant(6)} ${sdkTokenBorrowed.symbol} -> Output ${amountOutSwap1.toSignificant(6)} ${sdkTokenIntermediate.symbol}`);
 
-        // 3. Simulate Swap 2 (using output of Swap 1)
-        const amountInSwap2 = amountOutSwap1;
-        const trade2 = await simulateSingleTrade(swapPoolSDK, sdkTokenIntermediate, sdkTokenBorrowed, amountInSwap2);
-        if (!trade2) {
-            logger.log(`[Simulator] Simulation FAIL Swap 2 (${sdkTokenIntermediate.symbol}->${sdkTokenBorrowed.symbol} on ${swapPoolInfo.feeBps}bps pool).`);
-            return null;
-        }
-        const amountOutSwap2_Sim = trade2.outputAmount; // Final amount of borrowToken from SIMULATION (CurrencyAmount)
-        const finalAmountReceived_Sim_Raw = amountOutSwap2_Sim.quotient; // Final amount from SIMULATION (BigInt)
+        // --- Swap 2 ---
+        logger.debug("[Simulator] ---> Simulating Swap 2...");
+        const amountInSwap2 = amountOutSwap1; // Pass CurrencyAmount
+        const trade2 = await simulateSingleTradeSDK(swapPoolSDK, sdkTokenIntermediate, sdkTokenBorrowed, amountInSwap2); // Using SDK helper
+        if (!trade2) { logger.log(`[Simulator] Simulation FAIL Swap 2 (${sdkTokenIntermediate.symbol}->${sdkTokenBorrowed.symbol} on ${swapPoolInfo.feeBps}bps pool).`); return null; }
+        const amountOutSwap2_Sim = trade2.outputAmount; // Should be CurrencyAmount
+        // +++ Check amountOutSwap2_Sim type +++
+         if (!(amountOutSwap2_Sim instanceof CurrencyAmount)) {
+             logger.error('[Simulator] ERROR: amountOutSwap2_Sim is not a CurrencyAmount!', amountOutSwap2_Sim);
+             throw new ArbitrageError('Internal simulation error: Invalid type for amountOutSwap2_Sim.', 'SIMULATION_ERROR');
+         }
+        const finalAmountReceived_Sim_Raw = amountOutSwap2_Sim.quotient; // *** Extract BigInt correctly ***
         logger.debug(`[Simulator] Sim Swap 2 OK: Input ${amountInSwap2.toSignificant(6)} ${sdkTokenIntermediate.symbol} -> Output ${amountOutSwap2_Sim.toSignificant(6)} ${sdkTokenBorrowed.symbol}`);
 
-        // 4. Estimate Final Amount for Actual Borrow Amount (Extrapolation - Less Accurate but Necessary)
-        // We simulate small, but need profit estimate for the large amount.
-        // Simple linear scaling: (SimOutput / SimInput) * ActualInput
-        // WARNING: This ignores slippage differences between small and large amounts!
+
+        // --- Extrapolation & Profit ---
+        logger.debug("[Simulator] ---> Calculating Estimated Profit...");
         let finalAmountReceived_Actual_Estimated = 0n;
-        if (simAmountRaw > 0n) {
-             finalAmountReceived_Actual_Estimated = (finalAmountReceived_Sim_Raw * borrowAmount) / simAmountRaw;
+        if (simAmountRaw > 0n && typeof finalAmountReceived_Sim_Raw === 'bigint') { // ++ Add type check ++
+            finalAmountReceived_Actual_Estimated = (finalAmountReceived_Sim_Raw * borrowAmount) / simAmountRaw;
+        } else {
+            logger.error(`[Simulator] ERROR: Cannot calculate estimated profit. simAmountRaw=${simAmountRaw}, finalAmountReceived_Sim_Raw=${finalAmountReceived_Sim_Raw} (Type: ${typeof finalAmountReceived_Sim_Raw})`);
+            throw new ArbitrageError('Internal simulation error: Invalid inputs for profit extrapolation.', 'SIMULATION_ERROR');
         }
         logger.log(`[Simulator] Est. Final Amount Received (for actual borrow): ${ethers.formatUnits(finalAmountReceived_Actual_Estimated, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}`);
-
-
-        // 5. Calculate Estimated Gross Profit (for the ACTUAL borrow amount)
-        if (finalAmountReceived_Actual_Estimated <= requiredRepaymentAmount) {
-            logger.log(`[Simulator] Gross Profit Check FAIL. Est. Final Amount <= Required Repayment.`);
-            return null; // Not profitable even before gas
-        }
+        if (finalAmountReceived_Actual_Estimated <= requiredRepaymentAmount) { logger.log(`[Simulator] Gross Profit Check FAIL. Est. Final Amount <= Required Repayment.`); return null; }
         const grossProfit = finalAmountReceived_Actual_Estimated - requiredRepaymentAmount;
         logger.log(`[Simulator] Est. Gross Profit Found: ${ethers.formatUnits(grossProfit, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}`);
 
-        // Return detailed simulation results
-        return {
-            // Amounts related to the actual intended trade size
-            finalAmountReceived: finalAmountReceived_Actual_Estimated, // BigInt (Estimated for actual borrow amount)
-            requiredRepayment: requiredRepaymentAmount,           // BigInt (For actual borrow amount)
-            grossProfit: grossProfit,                             // BigInt (For actual borrow amount)
-             // Include the amount used for the simulation itself for reference
-            simulatedAmountIn: simAmountRaw,                      // BigInt
-            // SDK Trade objects from the small simulation (needed for min amounts calculation)
-            trade1: trade1,
-            trade2: trade2,
-        };
+        // Return results
+        return { finalAmountReceived: finalAmountReceived_Actual_Estimated, requiredRepayment: requiredRepaymentAmount, grossProfit: grossProfit, simulatedAmountIn: simAmountRaw, trade1: trade1, trade2: trade2 };
 
     } catch (error) {
-        handleError(error, `QuoteSimulator.simulateArbitrage (${opportunity.groupName})`);
-        logger.error(`[Simulator] Unexpected error during simulation for group ${opportunity.groupName}: ${error.message}`);
-        return null; // Indicate failure
+        // Catch potential errors converting amounts or during calculations
+        // Ensure the error isn't the INVALID_ARGUMENT from downstream usage
+         if (error instanceof ArbitrageError && error.type === 'SIMULATION_ERROR') {
+              handleError(error, `QuoteSimulator.Calculation (${opportunity.groupName})`); // Handle specific internal errors
+         } else if (error.code !== 'INVALID_ARGUMENT') { // Avoid double logging if caught by engine
+             handleError(error, `QuoteSimulator.simulateArbitrage (${opportunity.groupName})`);
+         }
+        logger.error(`[Simulator] Error during simulation calculation for group ${opportunity.groupName}: ${error.message}`);
+        return null;
     }
 }
 
 // getMinimumAmountOut function remains the same
 function getMinimumAmountOut(trade, slippageToleranceBps) {
     if (!trade) return 0n;
-    const slippageTolerance = new Percent(slippageToleranceBps, 10000); // Create Percent object
+    const slippageTolerance = new Percent(slippageToleranceBps, 10000);
     const amountOut = trade.minimumAmountOut(slippageTolerance);
-    return amountOut.quotient; // Return as BigInt
+    return amountOut.quotient;
 }
 
 module.exports = {
