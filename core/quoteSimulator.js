@@ -2,16 +2,20 @@
 const { ethers, JsonRpcProvider } = require('ethers');
 const { CurrencyAmount, TradeType, Percent, Token } = require('@uniswap/sdk-core');
 const { Pool, Route, Trade, TickListDataProvider } = require('@uniswap/v3-sdk');
-const JSBI = require('jsbi'); // Keep JSBI import
+const JSBI = require('jsbi');
 const logger = require('../utils/logger');
 const { ArbitrageError, handleError } = require('../utils/errorHandler');
 const config = require('../config/index.js');
 
 // TickLens Contract Info
-const TICK_LENS_ADDRESS = '0xbfd8137f7d1516d3ea5cA83523914859ec47F573';
+const TICK_LENS_ADDRESS_RAW = '0xbfd8137f7d1516d3ea5cA83523914859ec47F573';
+// --->>> FIX: Normalize the address <<<---
+const TICK_LENS_ADDRESS = ethers.getAddress(TICK_LENS_ADDRESS_RAW);
+// --->>> End Fix <<<---
+
 const TICK_LENS_ABI = [ 'function getPopulatedTicksInWord(address pool, int16 tickBitmapIndex) external view returns (tuple(int24 tick, int128 liquidityNet, int128 liquidityGross)[] populatedTicks)' ];
 
-// --- simulateSingleTradeSDK FUNCTION with CORRECTED VALIDATION ---
+// --- simulateSingleTradeSDK FUNCTION ---
 async function simulateSingleTradeSDK( provider, poolAddress, poolForTrade, tokenIn, tokenOut, amountIn ) {
     logger.info(`[SimSDK ENTRY] Simulating on pool ${poolAddress} (${tokenIn.symbol} -> ${tokenOut.symbol})`);
 
@@ -19,19 +23,11 @@ async function simulateSingleTradeSDK( provider, poolAddress, poolForTrade, toke
     if (!provider) { logger.error('[SimSDK] Provider instance is required.'); return null; }
     if (!ethers.isAddress(poolAddress)) { logger.error(`[SimSDK] Invalid poolAddress received: ${poolAddress}`); return null; }
     if (!(poolForTrade instanceof Pool) || typeof poolForTrade.tickSpacing !== 'number') { logger.error('[SimSDK] Invalid poolForTrade object.', { poolForTrade }); return null; }
-
-    // --->>> CORRECTED JSBI Check <<<---
-    // Check amountIn exists, its quotient is a JSBI object, and if it's equal to zero using JSBI.equal
-    if (!amountIn || !(amountIn.quotient instanceof JSBI) || JSBI.equal(amountIn.quotient, JSBI.BigInt(0))) {
-        logger.warn(`[SimSDK] Invalid or zero input amount detected.`);
-        return null;
-    }
-    // --->>> End Correction <<<---
-
+    if (!amountIn || !(amountIn.quotient instanceof JSBI) || JSBI.equal(amountIn.quotient, JSBI.BigInt(0))) { logger.warn(`[SimSDK] Invalid or zero input amount detected.`); return null; }
 
     const tickSpacing = poolForTrade.tickSpacing;
     try {
-        // TickLens, Route, Trade logic remains the same as previous version
+        // --->>> Use the checksummed TICK_LENS_ADDRESS <<<---
         const tickLensContract = new ethers.Contract(TICK_LENS_ADDRESS, TICK_LENS_ABI, provider);
         const tickBitmapIndex = 0;
         logger.info(`[SimSDK] Fetching ticks for ${poolAddress} (Index ${tickBitmapIndex})...`);
@@ -40,9 +36,14 @@ async function simulateSingleTradeSDK( provider, poolAddress, poolForTrade, toke
             populatedTicks = await tickLensContract.getPopulatedTicksInWord(poolAddress, tickBitmapIndex);
             logger.info(`[SimSDK] Fetched ${populatedTicks?.length ?? 0} populated ticks for ${poolAddress}.`);
         } catch (tickFetchError) {
-             logger.warn(`[SimSDK] Error fetching ticks for pool ${poolAddress}: ${tickFetchError.message}.`);
+             // Check if it's the checksum error again specifically
+             if (tickFetchError.code === 'INVALID_ARGUMENT' && tickFetchError.message.includes('checksum')) {
+                 logger.error(`[SimSDK FATAL] TickLens checksum error persisted! Address used: ${TICK_LENS_ADDRESS}`);
+             } else {
+                 logger.warn(`[SimSDK] Error fetching ticks for pool ${poolAddress}: ${tickFetchError.message}.`);
+             }
              handleError(tickFetchError, `TickLens Fetch (${poolAddress})`);
-             return null;
+             return null; // Fail simulation if ticks can't be fetched reliably
         }
         const tickDataProvider = new TickListDataProvider(populatedTicks || [], tickSpacing);
         logger.info(`[SimSDK] Creating Route for ${poolAddress}...`);
@@ -50,17 +51,14 @@ async function simulateSingleTradeSDK( provider, poolAddress, poolForTrade, toke
         logger.info(`[SimSDK] Attempting Trade.fromRoute for ${poolAddress}...`);
         const trade = await Trade.fromRoute(route, amountIn, TradeType.EXACT_INPUT, { tickDataProvider });
         logger.info(`[SimSDK] Trade.fromRoute successful for ${poolAddress}.`);
-        if (!trade || !trade.outputAmount || !(trade.outputAmount.quotient instanceof JSBI)) {
-             logger.warn(`[SimSDK] Trade simulation for ${poolAddress} returned invalid trade object or outputAmount/quotient.`);
-             return null;
-        }
+        if (!trade || !trade.outputAmount || !(trade.outputAmount.quotient instanceof JSBI)) { logger.warn(`[SimSDK] Trade simulation for ${poolAddress} returned invalid trade object or outputAmount/quotient.`); return null; }
         logger.info(`[SimSDK EXIT] Simulation SUCCESS for pool ${poolAddress}.`);
-        return trade;
+        return trade; // Return valid trade
 
     } catch (error) {
          logger.error(`[SimSDK ERROR] Pool ${poolAddress} (${tokenIn.symbol}->${tokenOut.symbol}): ${error.message}`);
          handleError(error, `simulateSingleTradeSDK (${tokenIn.symbol} -> ${tokenOut.symbol}) Pool: ${poolAddress}`);
-        return null;
+        return null; // Return null on simulation error
     }
 } // End simulateSingleTradeSDK
 
