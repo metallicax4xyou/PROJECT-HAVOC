@@ -8,14 +8,14 @@ const { ArbitrageError, handleError } = require('../utils/errorHandler');
 const config = require('../config/index.js');
 
 // TickLens Contract Info
-const TICK_LENS_ADDRESS_RAW = '0xbfd8137f7d1516d3ea5cA83523914859ec47F573';
-// --->>> FIX: Normalize the address <<<---
-const TICK_LENS_ADDRESS = ethers.getAddress(TICK_LENS_ADDRESS_RAW);
+// --->>> FIX: Use the CORRECT EIP-55 Checksum Address <<<---
+const TICK_LENS_ADDRESS = '0xBFD8137f7D1516D3EA5Ca83523914859EC47F573';
 // --->>> End Fix <<<---
 
 const TICK_LENS_ABI = [ 'function getPopulatedTicksInWord(address pool, int16 tickBitmapIndex) external view returns (tuple(int24 tick, int128 liquidityNet, int128 liquidityGross)[] populatedTicks)' ];
 
 // --- simulateSingleTradeSDK FUNCTION ---
+// (Uses the corrected TICK_LENS_ADDRESS now)
 async function simulateSingleTradeSDK( provider, poolAddress, poolForTrade, tokenIn, tokenOut, amountIn ) {
     logger.info(`[SimSDK ENTRY] Simulating on pool ${poolAddress} (${tokenIn.symbol} -> ${tokenOut.symbol})`);
 
@@ -27,7 +27,7 @@ async function simulateSingleTradeSDK( provider, poolAddress, poolForTrade, toke
 
     const tickSpacing = poolForTrade.tickSpacing;
     try {
-        // --->>> Use the checksummed TICK_LENS_ADDRESS <<<---
+        // Uses the corrected constant TICK_LENS_ADDRESS directly
         const tickLensContract = new ethers.Contract(TICK_LENS_ADDRESS, TICK_LENS_ABI, provider);
         const tickBitmapIndex = 0;
         logger.info(`[SimSDK] Fetching ticks for ${poolAddress} (Index ${tickBitmapIndex})...`);
@@ -36,12 +36,7 @@ async function simulateSingleTradeSDK( provider, poolAddress, poolForTrade, toke
             populatedTicks = await tickLensContract.getPopulatedTicksInWord(poolAddress, tickBitmapIndex);
             logger.info(`[SimSDK] Fetched ${populatedTicks?.length ?? 0} populated ticks for ${poolAddress}.`);
         } catch (tickFetchError) {
-             // Check if it's the checksum error again specifically
-             if (tickFetchError.code === 'INVALID_ARGUMENT' && tickFetchError.message.includes('checksum')) {
-                 logger.error(`[SimSDK FATAL] TickLens checksum error persisted! Address used: ${TICK_LENS_ADDRESS}`);
-             } else {
-                 logger.warn(`[SimSDK] Error fetching ticks for pool ${poolAddress}: ${tickFetchError.message}.`);
-             }
+             logger.warn(`[SimSDK] Error fetching ticks for pool ${poolAddress}: ${tickFetchError.message}.`);
              handleError(tickFetchError, `TickLens Fetch (${poolAddress})`);
              return null; // Fail simulation if ticks can't be fetched reliably
         }
