@@ -1,104 +1,132 @@
 // core/flashSwapManager.js
-const { ethers, Contract, JsonRpcProvider, Wallet } = require('ethers');
+const { ethers, Wallet, Contract, JsonRpcProvider, NonceManager: EthersNonceManager } = require('ethers');
 const config = require('../config/index.js');
 const logger = require('../utils/logger');
-const { handleError } = require('../utils/errorHandler');
-const { ABIS } = require('../constants/abis');
-
-// --->>> UPDATED IMPORT: Use destructuring for named export <<<---
-const { NonceManager } = require('../utils/nonceManager');
+const { ABIS } = require('../constants/abis'); // Load ABIs
+const { ArbitrageError, handleError } = require('../utils/errorHandler');
+const NonceManager = require('../utils/nonceManager'); // Our custom nonce manager
+// --->>> Import the Quoter initializer <<<---
+const { initializeQuoter } = require('./quoteSimulator');
 
 class FlashSwapManager {
     constructor() {
-        logger.info(`[Manager] Initializing FlashSwapManager for network: ${config.NETWORK_NAME} (Chain ID: ${config.CHAIN_ID})...`);
         this.provider = null;
         this.signer = null;
         this.flashSwapContract = null;
-        this.quoterContract = null;
+        this.quoterV2Contract = null; // Added for potential future use
         this.nonceManager = null;
+        this.network = null;
     }
 
+    /**
+     * Initializes the manager: sets up provider, signer, contracts, and nonce manager.
+     * @returns {Promise<boolean>} True if initialization is successful, false otherwise.
+     */
     async initialize() {
-        try {
-            logger.info('[Manager] Setting up Provider...');
-            this.provider = new JsonRpcProvider(config.RPC_URL);
-            const network = await this.provider.getNetwork();
-            if (network.chainId !== BigInt(config.CHAIN_ID)) {
-                throw new Error(`Provider connected to wrong network! Expected Chain ID ${config.CHAIN_ID}, got ${network.chainId}`);
-            }
-            const blockNumber = await this.provider.getBlockNumber();
-            logger.info(`[Manager] Provider connected. Network: ${network.name} (ID: ${network.chainId}), Current block: ${blockNumber}`);
+        const functionSig = '[Manager]';
+        logger.info(`${functionSig} Initializing FlashSwapManager for network: ${config.NETWORK_NAME} (Chain ID: ${config.CHAIN_ID})...`);
 
-            logger.info('[Manager] Setting up Signer...');
+        try {
+            // 1. Setup Provider
+            logger.info(`${functionSig} Setting up Provider...`);
+            if (!config.RPC_URL) {
+                throw new ArbitrageError('ProviderSetupError', 'RPC_URL is not configured.');
+            }
+            this.provider = new JsonRpcProvider(config.RPC_URL);
+            // Verify connection
+            this.network = await this.provider.getNetwork();
+            const blockNumber = await this.provider.getBlockNumber();
+            if (!this.network || !this.network.chainId || blockNumber <= 0) {
+                 throw new ArbitrageError('ProviderSetupError', `Failed to connect to provider or get network info. ChainID: ${this.network?.chainId}, Block: ${blockNumber}`);
+            }
+             // Check if connected Chain ID matches config
+             if (this.network.chainId !== BigInt(config.CHAIN_ID)) {
+                 throw new ArbitrageError('ProviderSetupError', `Provider connected to wrong network! Expected Chain ID: ${config.CHAIN_ID}, Got: ${this.network.chainId}`);
+             }
+            logger.info(`${functionSig} Provider connected. Network: ${this.network.name} (ID: ${this.network.chainId}), Current block: ${blockNumber}`);
+
+            // 2. Setup Signer
+            logger.info(`${functionSig} Setting up Signer...`);
             if (!config.PRIVATE_KEY) {
-                throw new Error('PRIVATE_KEY not found in environment configuration.');
+                throw new ArbitrageError('SignerSetupError', 'PRIVATE_KEY is not configured.');
             }
             this.signer = new Wallet(config.PRIVATE_KEY, this.provider);
-            logger.info(`[Manager] Signer Address: ${this.signer.address}`);
-            if (config.BOT_ADDRESS && this.signer.address.toLowerCase() !== config.BOT_ADDRESS.toLowerCase()) {
-                 logger.warn(`[Manager] Configured BOT_ADDRESS (${config.BOT_ADDRESS}) does not match derived Signer address (${this.signer.address})!`);
-            }
+            logger.info(`${functionSig} Signer Address: ${await this.signer.getAddress()}`);
 
-            logger.info('[Manager] Initializing Nonce Manager...');
-             // --->>> UPDATED INSTANTIATION: Pass the signer instance <<<---
-             // The custom NonceManager class expects the signer object
-            this.nonceManager = new NonceManager(this.signer);
+            // 3. Setup Custom Nonce Manager
+            logger.info(`${functionSig} Initializing Nonce Manager...`);
+            this.nonceManager = new NonceManager(this.signer); // Pass the ethers Signer object
             await this.nonceManager.initialize(); // Fetch initial nonce
 
 
-            logger.info('[Manager] Initializing Core Contracts...');
-            // Flash Swap Contract
-            if (!config.FLASH_SWAP_CONTRACT_ADDRESS || !ABIS.FlashSwap) {
-                 throw new Error('Flash Swap contract address or ABI is missing in configuration/constants.');
+            // 4. Initialize Core Contracts
+            logger.info(`${functionSig} Initializing Core Contracts...`);
+            // FlashSwap Contract
+            if (!config.FLASH_SWAP_CONTRACT_ADDRESS || !ethers.isAddress(config.FLASH_SWAP_CONTRACT_ADDRESS)) {
+                 throw new ArbitrageError('ContractSetupError', `Invalid or missing FLASH_SWAP_CONTRACT_ADDRESS: ${config.FLASH_SWAP_CONTRACT_ADDRESS}`);
+            }
+            if (!ABIS.FlashSwap) {
+                 throw new ArbitrageError('ContractSetupError', 'FlashSwap ABI not found.');
             }
             this.flashSwapContract = new Contract(config.FLASH_SWAP_CONTRACT_ADDRESS, ABIS.FlashSwap, this.signer);
-            logger.info(`[Manager] FlashSwap Contract Initialized: ${await this.flashSwapContract.getAddress()}`);
+            logger.info(`${functionSig} FlashSwap Contract Initialized: ${await this.flashSwapContract.getAddress()}`);
 
-            // Quoter Contract (V2)
-            if (config.UNISWAP_V3_QUOTER_ADDRESS && ABIS.IQuoterV2) {
-                 this.quoterContract = new Contract(config.UNISWAP_V3_QUOTER_ADDRESS, ABIS.IQuoterV2, this.provider);
-                 logger.info(`[Manager] Quoter Contract Initialized: ${await this.quoterContract.getAddress()}`);
-            } else {
-                 logger.warn('[Manager] Quoter V2 address or ABI missing, Quoter contract not initialized.');
-            }
+            // --->>> Initialize Quoter V2 Contract via quoteSimulator <<<---
+            initializeQuoter(this.provider); // Call the initializer function
 
 
-            logger.info('[Manager] FlashSwapManager Initialized Successfully.');
+            // 5. Final Log
+            logger.info(`${functionSig} FlashSwapManager Initialized Successfully.`);
+            return true;
 
         } catch (error) {
-            logger.fatal('[Manager] CRITICAL ERROR during FlashSwapManager initialization:', error); // Using fatal here is okay since logger now defines it
-            handleError(error, 'FlashSwapManager.initialize');
-            throw error; // Re-throw to prevent application start
+            logger.fatal(`${functionSig} CRITICAL INITIALIZATION FAILURE!`);
+            handleError(error, `${functionSig} Initialization`);
+            // Ensure partial initializations are cleared?
+            this.provider = null;
+            this.signer = null;
+            this.flashSwapContract = null;
+            this.nonceManager = null;
+            return false; // Indicate failure
         }
     }
 
+    // --- Getter Methods ---
+
     getProvider() {
-        if (!this.provider) {
-            logger.error("[Manager] getProvider() called before provider was initialized!");
-        }
+        if (!this.provider) { logger.warn('[Manager] Provider accessed before initialization.'); }
         return this.provider;
     }
 
     getSigner() {
-        if (!this.signer) {
-             logger.error("[Manager] getSigner() called before signer was initialized!");
-        }
+        if (!this.signer) { logger.warn('[Manager] Signer accessed before initialization.'); }
         return this.signer;
     }
 
     getFlashSwapContract() {
-         if (!this.flashSwapContract) {
-              logger.error("[Manager] getFlashSwapContract() called before contract was initialized!");
-         }
+        if (!this.flashSwapContract) { logger.warn('[Manager] FlashSwap Contract accessed before initialization.'); }
         return this.flashSwapContract;
     }
 
-     getNonceManager() {
-         if (!this.nonceManager) {
-              logger.error("[Manager] getNonceManager() called before nonce manager was initialized!");
-         }
-         return this.nonceManager;
+    getNonceManager() {
+        if (!this.nonceManager) { logger.warn('[Manager] Nonce Manager accessed before initialization.'); }
+        return this.nonceManager;
+    }
+
+     getNetwork() {
+         if (!this.network) { logger.warn('[Manager] Network info accessed before initialization.'); }
+         return this.network;
      }
+
+    // --- Utility Methods ---
+
+    /**
+     * Checks if the manager has been successfully initialized.
+     * @returns {boolean} True if initialized, false otherwise.
+     */
+    isInitialized() {
+        return !!this.provider && !!this.signer && !!this.flashSwapContract && !!this.nonceManager && !!this.network;
+    }
 }
 
 module.exports = FlashSwapManager;
