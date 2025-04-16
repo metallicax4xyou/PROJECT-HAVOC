@@ -24,9 +24,7 @@ let quoterV2Contract = null;
  */
 function initializeQuoter(provider) {
     // ... (Function body remains the same) ...
-    if (!config.QUOTER_ADDRESS || !ethers.isAddress(config.QUOTER_ADDRESS)) {
-        logger.warn('[Simulator] QUOTER_ADDRESS is missing or invalid in config. QuoterV2 simulations may fail.'); return;
-    }
+    if (!config.QUOTER_ADDRESS || !ethers.isAddress(config.QUOTER_ADDRESS)) { logger.warn('[Simulator] QUOTER_ADDRESS is missing or invalid in config. QuoterV2 simulations may fail.'); return; }
     if (!provider) { logger.error('[Simulator] Cannot initialize QuoterV2 without a provider.'); return; }
     try {
         quoterV2Contract = new ethers.Contract(config.QUOTER_ADDRESS, QuoterV2ABI, provider);
@@ -55,60 +53,67 @@ async function getTickDataProvider(provider, poolAddress, tickSpacing) {
     const tickBitmapIndex = 0;
     logger.debug(`${functionSig} Fetching ticks (Index ${tickBitmapIndex})...`);
     let populatedTicksRaw = [];
+    let formattedTicks = []; // Define upfront
+
     try {
         populatedTicksRaw = await tickLensContract.getPopulatedTicksInWord(poolAddress, tickBitmapIndex);
         logger.debug(`${functionSig} Fetched ${populatedTicksRaw?.length ?? 0} raw populated ticks.`);
 
-        if (populatedTicksRaw?.length > 0) {
-             const rawTicks = populatedTicksRaw.map(t => Number(t.tick));
-             logger.debug(`${functionSig} Raw Ticks Received: [${rawTicks.join(', ')}]`);
-        } else {
+        if (!populatedTicksRaw || populatedTicksRaw.length === 0) {
              logger.debug(`${functionSig} No ticks received from TickLens.`);
-             // Return empty provider if no ticks? SDK might handle this.
-             return new TickListDataProvider([], tickSpacing);
+             return new TickListDataProvider([], tickSpacing); // Return empty provider if no ticks
         }
 
+        const rawTicksLog = populatedTicksRaw.map(t => Number(t.tick));
+        logger.debug(`${functionSig} Raw Ticks Received: [${rawTicksLog.join(', ')}]`);
+
         let invalidTickCount = 0;
-        const formattedTicks = populatedTicksRaw.map(tickInfo => {
+        formattedTicks = populatedTicksRaw.map((tickInfo, index) => {
             const tickNumber = Number(tickInfo.tick);
-            if (tickNumber % tickSpacing !== 0) {
-                logger.warn(`${functionSig} Invalid tick found! Tick ${tickNumber} is not divisible by spacing ${tickSpacing}. Filtering it out.`);
+            // --- Log inside map ---
+            // logger.debug(`${functionSig} Processing Raw Tick #${index}: tick=${tickNumber}, liqNet=${tickInfo.liquidityNet?.toString()}, liqGross=${tickInfo.liquidityGross?.toString()}`);
+            // --- Check Types ---
+            if (typeof tickInfo.liquidityNet !== 'bigint' || typeof tickInfo.liquidityGross !== 'bigint') {
+                logger.warn(`${functionSig} Invalid liquidity data type for tick ${tickNumber}! NetType=${typeof tickInfo.liquidityNet}, GrossType=${typeof tickInfo.liquidityGross}. Filtering.`);
                 invalidTickCount++; return null;
             }
+            // --- Check divisibility ---
+            if (tickNumber % tickSpacing !== 0) {
+                logger.warn(`${functionSig} Invalid tick! Tick ${tickNumber} is not divisible by spacing ${tickSpacing}. Filtering.`);
+                invalidTickCount++; return null;
+            }
+            // --- Check bounds ---
             if (tickNumber < Tick.MIN_TICK || tickNumber > Tick.MAX_TICK) {
-                 logger.warn(`${functionSig} Invalid tick found! Tick ${tickNumber} is outside valid range [${Tick.MIN_TICK}, ${Tick.MAX_TICK}]. Filtering it out.`);
+                 logger.warn(`${functionSig} Invalid tick! Tick ${tickNumber} out of range [${Tick.MIN_TICK}, ${Tick.MAX_TICK}]. Filtering.`);
                  invalidTickCount++; return null;
             }
-            // --- ADDED: Log the structure we pass to the SDK ---
-            const tickObject = {
+            // If all checks pass, return the object for the provider
+            return {
                 tick: tickNumber,
-                liquidityNet: tickInfo.liquidityNet, // Should be BigInt
-                liquidityGross: tickInfo.liquidityGross // Should be BigInt
+                liquidityNet: tickInfo.liquidityNet,
+                liquidityGross: tickInfo.liquidityGross
             };
-            // logger.debug(`${functionSig} Formatted Tick Object: ${JSON.stringify(tickObject, (k, v) => typeof v === 'bigint' ? v.toString() : v)}`); // Verbose
-            return tickObject;
-            // --- END ADDED ---
-        }).filter(tick => tick !== null);
+        }).filter(tick => tick !== null); // Filter out nulls from failed checks
 
         if (invalidTickCount > 0) { logger.warn(`${functionSig} Filtered out ${invalidTickCount} invalid ticks.`); }
 
-        if (formattedTicks.length === 0 && populatedTicksRaw.length > 0) {
-             logger.warn(`${functionSig} All fetched ticks were invalid or filtered out. Cannot create provider.`);
-             return null;
+        if (formattedTicks.length === 0) {
+             logger.warn(`${functionSig} No valid ticks remaining after filtering. Cannot create provider.`);
+             return null; // Return null if all ticks were invalid
         }
 
-        logger.debug(`${functionSig} Creating TickListDataProvider with ${formattedTicks.length} valid ticks. Tick Spacing: ${tickSpacing}`);
-        // --- ADDED: Log the exact data passed to constructor ---
-        logger.debug(`${functionSig} Data passed to TickListDataProvider: ${JSON.stringify(formattedTicks, (k, v) => typeof v === 'bigint' ? v.toString() : v)}`);
-        // --- END ADDED ---
+        logger.debug(`${functionSig} Creating TickListDataProvider with ${formattedTicks.length} valid ticks. Final Tick Spacing Check: ${tickSpacing}`);
+        logger.debug(`${functionSig} Final Data passed to TickListDataProvider: ${JSON.stringify(formattedTicks, (k, v) => typeof v === 'bigint' ? v.toString() : v)}`);
 
-        // This is the line that fails (110 in previous version)
+        // Try constructing the provider - this is where the error occurs
         return new TickListDataProvider(formattedTicks, tickSpacing);
 
-    } catch (tickFetchError) {
-        // Catch errors during the TickLens call OR the TickListDataProvider constructor
-        logger.warn(`${functionSig} Error during tick processing/provider creation: ${tickFetchError.message}.`);
-        handleError(tickFetchError, `TickProvider (${poolAddress})`);
+    } catch (error) {
+        // Catch errors during TickLens call OR TickListDataProvider constructor
+        logger.warn(`${functionSig} Error during tick processing/provider creation: ${error.message}.`);
+        // Log the formatted ticks array *just before* the potential failure
+        logger.debug(`${functionSig} Data that potentially caused error: ${JSON.stringify(formattedTicks, (k, v) => typeof v === 'bigint' ? v.toString() : v)}`);
+        handleError(error, `TickProvider (${poolAddress})`);
         return null; // Return null on any error here
     }
 }
@@ -127,15 +132,12 @@ async function simulateSingleTradeSDK(provider, poolData, tokenIn, tokenOut, amo
     const functionSig = `[SimSDK Pool: ${poolData.address}]`;
     logger.debug(`${functionSig} Simulating ${ethers.formatUnits(amountIn.quotient.toString(), tokenIn.decimals)} ${tokenIn.symbol} -> ${tokenOut.symbol}`);
 
-    if (!provider || !poolData || !tokenIn || !tokenOut || !amountIn || !(amountIn instanceof CurrencyAmount)) {
-        logger.error(`${functionSig} Invalid arguments for simulateSingleTradeSDK.`); return null;
-    }
+    // ... (Input validation remains the same) ...
+    if (!provider || !poolData || !tokenIn || !tokenOut || !amountIn || !(amountIn instanceof CurrencyAmount)) { logger.error(`${functionSig} Invalid arguments for simulateSingleTradeSDK.`); return null; }
     if (amountIn.quotient <= 0n) { logger.warn(`${functionSig} Input amount is zero or negative.`); return null; }
 
     try {
-        if (poolData.sqrtPriceX96 == null || poolData.liquidity == null || poolData.tick == null || poolData.feeBps == null) {
-             logger.error(`${functionSig} Missing required pool state data (sqrtPriceX96, liquidity, tick, feeBps).`); return null;
-        }
+        if (poolData.sqrtPriceX96 == null || poolData.liquidity == null || poolData.tick == null || poolData.feeBps == null) { logger.error(`${functionSig} Missing required pool state data.`); return null; }
         if (!poolData.sdkToken0 || !poolData.sdkToken1) { logger.error(`${functionSig} Missing sdkToken0 or sdkToken1 in poolData.`); return null; }
 
         const pool = new Pool(
@@ -143,13 +145,11 @@ async function simulateSingleTradeSDK(provider, poolData, tokenIn, tokenOut, amo
             poolData.sqrtPriceX96.toString(), poolData.liquidity.toString(), Number(poolData.tick)
         );
 
-        // --- ADDED: Log tickSpacing from created Pool object ---
         const derivedTickSpacing = pool.tickSpacing;
         logger.debug(`${functionSig} Fee: ${poolData.feeBps}bps => Derived Tick Spacing: ${derivedTickSpacing}`);
-        // --- END ADDED ---
 
-        // Fetch Tick Data (now with filtering) - PASS DERIVED SPACING
-        const tickDataProvider = await getTickDataProvider(provider, poolData.address, derivedTickSpacing); // Pass spacing from SDK Pool
+        // Fetch Tick Data (now with filtering and type checks) - PASS DERIVED SPACING
+        const tickDataProvider = await getTickDataProvider(provider, poolData.address, derivedTickSpacing);
         if (!tickDataProvider) {
             logger.warn(`${functionSig} Failed to get valid tick data provider. Cannot simulate accurately.`); return null;
         }
@@ -187,18 +187,13 @@ async function simulateArbitrage(provider, opportunity) {
     const functionSig = `[SimArb Group: ${opportunity?.groupName}]`;
     logger.info(`${functionSig} Starting simulation...`);
 
-    if (!provider || !opportunity ||
-        !opportunity.startPoolInfo || !opportunity.swapPoolInfo ||
-        !opportunity.sdkTokenBorrowed || !opportunity.sdkTokenIntermediate ||
-        !opportunity.borrowAmount) {
-        if (opportunity) { logger.error(`${functionSig} Invalid opportunity object provided. Missing fields: ${[!opportunity.startPoolInfo && 'startPoolInfo', !opportunity.swapPoolInfo && 'swapPoolInfo', !opportunity.sdkTokenBorrowed && 'sdkTokenBorrowed', !opportunity.sdkTokenIntermediate && 'sdkTokenIntermediate', !opportunity.borrowAmount && 'borrowAmount'].filter(Boolean).join(', ')}`); }
-        else { logger.error(`${functionSig} Invalid or null opportunity object provided.`); }
+    if (!provider || !opportunity || !opportunity.startPoolInfo || !opportunity.swapPoolInfo || !opportunity.sdkTokenBorrowed || !opportunity.sdkTokenIntermediate || !opportunity.borrowAmount) {
+        if (opportunity) { logger.error(`${functionSig} Invalid opportunity object provided. Missing fields: ${[!opportunity.startPoolInfo && 'startPoolInfo', !opportunity.swapPoolInfo && 'swapPoolInfo', !opportunity.sdkTokenBorrowed && 'sdkTokenBorrowed', !opportunity.sdkTokenIntermediate && 'sdkTokenIntermediate', !opportunity.borrowAmount && 'borrowAmount'].filter(Boolean).join(', ')}`); } else { logger.error(`${functionSig} Invalid or null opportunity object provided.`); }
         handleError(new Error('Invalid opportunity object structure received from PoolScanner'), `${functionSig} Input Validation`); return null;
     }
     if (opportunity.borrowAmount <= 0n) { logger.warn(`${functionSig} Borrow amount is zero or negative. Skipping simulation.`); return null; }
 
     const { startPoolInfo, swapPoolInfo, sdkTokenBorrowed, sdkTokenIntermediate, borrowAmount } = opportunity;
-
     if (!sdkTokenBorrowed || !(sdkTokenBorrowed instanceof Token)) { logger.error(`${functionSig} Missing or invalid sdkTokenBorrowed in opportunity.`); return null; }
     if (!sdkTokenIntermediate || !(sdkTokenIntermediate instanceof Token)) { logger.error(`${functionSig} Missing or invalid sdkTokenIntermediate in opportunity.`); return null; }
 
