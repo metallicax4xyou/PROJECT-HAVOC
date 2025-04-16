@@ -186,15 +186,32 @@ function loadConfig() {
     }
 
     // 5. Add Provider/Signer Info & Flash Swap Address
-    const rpcEnvKey = `${networkName.toUpperCase()}_RPC_URL`;
-    combinedConfig.RPC_URL = process.env[rpcEnvKey];
+    // --- MODIFIED TO USE PLURAL URLS ---
+    const rpcUrlsEnvKey = `${networkName.toUpperCase()}_RPC_URLS`; // Look for plural key, e.g., ARBITRUM_RPC_URLS
+    const rpcUrlsString = process.env[rpcUrlsEnvKey];
+
+    if (!rpcUrlsString) {
+        // Throw error if the plural variable itself is missing
+        throw new Error(`[Config] CRITICAL: RPC URL environment variable (${rpcUrlsEnvKey}) not set.`);
+    }
+
+    // Take the first URL from the potentially comma-separated list for combinedConfig.RPC_URL
+    // Use optional chaining and nullish coalescing for safety
+    const firstRpcUrl = rpcUrlsString?.split(',')[0]?.trim() ?? '';
+    if (!firstRpcUrl) {
+        // Throw error if the variable exists but contains no valid URL after splitting/trimming
+        throw new Error(`[Config] CRITICAL: No valid RPC URL found in ${rpcUrlsEnvKey}.`);
+    }
+    combinedConfig.RPC_URL = firstRpcUrl; // Assign the first URL
+    // --- END MODIFICATION ---
+
     combinedConfig.PRIVATE_KEY = process.env.PRIVATE_KEY;
     const flashSwapEnvKey = `${networkName.toUpperCase()}_FLASH_SWAP_ADDRESS`;
     const rawFlashSwapAddress = process.env[flashSwapEnvKey];
 
-    if (!combinedConfig.RPC_URL) {
-        throw new Error(`[Config] CRITICAL: RPC URL environment variable (${rpcEnvKey}) not set.`);
-    }
+    // Note: The check for `combinedConfig.RPC_URL` existence is implicitly handled by the logic above.
+    // The original `if (!combinedConfig.RPC_URL)` check would now always pass if the variable exists and has content.
+
     if (!combinedConfig.PRIVATE_KEY || !combinedConfig.PRIVATE_KEY.startsWith('0x') || combinedConfig.PRIVATE_KEY.length !== 66) { // Basic validation
         throw new Error(`[Config] CRITICAL: PRIVATE_KEY environment variable not set, missing '0x' prefix, or not 66 chars long.`);
     }
