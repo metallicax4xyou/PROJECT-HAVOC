@@ -1,17 +1,17 @@
 // core/quoteSimulator.js
 const { ethers } = require('ethers');
-const { CurrencyAmount, TradeType, Percent, Token, Fraction } = require('@uniswap/sdk-core'); // Added Fraction
-const { Pool, Route, Trade, TickListDataProvider, Tick, tickToPrice } = require('@uniswap/v3-sdk'); // Import Tick, tickToPrice
+// Added Fraction, Percent to imports
+const { CurrencyAmount, TradeType, Percent, Token, Fraction } = require('@uniswap/sdk-core');
+const { Pool, Route, Trade, TickListDataProvider, Tick, tickToPrice } = require('@uniswap/v3-sdk');
 const JSBI = require('jsbi'); // Uniswap SDK uses JSBI
 const logger = require('../utils/logger');
 const { ArbitrageError, handleError } = require('../utils/errorHandler');
 const config = require('../config/index.js'); // For slippage, etc.
-const { ONE } = require('../internalConstants'); // Import ONE if needed for Fraction
+// REMOVED incorrect require: const { ONE } = require('../internalConstants');
 
 // --- ABIs ---
 // No longer need TickLens ABI if not fetching ticks
 // const IUniswapV3PoolABI = require('@uniswap/v3-core/artifacts/contracts/interfaces/IUniswapV3Pool.sol/IUniswapV3Pool.json').abi;
-// const QuoterV2ABI = require('@uniswap/v3-periphery/artifacts/contracts/lens/QuoterV2.sol/QuoterV2.json').abi;
 
 // Global QuoterV2 Contract instance (initialized later)
 let quoterV2Contract = null;
@@ -21,8 +21,6 @@ let quoterV2Contract = null;
  * @param {ethers.Provider} provider Ethers provider instance.
  */
 function initializeQuoter(provider) {
-    // ... (Function body remains the same) ...
-    // Keep Quoter initialization for potential future use or alternative quoting methods
     if (!config.QUOTER_ADDRESS || !ethers.isAddress(config.QUOTER_ADDRESS)) { logger.warn('[Simulator] QUOTER_ADDRESS is missing or invalid in config. QuoterV2 simulations may fail.'); return; }
     if (!provider) { logger.error('[Simulator] Cannot initialize QuoterV2 without a provider.'); return; }
     try {
@@ -35,9 +33,7 @@ function initializeQuoter(provider) {
     }
 }
 
-
-// Removed getTickDataProvider function as we are not fetching external ticks for now
-
+// Removed getTickDataProvider function
 
 /**
  * Simulates a single swap leg using the Pool object's internal state.
@@ -58,39 +54,27 @@ async function simulateSingleSwapExactIn(provider, poolData, tokenIn, tokenOut, 
     if (amountIn.quotient <= 0n) { logger.warn(`${functionSig} Input amount is zero or negative.`); return null; }
 
     try {
-        // --- Create Pool Object (No Tick Provider needed for internal sim) ---
         if (poolData.sqrtPriceX96 == null || poolData.liquidity == null || poolData.tick == null || poolData.feeBps == null) { logger.error(`${functionSig} Missing required pool state data.`); return null; }
         if (!poolData.sdkToken0 || !poolData.sdkToken1) { logger.error(`${functionSig} Missing sdkToken0 or sdkToken1 in poolData.`); return null; }
 
         logger.debug(`${functionSig} Creating Pool object for internal simulation...`);
         const pool = new Pool(
-            poolData.sdkToken0,
-            poolData.sdkToken1,
-            poolData.feeBps,
-            poolData.sqrtPriceX96.toString(),
-            poolData.liquidity.toString(),
-            Number(poolData.tick)
-            // No tickDataProvider passed - uses default NoTickDataProvider
+            poolData.sdkToken0, poolData.sdkToken1, poolData.feeBps,
+            poolData.sqrtPriceX96.toString(), poolData.liquidity.toString(), Number(poolData.tick)
         );
         logger.debug(`${functionSig} Pool object created. Fee: ${poolData.feeBps}bps, TickSpacing: ${pool.tickSpacing}`);
 
-        // --- Simulate using pool.getOutputAmount (will use internal logic) ---
         logger.debug(`${functionSig} Calling pool.getOutputAmount (internal simulation)...`);
-        // This call will now use the default provider which simulates based on current state only
         const [outputAmount, _poolAfter] = await pool.getOutputAmount(amountIn);
         logger.debug(`${functionSig} pool.getOutputAmount returned: ${outputAmount?.toSignificant(6)} ${outputAmount?.currency.symbol}`);
 
-        // --- Validate Output ---
         if (!outputAmount || !(outputAmount instanceof CurrencyAmount) || outputAmount.quotient <= 0n) {
              logger.warn(`${functionSig} Simulation yielded invalid or zero output amount.`);
              return null;
         }
-
-        return outputAmount; // Return just the CurrencyAmount
+        return outputAmount;
 
     } catch (error) {
-        // Catch errors from Pool creation or getOutputAmount
-        // Errors like 'Invariant failed: LENGTH' should NOT happen with internal simulation
         logger.error(`${functionSig} Error during internal swap simulation: ${error.message}`);
         handleError(error, `simulateSingleSwapExactIn-Internal (${tokenIn.symbol}->${tokenOut.symbol})`);
         return null;
@@ -106,9 +90,8 @@ async function simulateSingleSwapExactIn(provider, poolData, tokenIn, tokenOut, 
  * @returns {Promise<object | null>} Simulation result: { grossProfit, sdkTokenBorrowed, borrowAmountUsed, intermediateAmount, finalAmount } or null if simulation fails.
  */
 async function simulateArbitrage(provider, opportunity) {
-    // ... (Function body mostly the same, just calls the updated simulateSingleSwapExactIn) ...
     const functionSig = `[SimArb Group: ${opportunity?.groupName}]`;
-    logger.info(`${functionSig} Starting simulation (using INTERNAL pool simulation)...`); // Updated log
+    logger.info(`${functionSig} Starting simulation (using INTERNAL pool simulation)...`);
     if (!provider || !opportunity || !opportunity.startPoolInfo || !opportunity.swapPoolInfo || !opportunity.sdkTokenBorrowed || !opportunity.sdkTokenIntermediate || !opportunity.borrowAmount) { if (opportunity) { logger.error(`${functionSig} Invalid opportunity object provided. Missing fields: ${[!opportunity.startPoolInfo && 'startPoolInfo', !opportunity.swapPoolInfo && 'swapPoolInfo', !opportunity.sdkTokenBorrowed && 'sdkTokenBorrowed', !opportunity.sdkTokenIntermediate && 'sdkTokenIntermediate', !opportunity.borrowAmount && 'borrowAmount'].filter(Boolean).join(', ')}`); } else { logger.error(`${functionSig} Invalid or null opportunity object provided.`); } handleError(new Error('Invalid opportunity object structure received from PoolScanner'), `${functionSig} Input Validation`); return null; }
     if (opportunity.borrowAmount <= 0n) { logger.warn(`${functionSig} Borrow amount is zero or negative. Skipping simulation.`); return null; }
     const { startPoolInfo, swapPoolInfo, sdkTokenBorrowed, sdkTokenIntermediate, borrowAmount } = opportunity;
@@ -119,12 +102,12 @@ async function simulateArbitrage(provider, opportunity) {
         // Hop 1
         const amountInHop1 = CurrencyAmount.fromRawAmount(sdkTokenBorrowed, borrowAmount.toString());
         logger.info(`${functionSig} Simulating Hop 1: ${ethers.formatUnits(borrowAmount, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol} -> ${sdkTokenIntermediate.symbol} on pool ${swapPoolInfo.address} (Fee: ${swapPoolInfo.feeBps})`);
-        const intermediateAmount = await simulateSingleSwapExactIn(provider, swapPoolInfo, sdkTokenBorrowed, sdkTokenIntermediate, amountInHop1); // Uses internal simulation
+        const intermediateAmount = await simulateSingleSwapExactIn(provider, swapPoolInfo, sdkTokenBorrowed, sdkTokenIntermediate, amountInHop1);
         if (!intermediateAmount) { logger.warn(`${functionSig} Hop 1 simulation failed or yielded zero/invalid output.`); return null; }
         logger.info(`${functionSig} Hop 1 Output: ${intermediateAmount.toSignificant(6)} ${sdkTokenIntermediate.symbol}`);
         // Hop 2
         logger.info(`${functionSig} Simulating Hop 2: ${intermediateAmount.toSignificant(6)} ${sdkTokenIntermediate.symbol} -> ${sdkTokenBorrowed.symbol} on pool ${startPoolInfo.address} (Fee: ${startPoolInfo.feeBps})`);
-        const finalAmount = await simulateSingleSwapExactIn(provider, startPoolInfo, sdkTokenIntermediate, sdkTokenBorrowed, intermediateAmount); // Uses internal simulation
+        const finalAmount = await simulateSingleSwapExactIn(provider, startPoolInfo, sdkTokenIntermediate, sdkTokenBorrowed, intermediateAmount);
         if (!finalAmount) { logger.warn(`${functionSig} Hop 2 simulation failed or yielded zero/invalid output.`); return null; }
         logger.info(`${functionSig} Hop 2 Output (Final Amount): ${finalAmount.toSignificant(6)} ${sdkTokenBorrowed.symbol}`);
         // Profit Calc
@@ -151,17 +134,21 @@ async function simulateArbitrage(provider, opportunity) {
  * @returns {bigint} The minimum output amount in the token's smallest unit (wei/atomic).
  */
 function getMinimumAmountOut(finalAmount, slippageToleranceBps) {
-    // ... (Function body remains the same) ...
     if (!finalAmount || !(finalAmount instanceof CurrencyAmount)) { logger.warn('[Simulator] Cannot get minimum amount out from invalid finalAmount object.'); return 0n; }
     if (typeof slippageToleranceBps !== 'number' || slippageToleranceBps < 0) { logger.warn(`[Simulator] Invalid slippage tolerance BPS: ${slippageToleranceBps}. Defaulting to 0.`); slippageToleranceBps = 0; }
+
     const slippageTolerance = new Percent(slippageToleranceBps, 10000);
     const ONE_HUNDRED_PERCENT = new Percent(10000, 10000); // Create 100% Percent
     const denominator = ONE_HUNDRED_PERCENT.add(slippageTolerance); // 1 + slippage
-    const slippageAdjustedAmountOut = new Fraction(finalAmount.quotient) // Use Fraction directly
-        .divide(denominator.asFraction) // Divide by (1 + slippage) fraction
+
+    // Ensure quotient is JSBI before passing to Fraction constructor
+    const finalAmountQuotientJSBI = JSBI.BigInt(finalAmount.quotient.toString());
+
+    const slippageAdjustedAmountOut = new Fraction(finalAmountQuotientJSBI) // Use JSBI
+        .divide(denominator.asFraction)
         .quotient;
-    // const slippageAdjustedAmountOut = new Fraction(ONE).add(slippageTolerance).invert().multiply(finalAmount.quotient).quotient; // Old JSBI way
-    const minAmountBigInt = BigInt(slippageAdjustedAmountOut.toString());
+
+    const minAmountBigInt = BigInt(slippageAdjustedAmountOut.toString()); // Convert final result back to BigInt
     logger.debug(`[Simulator] Min Amount Out: Slippage=${slippageToleranceBps}bps, Amount=${ethers.formatUnits(minAmountBigInt, finalAmount.currency.decimals)} ${finalAmount.currency.symbol}`);
     return minAmountBigInt;
 }
