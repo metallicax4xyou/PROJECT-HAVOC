@@ -6,14 +6,17 @@ const logger = require('./utils/logger');
 const { ethers } = require('ethers');
 const config = require('./config');
 const { handleError, ArbitrageError } = require('./utils/errorHandler');
-const FlashSwapManager = require('./core/flashSwapManager'); // Assuming this IS a class
-const ArbitrageEngine = require('./core/arbitrageEngine');  // Assuming this IS a class
-// --- Correctly import the PoolScanner class via destructuring ---
-const { PoolScanner } = require('./core/poolScanner'); // Use { } to get the class from the exported object
-// --- ---
-const quoteSimulator = require('./core/quoteSimulator');   // Correct based on previous fix
-const gasEstimator = require('./utils/gasEstimator');     // Correct based on previous fix
 
+// --- Core Components ---
+const FlashSwapManager = require('./core/flashSwapManager');
+const ArbitrageEngine = require('./core/arbitrageEngine');
+const { PoolScanner } = require('./core/poolScanner'); // Destructure Class
+const quoteSimulator = require('./core/quoteSimulator');   // Import object
+const gasEstimator = require('./utils/gasEstimator');     // Import object
+// --- Import Profit Calc and Tx Executor ---
+const profitCalculator = require('./core/profitCalculator'); // Import object { checkProfitability: ... }
+const txExecutor = require('./core/txExecutor');             // Import object { executeTransaction: ... }
+// --- ---
 
 // --- Global Error Handling ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -54,29 +57,28 @@ async function main() {
     logger.info("==============================================");
 
     let flashSwapManager;
-    let poolScanner; // Declare here
+    let poolScanner;
 
     try {
         const provider = require('./utils/provider').getProvider();
 
-        flashSwapManager = new FlashSwapManager();
+        flashSwapManager = new FlashSwapManager(); // Instantiate
+        poolScanner = new PoolScanner(config, provider); // Instantiate
 
-        // --- Use 'new' because we destructured the actual PoolScanner class ---
-        poolScanner = new PoolScanner(config, provider); // This line should now work
-        // --- ---
-
+        // --- Instantiate ArbitrageEngine with correct arguments ---
         const arbitrageEngine = new ArbitrageEngine(
-            config,
-            flashSwapManager,
-            poolScanner, // Pass the instantiated poolScanner object
-            quoteSimulator,
-            gasEstimator,
-            logger
+            flashSwapManager,                 // 1st: FlashSwapManager instance
+            poolScanner,                      // 2nd: PoolScanner instance
+            profitCalculator.checkProfitability, // 3rd: The checkProfitability function
+            provider,                         // 4th: The provider instance
+            txExecutor.executeTransaction     // 5th: The executeTransaction function
         );
+        // --- ---
 
         logger.info("[MainLoop] Starting arbitrage cycle...");
         setInterval(async () => {
             try {
+                // Engine now has all dependencies correctly injected
                 await arbitrageEngine.findAndExecuteArbitrage();
             } catch (cycleError) {
                 handleError(cycleError, 'ArbitrageCycle');
