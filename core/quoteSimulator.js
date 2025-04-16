@@ -1,250 +1,102 @@
 // core/quoteSimulator.js
-const { ethers } = require('ethers');
-const { CurrencyAmount, TradeType, Percent, Token, Fraction } = require('@uniswap/sdk-core'); // Added Fraction, Percent
-const { Pool, Route, Trade, TickListDataProvider, Tick, tickToPrice } = require('@uniswap/v3-sdk'); // Import Tick, tickToPrice
-const JSBI = require('jsbi'); // Uniswap SDK uses JSBI
-const logger = require('../utils/logger');
-const { ArbitrageError, handleError } = require('../utils/errorHandler');
-const config = require('../config/index.js'); // For slippage, etc.
+// ... other imports ...
+const { TickMath, tickToWord } = require('@uniswap/v3-sdk'); // Import necessary helpers
+const { TickLens } = require('../utils/tickLens'); // Assuming TickLens helper/ABI is here
+const TickLensABI = require('../abis/TickLens.json'); // Make sure ABI path is correct
 
-// --- ABIs ---
-// Re-add IUniswapV3PoolABI if needed, keep QuoterV2ABI
-// const IUniswapV3PoolABI = require('@uniswap/v3-core/artifacts/contracts/interfaces/IUniswapV3Pool.sol/IUniswapV3Pool.json').abi;
-const QuoterV2ABI = require('@uniswap/v3-periphery/artifacts/contracts/lens/QuoterV2.sol/QuoterV2.json').abi;
+// ... existing code ...
 
-
-// --- TickLens Contract Info ---
-const TICK_LENS_ADDRESS_CHECKSUM = ethers.getAddress('0xbfd8137f7d1516d3ea5ca83523914859ec47f573');
-const TICK_LENS_ABI = [ 'function getPopulatedTicksInWord(address pool, int16 tickBitmapIndex) external view returns (tuple(int24 tick, int128 liquidityNet, int128 liquidityGross)[] populatedTicks)' ];
-
-// Global QuoterV2 Contract instance (initialized later)
-let quoterV2Contract = null;
-
-/**
- * Initializes the QuoterV2 contract instance.
- * @param {ethers.Provider} provider Ethers provider instance.
- */
-function initializeQuoter(provider) {
-    // ... (Function body remains the same) ...
-    if (!config.QUOTER_ADDRESS || !ethers.isAddress(config.QUOTER_ADDRESS)) { logger.warn('[Simulator] QUOTER_ADDRESS is missing or invalid in config. QuoterV2 simulations may fail.'); return; }
-    if (!provider) { logger.error('[Simulator] Cannot initialize QuoterV2 without a provider.'); return; }
-    try {
-        quoterV2Contract = new ethers.Contract(config.QUOTER_ADDRESS, QuoterV2ABI, provider);
-        logger.info(`[Simulator] QuoterV2 Contract Initialized at ${config.QUOTER_ADDRESS}`);
-    } catch (error) {
-        logger.error(`[Simulator] Failed to initialize QuoterV2 contract: ${error.message}`); quoterV2Contract = null;
-    }
-}
-
-
-/**
- * Fetches populated ticks, filters invalid ones, converts to JSBI, and sorts them.
- * @param {ethers.Provider} provider Ethers provider instance.
- * @param {string} poolAddress The checksummed address of the pool.
- * @param {number} tickSpacing The tick spacing of the pool.
- * @returns {Promise<TickListDataProvider | null>} A TickListDataProvider instance or null if fetching fails.
- */
-async function getTickDataProvider(provider, poolAddress, tickSpacing) {
-    const functionSig = `[TickProvider Pool: ${poolAddress}]`;
-    if (!provider || !ethers.isAddress(poolAddress) || typeof tickSpacing !== 'number' || tickSpacing <= 0) { logger.error(`${functionSig} Invalid arguments for getTickDataProvider (tickSpacing: ${tickSpacing}).`); return null; }
-    logger.debug(`${functionSig} Using tickSpacing: ${tickSpacing}`);
-
-    const tickLensContract = new ethers.Contract(TICK_LENS_ADDRESS_CHECKSUM, TICK_LENS_ABI, provider);
-    const tickBitmapIndex = 0;
-    let populatedTicksRaw = [];
-    let formattedTicks = [];
+async function getTickDataProvider(poolAddress, poolState, provider) {
+    // Use the actual TickLens contract address on Arbitrum
+    const tickLensAddress = '0xbfd8137f7d1516D3ea5cA83523914859ec47F573';
+    const tickLens = new ethers.Contract(tickLensAddress, TickLensABI, provider);
 
     try {
-        // --- Step 1: Fetch from TickLens ---
-        logger.debug(`${functionSig} Fetching ticks (Index ${tickBitmapIndex})...`);
-        populatedTicksRaw = await tickLensContract.getPopulatedTicksInWord(poolAddress, tickBitmapIndex);
-        logger.debug(`${functionSig} Fetched ${populatedTicksRaw?.length ?? 0} raw populated ticks.`);
+        const tickCurrent = poolState.tickCurrent;
+        const tickSpacing = poolState.tickSpacing; // Get tick spacing from pool state
 
-        if (!populatedTicksRaw || populatedTicksRaw.length === 0) {
-             logger.debug(`${functionSig} No ticks received from TickLens. Returning empty provider.`);
-             return new TickListDataProvider([], tickSpacing);
+        // Calculate the word index for the current tick and adjacent words
+        // tickToWord is a reliable way to get the word index (pos)
+        const currentWordPos = tickToWord(tickCurrent, tickSpacing); // Uniswap SDK helper function
+        const lowerWordPos = currentWordPos - 1;
+        const upperWordPos = currentWordPos + 1;
+
+        console.log(`[TickData-${poolAddress.substring(0,10)}] Fetching ticks for words: ${lowerWordPos}, ${currentWordPos}, ${upperWordPos} (Current Tick: ${tickCurrent}, Spacing: ${tickSpacing})`);
+
+        // Fetch ticks for all three words
+        const populatedTicksPromises = [
+            tickLens.getPopulatedTicksInWordRange(poolAddress, lowerWordPos, lowerWordPos),
+            tickLens.getPopulatedTicksInWordRange(poolAddress, currentWordPos, currentWordPos),
+            tickLens.getPopulatedTicksInWordRange(poolAddress, upperWordPos, upperWordPos),
+        ];
+
+        // Use Promise.allSettled to handle potential errors in one fetch without failing all
+        const populatedTicksResults = await Promise.allSettled(populatedTicksPromises);
+
+        let allFetchedTicks = [];
+        populatedTicksResults.forEach((result, index) => {
+            if (result.status === 'fulfilled') {
+                console.log(`[TickData-${poolAddress.substring(0,10)}] Fetched ${result.value.length} ticks from word ${index === 0 ? lowerWordPos : index === 1 ? currentWordPos : upperWordPos}`);
+                allFetchedTicks = allFetchedTicks.concat(result.value);
+            } else {
+                // Log error but continue, maybe partial data is enough sometimes? Or throw?
+                console.warn(`[TickData-${poolAddress.substring(0,10)}] Failed to fetch ticks for word ${index === 0 ? lowerWordPos : index === 1 ? currentWordPos : upperWordPos}: ${result.reason}`);
+            }
+        });
+
+        if (allFetchedTicks.length === 0) {
+            console.error(`[TickData-${poolAddress.substring(0,10)}] No ticks fetched at all. Cannot create provider.`);
+            return null; // Or handle appropriately
         }
 
-        // --- Step 2: Filter, Format, and Convert to JSBI ---
-        let invalidTickCount = 0;
-        formattedTicks = populatedTicksRaw.map((tickInfo) => {
-            // ... (validation logic remains the same) ...
-             if (tickInfo?.tick == null || tickInfo.liquidityNet == null || tickInfo.liquidityGross == null) { logger.warn(`${functionSig} Corrupt raw tick data found. Skipping.`); invalidTickCount++; return null; }
-             const tickNumber = Number(tickInfo.tick);
-             if (typeof tickInfo.liquidityNet !== 'bigint' || typeof tickInfo.liquidityGross !== 'bigint') { logger.warn(`${functionSig} Invalid liquidity data type for tick ${tickNumber}! NetType=${typeof tickInfo.liquidityNet}, GrossType=${typeof tickInfo.liquidityGross}. Filtering.`); invalidTickCount++; return null; }
-             if (tickNumber % tickSpacing !== 0) { logger.warn(`${functionSig} Invalid tick! Tick ${tickNumber} is not divisible by spacing ${tickSpacing}. Filtering.`); invalidTickCount++; return null; }
-             if (tickNumber < Tick.MIN_TICK || tickNumber > Tick.MAX_TICK) { logger.warn(`${functionSig} Invalid tick! Tick ${tickNumber} out of range [${Tick.MIN_TICK}, ${Tick.MAX_TICK}]. Filtering.`); invalidTickCount++; return null; }
-             try {
-                 return { tick: tickNumber, liquidityNet: JSBI.BigInt(tickInfo.liquidityNet.toString()), liquidityGross: JSBI.BigInt(tickInfo.liquidityGross.toString()) };
-             } catch (jsbiError) { logger.warn(`${functionSig} Failed to convert liquidity to JSBI for tick ${tickNumber}: ${jsbiError.message}. Filtering.`); invalidTickCount++; return null; }
-        }).filter(tick => tick !== null); // Filter out nulls
+        // Format ticks (ensure liquidity is JSBI) and SORT them
+        const formattedTicks = allFetchedTicks.map(tick => ({
+            tick: Number(tick.tick), // Ensure tick is number
+            liquidityNet: JSBI.BigInt(tick.liquidityNet.toString()), // Convert BigNumber to JSBI
+            liquidityGross: JSBI.BigInt(tick.liquidityGross.toString()), // Convert BigNumber to JSBI
+        })).sort((a, b) => a.tick - b.tick); // Sort by tick index ASC
 
-        if (invalidTickCount > 0) { logger.warn(`${functionSig} Filtered out ${invalidTickCount} invalid raw/formatted ticks.`); }
+        console.log(`[TickData-${poolAddress.substring(0,10)}] Total unique sorted ticks processed: ${formattedTicks.length}. MinTick: ${formattedTicks[0]?.tick}, MaxTick: ${formattedTicks[formattedTicks.length - 1]?.tick}`);
 
-        if (formattedTicks.length === 0) {
-             logger.warn(`${functionSig} No valid ticks remaining after filtering. Cannot create provider.`);
-             return null;
-        }
-
-        // --- Step 3: Sort Ticks by Index ---
-        logger.debug(`${functionSig} Sorting ${formattedTicks.length} valid ticks by index...`);
-        formattedTicks.sort((a, b) => a.tick - b.tick);
-        // Log sorted ticks for verification
-        // logger.debug(`${functionSig} Sorted Ticks: ${JSON.stringify(formattedTicks, (k, v) => typeof v === 'object' && v != null && v.constructor === JSBI ? v.toString() : v)}`);
-
-
-        // --- Step 4: Attempt to Create TickListDataProvider ---
-        logger.debug(`${functionSig} Attempting to create TickListDataProvider with ${formattedTicks.length} sorted valid ticks and spacing ${tickSpacing}.`);
-        try {
-            const tickProvider = new TickListDataProvider(formattedTicks, tickSpacing);
-            logger.debug(`${functionSig} TickListDataProvider created successfully.`);
-            return tickProvider;
-        } catch (constructorError) {
-            logger.error(`${functionSig} Error constructing TickListDataProvider: ${constructorError.message}`);
-            logger.error(`${functionSig} Data that caused constructor error (sorted): ${JSON.stringify(formattedTicks, (k, v) => typeof v === 'object' && v != null && v.constructor === JSBI ? v.toString() : v)}`);
-            handleError(constructorError, `TickListDataProvider Constructor (${poolAddress})`);
-            return null;
-        }
-
-    } catch (fetchError) {
-        logger.warn(`${functionSig} Error during TickLens fetch: ${fetchError.message}.`);
-        handleError(fetchError, `TickLens Fetch (${poolAddress})`);
-        return null;
-    }
-}
-
-
-/**
- * Simulates a single swap leg using the Pool object with a TickListDataProvider.
- * Returns the estimated output amount.
- * @param {ethers.Provider} provider Ethers provider instance.
- * @param {object} poolData Contains { address, feeBps, tick, liquidity, sqrtPriceX96, sdkToken0, sdkToken1 }
- * @param {Token} tokenIn The input token (SDK object).
- * @param {Token} tokenOut The output token (SDK object).
- * @param {CurrencyAmount<Token>} amountIn The amount of tokenIn to swap.
- * @returns {Promise<CurrencyAmount<Token> | null>} The simulated output amount or null on failure.
- */
-async function simulateSingleSwapExactIn(provider, poolData, tokenIn, tokenOut, amountIn) {
-    const functionSig = `[SimSwap Pool: ${poolData.address}]`; // Indicate simulation with external ticks
-    logger.debug(`${functionSig} Simulating ${ethers.formatUnits(amountIn.quotient.toString(), tokenIn.decimals)} ${tokenIn.symbol} -> ${tokenOut.symbol}`);
-
-    if (!provider || !poolData || !tokenIn || !tokenOut || !amountIn || !(amountIn instanceof CurrencyAmount)) { logger.error(`${functionSig} Invalid arguments for simulateSingleSwapExactIn.`); return null; }
-    if (amountIn.quotient <= 0n) { logger.warn(`${functionSig} Input amount is zero or negative.`); return null; }
-
-    try {
-        // --- Basic Pool Data Validation ---
-        if (poolData.sqrtPriceX96 == null || poolData.liquidity == null || poolData.tick == null || poolData.feeBps == null) { logger.error(`${functionSig} Missing required pool state data.`); return null; }
-        if (!poolData.sdkToken0 || !poolData.sdkToken1) { logger.error(`${functionSig} Missing sdkToken0 or sdkToken1 in poolData.`); return null; }
-
-        // --- Step 1: Determine Tick Spacing ---
-        let tempPoolForSpacing;
-        try {
-            tempPoolForSpacing = new Pool( poolData.sdkToken0, poolData.sdkToken1, poolData.feeBps, poolData.sqrtPriceX96.toString(), poolData.liquidity.toString(), Number(poolData.tick) );
-        } catch (tempPoolError) { logger.error(`${functionSig} Error creating temporary Pool object for spacing: ${tempPoolError.message}`); return null; }
-        const tickSpacing = tempPoolForSpacing.tickSpacing;
-        logger.debug(`${functionSig} Fee: ${poolData.feeBps}bps => Derived Tick Spacing: ${tickSpacing}`);
-
-        // --- Step 2: Fetch Tick Data ---
-        const tickDataProvider = await getTickDataProvider(provider, poolData.address, tickSpacing);
-        if (!tickDataProvider) { logger.warn(`${functionSig} Failed to get valid tick data provider. Cannot simulate accurately.`); return null; }
-
-        // --- Step 3: Create the *actual* Pool object *with* the Tick Data Provider ---
-        logger.debug(`${functionSig} Creating final Pool object with fetched tick data provider...`);
-        const pool = new Pool(
-            poolData.sdkToken0, poolData.sdkToken1, poolData.feeBps,
-            poolData.sqrtPriceX96.toString(), poolData.liquidity.toString(), Number(poolData.tick),
-            tickDataProvider // Pass the fetched provider here!
-        );
-        logger.debug(`${functionSig} Final Pool object created.`);
-
-        // --- Step 4: Simulate using pool.getOutputAmount ---
-        logger.debug(`${functionSig} Calling pool.getOutputAmount...`);
-        const [outputAmount, _poolAfter] = await pool.getOutputAmount(amountIn);
-        logger.debug(`${functionSig} pool.getOutputAmount returned: ${outputAmount?.toSignificant(6)} ${outputAmount?.currency.symbol}`);
-
-        // --- Step 5: Validate Output ---
-        if (!outputAmount || !(outputAmount instanceof CurrencyAmount) || outputAmount.quotient <= 0n) {
-             logger.warn(`${functionSig} Simulation yielded invalid or zero output amount.`); return null;
-        }
-        return outputAmount;
+        // Return the TickListDataProvider with the combined and sorted ticks
+        return new TickListDataProvider(formattedTicks, tickSpacing);
 
     } catch (error) {
-        logger.error(`${functionSig} Error during single swap simulation: ${error.message}`);
-        handleError(error, `simulateSingleSwapExactIn (${tokenIn.symbol}->${tokenOut.symbol})`);
-        return null;
+        console.error(`[TickData-${poolAddress.substring(0,10)}] Error fetching or processing tick data:`, error);
+        return null; // Return null if any error occurs
     }
 }
 
+// ... rest of the file (simulateSingleSwapExactIn, simulateArbitrage, etc.) ...
 
-/**
- * Simulates the full arbitrage path using direct pool simulation with fetched ticks.
- * Calculates gross profit before fees/gas.
- * @param {ethers.Provider} provider Ethers provider instance.
- * @param {object} opportunity The opportunity object from PoolScanner.
- * @returns {Promise<object | null>} Simulation result or null if simulation fails.
- */
-async function simulateArbitrage(provider, opportunity) {
-    // ... (Function body remains the same - calls the updated simulateSingleSwapExactIn) ...
-    const functionSig = `[SimArb Group: ${opportunity?.groupName}]`;
-    logger.info(`${functionSig} Starting simulation (using direct pool simulation with fetched ticks)...`); // Updated log
-    if (!provider || !opportunity || !opportunity.startPoolInfo || !opportunity.swapPoolInfo || !opportunity.sdkTokenBorrowed || !opportunity.sdkTokenIntermediate || !opportunity.borrowAmount) { if (opportunity) { logger.error(`${functionSig} Invalid opportunity object provided. Missing fields: ${[!opportunity.startPoolInfo && 'startPoolInfo', !opportunity.swapPoolInfo && 'swapPoolInfo', !opportunity.sdkTokenBorrowed && 'sdkTokenBorrowed', !opportunity.sdkTokenIntermediate && 'sdkTokenIntermediate', !opportunity.borrowAmount && 'borrowAmount'].filter(Boolean).join(', ')}`); } else { logger.error(`${functionSig} Invalid or null opportunity object provided.`); } handleError(new Error('Invalid opportunity object structure received from PoolScanner'), `${functionSig} Input Validation`); return null; }
-    if (opportunity.borrowAmount <= 0n) { logger.warn(`${functionSig} Borrow amount is zero or negative. Skipping simulation.`); return null; }
-    const { startPoolInfo, swapPoolInfo, sdkTokenBorrowed, sdkTokenIntermediate, borrowAmount } = opportunity;
-    if (!sdkTokenBorrowed || !(sdkTokenBorrowed instanceof Token)) { logger.error(`${functionSig} Missing or invalid sdkTokenBorrowed in opportunity.`); return null; }
-    if (!sdkTokenIntermediate || !(sdkTokenIntermediate instanceof Token)) { logger.error(`${functionSig} Missing or invalid sdkTokenIntermediate in opportunity.`); return null; }
-    logger.info(`${functionSig} Path: ${sdkTokenBorrowed.symbol} -> ${sdkTokenIntermediate.symbol} (on ${swapPoolInfo.address}) -> ${sdkTokenBorrowed.symbol} (on ${startPoolInfo.address})`);
-    try {
-        // Hop 1
-        const amountInHop1 = CurrencyAmount.fromRawAmount(sdkTokenBorrowed, borrowAmount.toString());
-        logger.info(`${functionSig} Simulating Hop 1: ${ethers.formatUnits(borrowAmount, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol} -> ${sdkTokenIntermediate.symbol} on pool ${swapPoolInfo.address} (Fee: ${swapPoolInfo.feeBps})`);
-        const intermediateAmount = await simulateSingleSwapExactIn(provider, swapPoolInfo, sdkTokenBorrowed, sdkTokenIntermediate, amountInHop1);
-        if (!intermediateAmount) { logger.warn(`${functionSig} Hop 1 simulation failed or yielded zero/invalid output.`); return null; }
-        logger.info(`${functionSig} Hop 1 Output: ${intermediateAmount.toSignificant(6)} ${sdkTokenIntermediate.symbol}`);
-        // Hop 2
-        logger.info(`${functionSig} Simulating Hop 2: ${intermediateAmount.toSignificant(6)} ${sdkTokenIntermediate.symbol} -> ${sdkTokenBorrowed.symbol} on pool ${startPoolInfo.address} (Fee: ${startPoolInfo.feeBps})`);
-        const finalAmount = await simulateSingleSwapExactIn(provider, startPoolInfo, sdkTokenIntermediate, sdkTokenBorrowed, intermediateAmount);
-        if (!finalAmount) { logger.warn(`${functionSig} Hop 2 simulation failed or yielded zero/invalid output.`); return null; }
-        logger.info(`${functionSig} Hop 2 Output (Final Amount): ${finalAmount.toSignificant(6)} ${sdkTokenBorrowed.symbol}`);
-        // Profit Calc
-        const grossProfitRaw = JSBI.subtract(finalAmount.quotient, JSBI.BigInt(borrowAmount.toString()));
-        const grossProfitBigInt = BigInt(grossProfitRaw.toString());
-        logger.info(`${functionSig} Initial Borrow: ${ethers.formatUnits(borrowAmount, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}`);
-        logger.info(`${functionSig} Final Amount Recv: ${ethers.formatUnits(finalAmount.quotient.toString(), sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}`);
-        logger.info(`${functionSig} Gross Profit: ${ethers.formatUnits(grossProfitBigInt, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}`);
-        // Result
-        const simulationResult = { grossProfit: grossProfitBigInt, sdkTokenBorrowed: sdkTokenBorrowed, borrowAmountUsed: borrowAmount, intermediateAmount: intermediateAmount, finalAmount: finalAmount, opportunity: opportunity, };
-        logger.info(`${functionSig} Simulation successful.`);
-        return simulationResult;
-    } catch (error) {
-        logger.error(`${functionSig} Unexpected error during arbitrage simulation: ${error.message}`);
-        handleError(error, `${functionSig} Main Try/Catch`); return null;
+// Ensure simulateSingleSwapExactIn correctly uses the provider from getTickDataProvider
+async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn, provider) {
+    // ... (check inputs)
+
+    // ---> Get the TickListDataProvider
+    const tickDataProvider = await getTickDataProvider(poolState.address, poolState, provider);
+    if (!tickDataProvider) {
+        console.error(`[SimSwap Pool: ${poolState.address}] Failed to get tick data provider.`);
+        return { amountOut: JSBI.BigInt(0), sqrtPriceX96After: poolState.sqrtPriceX96, tickAfter: poolState.tickCurrent }; // Return zero/error state
     }
+
+    // Create the pool instance using the fetched state AND the tick data provider
+    const pool = new Pool(
+        tokenIn,
+        tokenOut,
+        poolState.fee,
+        poolState.sqrtPriceX96,
+        poolState.liquidity,
+        poolState.tickCurrent,
+        tickDataProvider // <-- Pass the provider here!
+    );
+
+    // ... (rest of the simulation logic using pool.simulateSwap)
+    // ... (error handling for Invariant failed: LENGTH)
 }
 
 
-/**
- * Calculates the minimum amount out for a trade considering slippage.
- * @param {CurrencyAmount<Token>} finalAmount The final simulated output amount from simulateArbitrage.
- * @param {number} slippageToleranceBps Slippage tolerance in basis points (e.g., 10 for 0.1%).
- * @returns {bigint} The minimum output amount in the token's smallest unit (wei/atomic).
- */
-function getMinimumAmountOut(finalAmount, slippageToleranceBps) {
-    // ... (Function body remains the same) ...
-    if (!finalAmount || !(finalAmount instanceof CurrencyAmount)) { logger.warn('[Simulator] Cannot get minimum amount out from invalid finalAmount object.'); return 0n; }
-    if (typeof slippageToleranceBps !== 'number' || slippageToleranceBps < 0) { logger.warn(`[Simulator] Invalid slippage tolerance BPS: ${slippageToleranceBps}. Defaulting to 0.`); slippageToleranceBps = 0; }
-    const slippageTolerance = new Percent(slippageToleranceBps, 10000);
-    const ONE_HUNDRED_PERCENT = new Percent(10000, 10000);
-    const denominator = ONE_HUNDRED_PERCENT.add(slippageTolerance);
-    const finalAmountQuotientJSBI = JSBI.BigInt(finalAmount.quotient.toString());
-    const slippageAdjustedAmountOut = new Fraction(finalAmountQuotientJSBI).divide(denominator.asFraction).quotient;
-    const minAmountBigInt = BigInt(slippageAdjustedAmountOut.toString());
-    logger.debug(`[Simulator] Min Amount Out: Slippage=${slippageToleranceBps}bps, Amount=${ethers.formatUnits(minAmountBigInt, finalAmount.currency.decimals)} ${finalAmount.currency.symbol}`);
-    return minAmountBigInt;
-}
+// Make sure simulateArbitrage calls simulateSingleSwapExactIn correctly
+// and passes the main Ethers provider down.
 
-
-module.exports = {
-    initializeQuoter,
-    simulateArbitrage,
-    getMinimumAmountOut,
-};
+module.exports = { simulateArbitrage, getTickDataProvider, simulateSingleSwapExactIn }; // Export if needed elsewhere
