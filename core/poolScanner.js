@@ -40,7 +40,7 @@ class PoolScanner {
      * Fetches the current on-chain state (slot0, liquidity) for a list of pool configurations.
      * @param {Array<object>} poolInfos Array of pool config objects [{ address, feeBps, groupName, ... }] from the main config.
      * @returns {Promise<object>} A map where keys are pool addresses and values are objects containing the live state
-     *                            (e.g., { sdkPool, tick, liquidity, address, feeBps, groupName }). Returns empty object on error.
+     *                            (e.g., { sdkPool, tick, liquidity, address, feeBps, groupName, sdkToken0, sdkToken1 }). Returns empty object on error.
      */
     async fetchPoolStates(poolInfos) {
         if (!poolInfos || poolInfos.length === 0) {
@@ -48,7 +48,7 @@ class PoolScanner {
             return {};
         }
 
-        logger.log(`[Scanner] Fetching live states for ${poolInfos.length} configured pools...`);
+        logger.info(`[Scanner] Fetching live states for ${poolInfos.length} configured pools...`);
         const statePromises = [];
         const validPoolConfigs = []; // Keep track of configs we attempt to fetch
 
@@ -82,7 +82,7 @@ class PoolScanner {
             return {};
         }
 
-        const livePoolStates = {}; // { poolAddress: { sdkPool, tick, liquidity, ...poolInfo } }
+        const livePoolStates = {}; // { poolAddress: { sdkPool, tick, liquidity, ...poolInfo, sdkToken0, sdkToken1 } }
         try {
             // Execute all fetches concurrently
             const results = await Promise.all(statePromises);
@@ -107,8 +107,6 @@ class PoolScanner {
                     logger.warn(`[Scanner] Pool ${address} (Group: ${poolInfo.groupName}, Fee: ${poolInfo.feeBps}bps) Invalid State Data: SqrtPrice=${slot0?.sqrtPriceX96}, Tick=${slot0?.tick}, Liquidity=${liquidity}`);
                     continue; // Skip if data looks corrupt
                 }
-                 // Don't necessarily skip zero liquidity pools here, let simulator handle it if needed
-                 // if (liquidity === 0n) { logger.debug(`[Scanner] Pool ${address}... has zero liquidity.`); }
 
                 // Find the corresponding group config to get Token objects
                 const groupConfig = this.config.POOL_GROUPS.find(g => g.name === poolInfo.groupName);
@@ -122,6 +120,7 @@ class PoolScanner {
                     const sqrtPriceX96 = slot0.sqrtPriceX96;
 
                     // Create Uniswap SDK Pool object using SDK tokens from config
+                    // Note: We still create this, though simulator might recreate it with live data
                     const sdkPool = new Pool(
                         groupConfig.sdkToken0, // Use pre-created SDK Token object
                         groupConfig.sdkToken1, // Use pre-created SDK Token object
@@ -131,12 +130,17 @@ class PoolScanner {
                         tickCurrent
                     );
 
+                    // --- Store the live state including the SDK tokens ---
                     livePoolStates[address] = {
                         ...poolInfo, // Keep original config info (address, feeBps, groupName)
-                        sdkPool: sdkPool,
+                        sdkPool: sdkPool, // Store the created SDK Pool object
                         tick: tickCurrent,
                         liquidity: liquidity, // Store as BigInt
-                        sqrtPriceX96: sqrtPriceX96 // Store for potential use
+                        sqrtPriceX96: sqrtPriceX96, // Store for potential use
+                        // --- ADDED SDK TOKEN OBJECTS ---
+                        sdkToken0: groupConfig.sdkToken0,
+                        sdkToken1: groupConfig.sdkToken1,
+                        // --- END ADDED ---
                     };
                     // logger.debug(`[Scanner] Pool ${address}... State OK: Tick=${tickCurrent}, Liq=${liquidity.toString()}`);
 
@@ -158,10 +162,11 @@ class PoolScanner {
 
      /**
       * Finds potential arbitrage opportunities by comparing ticks and checking liquidity within groups.
-      * @param {object} livePoolStates Map of poolAddress -> { sdkPool, tick, liquidity, ...poolInfo }
+      * @param {object} livePoolStates Map of poolAddress -> { sdkPool, tick, liquidity, ...poolInfo, sdkToken0, sdkToken1 }
       * @returns {Array<object>} List of potential opportunity objects, ready for simulation.
       */
      findOpportunities(livePoolStates) {
+         // ... (Function body remains the same as previous version) ...
          const opportunities = [];
          if (!livePoolStates || Object.keys(livePoolStates).length < 2) {
               logger.debug('[Scanner] Not enough live pool states to find opportunities.');
@@ -188,52 +193,49 @@ class PoolScanner {
              const groupConfig = this.config.POOL_GROUPS.find(g => g.name === groupName);
              if (!groupConfig || !groupConfig.sdkBorrowToken) { logger.error(`[Scanner] Internal Error: Missing group config or borrow token for ${groupName}.`); continue; }
 
-             // +++ Get Liquidity Thresholds for this group +++
+             // Get Liquidity Thresholds
              const groupLiqThresholds = this.config.MIN_LIQUIDITY_REQUIREMENTS?.[groupName];
-             const minRawLiquidity = groupLiqThresholds?.MIN_RAW_LIQUIDITY || 0n; // Use configured threshold or default to 0 (no check)
+             const minRawLiquidity = groupLiqThresholds?.MIN_RAW_LIQUIDITY || 0n;
              if (minRawLiquidity > 0n) {
                  logger.debug(`[Scanner] Group ${groupName}: Applying Min Raw Liquidity Threshold: ${minRawLiquidity.toString()}`);
              }
-             // +++ End Threshold Retrieval +++
 
              for (let i = 0; i < poolsInGroup.length; i++) {
                  for (let j = i + 1; j < poolsInGroup.length; j++) {
-                     const livePool1 = poolsInGroup[i];
-                     const livePool2 = poolsInGroup[j];
+                     const livePool1 = poolsInGroup[i]; // Contains sdkToken0, sdkToken1
+                     const livePool2 = poolsInGroup[j]; // Contains sdkToken0, sdkToken1
 
                      // Basic Tick Comparison
                      const tick1 = livePool1.tick;
                      const tick2 = livePool2.tick;
                      const tickDelta = Math.abs(tick1 - tick2);
-                     const TICK_DIFF_THRESHOLD = 1;
+                     const TICK_DIFF_THRESHOLD = 1; // Ticks must differ by at least 1
                      let startPoolLive = null, swapPoolLive = null;
                      if (tick2 > tick1 + TICK_DIFF_THRESHOLD) { startPoolLive = livePool1; swapPoolLive = livePool2; }
                      else if (tick1 > tick2 + TICK_DIFF_THRESHOLD) { startPoolLive = livePool2; swapPoolLive = livePool1; }
                      else { continue; } // Ticks too close
 
-                     // +++ Liquidity Check (Using Raw Liquidity Proxy) +++
+                     // Liquidity Check
                      if (minRawLiquidity > 0n) {
-                         // Check the SWAP pool as it's where the trade executes
                          if (swapPoolLive.liquidity < minRawLiquidity) {
                              logger.debug(`[Scanner] Skipping ${startPoolLive.feeBps}bps -> ${swapPoolLive.feeBps}bps: Swap pool liquidity (${swapPoolLive.liquidity}) below raw threshold (${minRawLiquidity}).`);
-                             continue; // Skip this pair
+                             continue;
                          }
-                          // Optionally check start pool too
-                          // if (startPoolLive.liquidity < minRawLiquidity) { continue; }
                      }
-                     // +++ End Liquidity Check +++
 
-                     // If passes tick diff and liquidity check, identify opportunity
+                     // Determine intermediate token
                      let sdkIntermediateToken;
-                     if (groupConfig.sdkBorrowToken.equals(groupConfig.sdkToken0)) { sdkIntermediateToken = groupConfig.sdkToken1; }
-                     else if (groupConfig.sdkBorrowToken.equals(groupConfig.sdkToken1)) { sdkIntermediateToken = groupConfig.sdkToken0; }
+                     if (groupConfig.sdkBorrowToken.equals(livePool1.sdkToken0)) { sdkIntermediateToken = livePool1.sdkToken1; } // Tokens should be same for both pools in group
+                     else if (groupConfig.sdkBorrowToken.equals(livePool1.sdkToken1)) { sdkIntermediateToken = livePool1.sdkToken0; }
                      else { logger.error(`[Scanner] Config Error: Borrow token ${groupConfig.sdkBorrowToken.symbol} mismatch in group ${groupName}.`); continue; }
 
                      logger.log(`[Scanner] Potential Opportunity Found (Passed Liq Check): Group ${groupName}, Borrow ${groupConfig.sdkBorrowToken.symbol} from ${startPoolLive.feeBps}bps -> Swap on ${swapPoolLive.feeBps}bps`);
+
+                     // Create opportunity object - pass the full pool state objects
                      const opportunity = {
                          groupName: groupName,
-                         startPoolInfo: startPoolLive,
-                         swapPoolInfo: swapPoolLive,
+                         startPoolInfo: startPoolLive, // Now includes sdkToken0/1
+                         swapPoolInfo: swapPoolLive,   // Now includes sdkToken0/1
                          sdkTokenBorrowed: groupConfig.sdkBorrowToken,
                          sdkTokenIntermediate: sdkIntermediateToken,
                          borrowAmount: groupConfig.borrowAmount,
@@ -249,4 +251,4 @@ class PoolScanner {
      }
 }
 
-module.exports = { PoolScanner };
+module.exports = { PoolScanner }; // Exporting as an object property
