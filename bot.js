@@ -9,10 +9,10 @@ const { handleError, ArbitrageError } = require('./utils/errorHandler');
 const FlashSwapManager = require('./core/flashSwapManager');
 const ArbitrageEngine = require('./core/arbitrageEngine');
 const PoolScanner = require('./core/poolScanner');
-// --- Correctly import the exported object from quoteSimulator ---
-const quoteSimulator = require('./core/quoteSimulator'); // Gets the object { simulateArbitrage: [Function] }
+const quoteSimulator = require('./core/quoteSimulator'); // Correct based on previous fix
+// --- Correctly import the exported object from gasEstimator ---
+const gasEstimator = require('./utils/gasEstimator'); // Gets the object { getSimpleGasParams: [Function] }
 // --- ---
-const GasEstimator = require('./utils/gasEstimator');
 
 // --- Global Error Handling ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -58,28 +58,25 @@ async function main() {
         const provider = require('./utils/provider').getProvider();
 
         flashSwapManager = new FlashSwapManager();
-        const gasEstimator = new GasEstimator(provider, config);
         const poolScanner = new PoolScanner(config, provider);
 
-        // --- Remove the 'new QuoteSimulator(...)' line ---
-        // The 'quoteSimulator' variable already holds the required object.
-        // If quoteSimulator needed its own initialization, we'd call a function like:
-        // await quoteSimulator.initialize(config, provider); // (But no such function exists in the current quoteSimulator.js)
+        // --- Remove the 'new GasEstimator(...)' line ---
+        // The 'gasEstimator' variable now holds the object { getSimpleGasParams: ... }
         // --- ---
 
         const arbitrageEngine = new ArbitrageEngine(
             config,
             flashSwapManager,
             poolScanner,
-            quoteSimulator, // Pass the imported object directly
-            gasEstimator,
+            quoteSimulator,
+            gasEstimator, // Pass the imported object directly
             logger
         );
 
         logger.info("[MainLoop] Starting arbitrage cycle...");
         setInterval(async () => {
             try {
-                // ArbitrageEngine will call quoteSimulator.simulateArbitrage internally
+                // ArbitrageEngine will need to call gasEstimator.getSimpleGasParams(...) internally
                 await arbitrageEngine.findAndExecuteArbitrage();
             } catch (cycleError) {
                 handleError(cycleError, 'ArbitrageCycle');
@@ -89,6 +86,7 @@ async function main() {
         await new Promise(() => {});
 
     } catch (error) {
+        // Ensure handleError is correctly imported and used
         handleError(error, 'BotInitialization');
         process.exit(1);
     }
