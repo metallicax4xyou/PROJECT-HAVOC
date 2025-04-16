@@ -10,12 +10,11 @@ const { handleError, ArbitrageError } = require('./utils/errorHandler');
 // --- Core Components ---
 const FlashSwapManager = require('./core/flashSwapManager');
 const ArbitrageEngine = require('./core/arbitrageEngine');
-const { PoolScanner } = require('./core/poolScanner'); // Destructure Class
-const quoteSimulator = require('./core/quoteSimulator');   // Import object
-const gasEstimator = require('./utils/gasEstimator');     // Import object
-// --- Import Profit Calc and Tx Executor ---
-const profitCalculator = require('./core/profitCalculator'); // Import object { checkProfitability: ... }
-const txExecutor = require('./core/txExecutor');             // Import object { executeTransaction: ... }
+const { PoolScanner } = require('./core/poolScanner');
+const quoteSimulator = require('./core/quoteSimulator');
+const gasEstimator = require('./utils/gasEstimator');
+const profitCalculator = require('./core/profitCalculator');
+const txExecutor = require('./core/txExecutor');
 // --- ---
 
 // --- Global Error Handling ---
@@ -46,6 +45,10 @@ Object.keys(signals).forEach((signal) => {
     } else {
         console.warn(`[Shutdown] Received ${signal}, shutting down gracefully... (logger missing)`);
     }
+    // Optional: Call engine shutdown if implemented
+    // if (arbitrageEngine && typeof arbitrageEngine.shutdown === 'function') {
+    //     arbitrageEngine.shutdown();
+    // }
     process.exit(signals[signal]);
   });
 });
@@ -58,38 +61,41 @@ async function main() {
 
     let flashSwapManager;
     let poolScanner;
+    let arbitrageEngine; // Declare here for potential access in shutdown
 
     try {
         const provider = require('./utils/provider').getProvider();
 
-        flashSwapManager = new FlashSwapManager(); // Instantiate
-        poolScanner = new PoolScanner(config, provider); // Instantiate
+        flashSwapManager = new FlashSwapManager();
+        poolScanner = new PoolScanner(config, provider);
 
-        // --- Instantiate ArbitrageEngine with correct arguments ---
-        const arbitrageEngine = new ArbitrageEngine(
-            flashSwapManager,                 // 1st: FlashSwapManager instance
-            poolScanner,                      // 2nd: PoolScanner instance
-            profitCalculator.checkProfitability, // 3rd: The checkProfitability function
-            provider,                         // 4th: The provider instance
-            txExecutor.executeTransaction     // 5th: The executeTransaction function
+        arbitrageEngine = new ArbitrageEngine( // Assign to the outer scope variable
+            flashSwapManager,
+            poolScanner,
+            profitCalculator.checkProfitability,
+            provider,
+            txExecutor.executeTransaction
         );
-        // --- ---
 
         logger.info("[MainLoop] Starting arbitrage cycle...");
         setInterval(async () => {
             try {
-                // Engine now has all dependencies correctly injected
-                await arbitrageEngine.findAndExecuteArbitrage();
+                // --- Corrected Method Call ---
+                // Call the actual method defined in ArbitrageEngine
+                await arbitrageEngine.runCycle();
+                // --- ---
             } catch (cycleError) {
+                // Handle errors occurring within a single arbitrage cycle
                 handleError(cycleError, 'ArbitrageCycle');
             }
-        }, config.CYCLE_INTERVAL_MS);
+        }, config.CYCLE_INTERVAL_MS); // Use interval from config
 
+        // Keep the process alive
         await new Promise(() => {});
 
     } catch (error) {
         handleError(error, 'BotInitialization');
-        process.exit(1);
+        process.exit(1); // Exit if initialization fails critically
     }
 }
 
