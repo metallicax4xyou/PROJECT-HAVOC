@@ -1,130 +1,178 @@
 // core/flashSwapManager.js
 
-const { ethers } = require('ethers');
-const NonceManager = require('../utils/nonceManager'); // Adjust path if needed
-const { getProvider } = require('../utils/provider'); // Adjust path if needed
-const { getConfig } = require('../config'); // Adjust path if needed
-const { logger } = require('../utils/logger'); // Adjust path if needed
-
-const FlashSwapABI = require('../abis/FlashSwap.json');
-// Remove QuoterV2 ABI require, as it's not initialized here anymore
-// const QuoterV2ABI = require('../abis/IQuoterV2.json');
+const { ethers, Wallet, Contract } = require('ethers');
+// --- Corrected Config Import ---
+const config = require('../config'); // Import the config object directly
+// --- ---
+const NonceManager = require('../utils/nonceManager'); // Use our custom NonceManager
+const { getProvider } = require('../utils/provider'); // Import the provider getter
+const { logger } = require('../utils/logger');
+const FlashSwapABI = require('../abis/FlashSwap.json'); // Load ABI
+const { ArbitrageError, handleError } = require('../utils/errorHandler');
 
 class FlashSwapManager {
-    constructor(network) {
-        this.network = network;
-        this.config = getConfig(network); // Load config specific to the network
-        this.provider = null;
-        this.signer = null;
-        this.flashSwapContract = null;
-        this.nonceManager = null;
-        // Remove quoter property
-        // this.quoterContract = null;
-        this.isInitialized = false;
+    constructor() {
+        // --- Use the imported config object ---
+        this.config = config; // Assign the imported object
+        // --- ---
+        this.provider = getProvider(); // Get the provider instance
 
-        logger.info(`[Manager] Initializing FlashSwapManager for network: ${this.network} (Chain ID: ${this.config.CHAIN_ID})...`);
-    }
-
-    async initialize() {
-        if (this.isInitialized) {
-            logger.warn('[Manager] Attempted to initialize already initialized FlashSwapManager.');
-            return;
+        if (!this.config.PRIVATE_KEY) {
+            throw new ArbitrageError(
+                'BotInitialization',
+                'Private key not found in configuration.'
+            );
+        }
+        if (!this.config.FLASH_SWAP_CONTRACT_ADDRESS || this.config.FLASH_SWAP_CONTRACT_ADDRESS === ethers.ZeroAddress) {
+             throw new ArbitrageError(
+                 'BotInitialization',
+                 'Flash Swap contract address not found or is ZeroAddress in configuration.'
+             );
         }
 
         try {
-            logger.info('[Manager] Setting up Provider...');
-            this.provider = getProvider(this.config); // Use the utility function
-            if (!this.provider) {
-                throw new Error('Failed to initialize provider.');
-            }
-            const network = await this.provider.getNetwork();
-            const blockNumber = await this.provider.getBlockNumber();
-            logger.info(`[Manager] Provider connected. Network: ${network.name} (ID: ${network.chainId}), Current block: ${blockNumber}`);
+            // Wrap the base wallet with our custom nonce manager
+            const baseWallet = new Wallet(this.config.PRIVATE_KEY, this.provider);
+            // Use the custom NonceManager, passing the base Wallet instance
+            this.signer = new NonceManager(baseWallet);
+            logger.info(`[NonceManager] Initialized for signer: ${this.signer.address}`);
 
-            logger.info('[Manager] Setting up Signer...');
-            if (!this.config.PRIVATE_KEY) {
-                throw new Error('Private key not found in configuration.');
-            }
-            this.signer = new ethers.Wallet(this.config.PRIVATE_KEY, this.provider);
-            logger.info(`[Manager] Signer Address: ${this.signer.address}`);
-
-            logger.info('[Manager] Initializing Nonce Manager...');
-            this.nonceManager = new NonceManager(this.provider, this.signer.address);
-            await this.nonceManager.initialize(); // Fetches initial nonce
-
-            logger.info('[Manager] Initializing Core Contracts...');
-            // Initialize FlashSwap Contract
-            if (!this.config.CONTRACT_ADDRESS) {
-                throw new Error('FlashSwap contract address not found in configuration.');
-            }
-            this.flashSwapContract = new ethers.Contract(this.config.CONTRACT_ADDRESS, FlashSwapABI, this.signer);
-            logger.info(`[Manager] FlashSwap Contract Initialized: ${await this.flashSwapContract.getAddress()}`);
-
-            // --- REMOVED QUOTER INITIALIZATION ---
-            // logger.info('[Manager] Initializing QuoterV2 Contract...');
-            // this.initializeQuoter(); // <-- REMOVED THIS CALL
-            // --- END REMOVED QUOTER INITIALIZATION ---
-
-            this.isInitialized = true;
-            logger.info('[Manager] FlashSwapManager Initialized Successfully.');
+            this.flashSwapContract = new Contract(
+                this.config.FLASH_SWAP_CONTRACT_ADDRESS,
+                FlashSwapABI,
+                this.signer // Use the nonce-managed signer
+            );
+            logger.info(`[FlashSwap] Connected to FlashSwap contract at ${this.config.FLASH_SWAP_CONTRACT_ADDRESS}`);
 
         } catch (error) {
-            logger.error('ERROR: [Manager] CRITICAL INITIALIZATION FAILURE!', error);
-            // Re-throw or handle appropriately, maybe set isInitialized to false
-            this.isInitialized = false; // Ensure state reflects failure
-             // Log specific context if available in the error object
-             logger.error(`--- ERROR ENCOUNTERED ---\nContext: [Manager] Initialization\nTimestamp: ${new Date().toISOString()}\nType: ${error.constructor.name}\nMessage: ${error.message}\n--- Full Unexpected Error Object Start ---\n${error.stack || error}\n--- Full Unexpected Error Object End ---\n--- END ERROR LOG ---`);
-             throw new Error(`FlashSwapManager initialization failed: ${error.message}`); // Propagate error
+            // Catch specific ethers errors or general errors during setup
+            if (error.code) { // Ethers errors often have a code
+                 throw new ArbitrageError(
+                     'BotInitialization',
+                     `Ethers error during Signer/Contract setup: ${error.message} (Code: ${error.code})`,
+                     error
+                 );
+            } else {
+                 throw new ArbitrageError(
+                     'BotInitialization',
+                     `Error setting up Signer/Contract: ${error.message}`,
+                     error
+                 );
+            }
         }
     }
 
-    // --- REMOVED initializeQuoter function ---
-    // initializeQuoter() {
-    //     if (!this.config.QUOTERV2_ADDRESS) {
-    //         throw new Error('QuoterV2 address not found in configuration.');
-    //     }
-    //     this.quoterContract = new ethers.Contract(this.config.QUOTERV2_ADDRESS, QuoterV2ABI, this.provider); // Use provider, not signer
-    //     logger.info(`[Manager] QuoterV2 Contract Initialized: ${this.config.QUOTERV2_ADDRESS}`);
-    // }
-    // --- END REMOVED initializeQuoter function ---
-
-
-    getProvider() {
-        if (!this.isInitialized || !this.provider) {
-            logger.warn('[Manager] Provider accessed before initialization.');
-            // Potentially throw an error or return null depending on desired strictness
-            // throw new Error("Provider not initialized");
+    /**
+     * Executes the flash swap via the smart contract.
+     * @param {string} borrowTokenAddress - The address of the token to borrow.
+     * @param {BigInt} borrowAmount - The amount of the token to borrow.
+     * @param {Array<object>} swapRoute - An array defining the swaps: [{ pool: string, tokenIn: string, tokenOut: string, fee: number }]
+     * @param {ethers.BigNumberish} estimatedGasLimit - Estimated gas limit for the transaction.
+     * @param {ethers.BigNumberish} gasPrice - The gas price to use for the transaction.
+     * @returns {Promise<ethers.TransactionResponse | null>} Transaction response or null if dry run/error.
+     */
+    async executeFlashSwap(borrowTokenAddress, borrowAmount, swapRoute, estimatedGasLimit, gasPrice) {
+        if (this.config.DRY_RUN) {
+            logger.warn(`[DryRun] Would execute flash swap on ${this.config.FLASH_SWAP_CONTRACT_ADDRESS}`);
+            logger.warn(`[DryRun]  - Borrow Token: ${borrowTokenAddress}`);
+            logger.warn(`[DryRun]  - Borrow Amount: ${ethers.formatUnits(borrowAmount, this.config.TOKENS[this.config.getTokenSymbol(borrowTokenAddress)]?.decimals ?? 18)}`);
+            logger.warn(`[DryRun]  - Swap Route: ${JSON.stringify(swapRoute)}`);
+            logger.warn(`[DryRun]  - Est. Gas Limit: ${estimatedGasLimit}`);
+            logger.warn(`[DryRun]  - Gas Price: ${ethers.formatUnits(gasPrice, 'gwei')} gwei`);
+            return null; // Do not proceed in dry run mode
         }
-        return this.provider;
-    }
 
-    getSigner() {
-        if (!this.isInitialized || !this.signer) {
-             logger.warn('[Manager] Signer accessed before initialization.');
-            // throw new Error("Signer not initialized");
+        try {
+            // Prepare the swap path data for the contract call
+            // Contract expects: address pool, address tokenIn, address tokenOut, uint24 fee
+            const path = swapRoute.map(swap => ({
+                pool: swap.pool,
+                tokenIn: swap.tokenIn,
+                tokenOut: swap.tokenOut,
+                fee: swap.fee // Assuming fee here is the V3 pool fee tier (e.g., 500, 3000)
+            }));
+
+            logger.info(`[FlashSwap] Attempting flash swap... Borrow: ${ethers.formatUnits(borrowAmount, this.config.getTokenSymbol(borrowTokenAddress))} ${this.config.getTokenSymbol(borrowTokenAddress)}`);
+
+            // Estimate gas using the contract's method if possible, otherwise use provided estimate
+            let gasLimit;
+            try {
+                 // Note: Direct estimation might be tricky due to state changes during the actual call.
+                 // Using the pre-calculated estimate might be more reliable here.
+                 // gasLimit = await this.flashSwapContract.executeFlashSwap.estimateGas(
+                 //     borrowTokenAddress,
+                 //     borrowAmount,
+                 //     path,
+                 //     { gasPrice: gasPrice } // Provide gasPrice if needed for estimation context
+                 // );
+                 // Add a buffer to the estimate?
+                 // gasLimit = gasLimit * 120n / 100n; // Example: 20% buffer
+                 gasLimit = estimatedGasLimit; // Use the estimate passed in for now
+                 logger.debug(`[FlashSwap] Using provided gas limit estimate: ${gasLimit}`);
+             } catch (estimationError) {
+                 logger.warn(`[FlashSwap] Gas estimation failed: ${estimationError.message}. Falling back to default estimate.`);
+                 // Decide if fallback is okay or if it should throw
+                 gasLimit = this.config.GAS_LIMIT_ESTIMATE; // Use global fallback
+                 // Alternatively: throw new ArbitrageError('GasEstimation', `Failed to estimate gas for flash swap: ${estimationError.message}`);
+             }
+
+
+            // --->>> Fetch the current nonce using the custom manager <<<---
+            const nonce = await this.signer.getNonce('latest'); // Or 'pending' if needed
+            logger.info(`[FlashSwap] Using nonce: ${nonce}`);
+
+
+            // Execute the flash swap transaction
+            const tx = await this.flashSwapContract.executeFlashSwap(
+                borrowTokenAddress,
+                borrowAmount,
+                path,
+                {
+                    gasLimit: gasLimit,
+                    gasPrice: gasPrice, // Use the calculated gas price
+                    nonce: nonce         // Provide the fetched nonce explicitly
+                }
+            );
+
+            logger.info(`[FlashSwap] Transaction sent! Hash: ${tx.hash}`);
+            logger.info(`[FlashSwap]   Nonce: ${tx.nonce}, Gas Price: ${ethers.formatUnits(tx.gasPrice || '0', 'gwei')} Gwei, Gas Limit: ${tx.gasLimit}`);
+
+            // Optional: Increment nonce locally immediately after sending (if manager doesn't handle pending txs well)
+            // this.signer.incrementNonce(); // If needed, depends on NonceManager logic
+
+            return tx;
+
+        } catch (error) {
+            // Decrement nonce if the transaction failed before being mined? Risky, depends on NonceManager logic.
+            // if (error.code === 'REPLACEMENT_UNDERPRICED' || ...) {
+            //     this.signer.decrementNonce(); // Be VERY careful with this
+            // }
+
+            // Throw a structured error
+            const errorMessage = error.reason || error.message; // Ethers errors often have 'reason'
+            logger.error(`[FlashSwap] Error executing flash swap: ${errorMessage}`, { // Log full details
+                 code: error.code,
+                 // transaction: error.transaction, // Contains details if it's an Ethers error
+                 // receipt: error.receipt // May be present if it failed on-chain
+             });
+
+             throw new ArbitrageError(
+                 'TransactionExecution',
+                 `Flash swap execution failed: ${errorMessage}`,
+                 error // Attach original error
+             );
         }
-        return this.signer;
     }
 
-    getFlashSwapContract() {
-         if (!this.isInitialized || !this.flashSwapContract) {
-             logger.warn('[Manager] FlashSwap Contract accessed before initialization.');
-            // throw new Error("FlashSwap Contract not initialized");
-         }
-        return this.flashSwapContract;
-    }
-
-    getNonceManager() {
-        if (!this.isInitialized || !this.nonceManager) {
-             logger.warn('[Manager] Nonce Manager accessed before initialization.');
-            // throw new Error("Nonce Manager not initialized");
-        }
-        return this.nonceManager;
-    }
-
-    // Optional: Add a getter for config if needed elsewhere safely
-    getConfig() {
-        return this.config;
+    // Helper to get token symbol from address (useful for logging) - might need refinement
+    // Consider moving this to a central utility or config helper if used widely
+    getTokenSymbol(address) {
+       for (const symbol in this.config.TOKENS) {
+           if (ethers.getAddress(this.config.TOKENS[symbol].address) === ethers.getAddress(address)) {
+               return symbol;
+           }
+       }
+       return address; // Return address if symbol not found
     }
 }
 
