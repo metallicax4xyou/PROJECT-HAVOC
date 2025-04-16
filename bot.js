@@ -6,13 +6,14 @@ const logger = require('./utils/logger');
 const { ethers } = require('ethers');
 const config = require('./config');
 const { handleError, ArbitrageError } = require('./utils/errorHandler');
-const FlashSwapManager = require('./core/flashSwapManager');
-const ArbitrageEngine = require('./core/arbitrageEngine');
-const PoolScanner = require('./core/poolScanner');
-const quoteSimulator = require('./core/quoteSimulator'); // Correct based on previous fix
-// --- Correctly import the exported object from gasEstimator ---
-const gasEstimator = require('./utils/gasEstimator'); // Gets the object { getSimpleGasParams: [Function] }
+const FlashSwapManager = require('./core/flashSwapManager'); // Assuming this IS a class
+const ArbitrageEngine = require('./core/arbitrageEngine');  // Assuming this IS a class
+// --- Correctly import the PoolScanner class via destructuring ---
+const { PoolScanner } = require('./core/poolScanner'); // Use { } to get the class from the exported object
 // --- ---
+const quoteSimulator = require('./core/quoteSimulator');   // Correct based on previous fix
+const gasEstimator = require('./utils/gasEstimator');     // Correct based on previous fix
+
 
 // --- Global Error Handling ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -53,30 +54,29 @@ async function main() {
     logger.info("==============================================");
 
     let flashSwapManager;
+    let poolScanner; // Declare here
 
     try {
         const provider = require('./utils/provider').getProvider();
 
         flashSwapManager = new FlashSwapManager();
-        const poolScanner = new PoolScanner(config, provider);
 
-        // --- Remove the 'new GasEstimator(...)' line ---
-        // The 'gasEstimator' variable now holds the object { getSimpleGasParams: ... }
+        // --- Use 'new' because we destructured the actual PoolScanner class ---
+        poolScanner = new PoolScanner(config, provider); // This line should now work
         // --- ---
 
         const arbitrageEngine = new ArbitrageEngine(
             config,
             flashSwapManager,
-            poolScanner,
+            poolScanner, // Pass the instantiated poolScanner object
             quoteSimulator,
-            gasEstimator, // Pass the imported object directly
+            gasEstimator,
             logger
         );
 
         logger.info("[MainLoop] Starting arbitrage cycle...");
         setInterval(async () => {
             try {
-                // ArbitrageEngine will need to call gasEstimator.getSimpleGasParams(...) internally
                 await arbitrageEngine.findAndExecuteArbitrage();
             } catch (cycleError) {
                 handleError(cycleError, 'ArbitrageCycle');
@@ -86,7 +86,6 @@ async function main() {
         await new Promise(() => {});
 
     } catch (error) {
-        // Ensure handleError is correctly imported and used
         handleError(error, 'BotInitialization');
         process.exit(1);
     }
