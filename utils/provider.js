@@ -3,13 +3,17 @@
 // Use require for imports
 const { ethers, FallbackProvider, JsonRpcProvider } = require('ethers');
 const dotenv = require('dotenv');
-const { logger } = require('./logger'); // Correct relative path for CJS
+
+// --- THIS LINE IS CORRECTED ---
+const logger = require('./logger'); // Import the entire logger object
+// --- ---
 
 dotenv.config();
 
 const arbitrumRpcUrls = process.env.ARBITRUM_RPC_URLS;
 
 if (!arbitrumRpcUrls) {
+    // Now logger.error should work correctly
     logger.error("ARBITRUM_RPC_URLS environment variable is not set.");
     process.exit(1); // Exit if critical config is missing
 }
@@ -76,7 +80,8 @@ async function testProviderConnection() {
 testProviderConnection();
 
 // Export the configured provider instance using module.exports
+// Ensure flashSwapManager.js uses `const { getProvider } = require(...)` and then `const provider = getProvider()`
 module.exports = {
-    provider,
-    getProvider: () => provider // Optional: Export a getter function if preferred
+    provider, // Exporting the instance directly might also be used depending on consumer
+    getProvider: () => provider // Export a getter function
 };
