@@ -37,6 +37,7 @@ function initializeQuoter(provider) {
 
 /**
  * Fetches populated ticks for a given pool using TickLens and filters invalid ones.
+ * Converts liquidity values to JSBI for SDK compatibility.
  * @param {ethers.Provider} provider Ethers provider instance.
  * @param {string} poolAddress The checksummed address of the pool.
  * @param {number} tickSpacing The tick spacing of the pool.
@@ -62,19 +63,14 @@ async function getTickDataProvider(provider, poolAddress, tickSpacing) {
 
         if (!populatedTicksRaw || populatedTicksRaw.length === 0) {
              logger.debug(`${functionSig} No ticks received from TickLens. Returning empty provider.`);
-             return new TickListDataProvider([], tickSpacing); // Return empty provider if no ticks
+             return new TickListDataProvider([], tickSpacing);
         }
-        // Optional: Log raw ticks if needed for deep debug
-        // const rawTicksLog = populatedTicksRaw.map(t => Number(t.tick));
-        // logger.debug(`${functionSig} Raw Ticks Received: [${rawTicksLog.join(', ')}]`);
 
-        // --- Step 2: Filter and Format Ticks ---
+        // --- Step 2: Filter, Format, and Convert to JSBI ---
         let invalidTickCount = 0;
         formattedTicks = populatedTicksRaw.map((tickInfo) => {
-            // Basic validation first
             if (tickInfo?.tick == null || tickInfo.liquidityNet == null || tickInfo.liquidityGross == null) {
-                 logger.warn(`${functionSig} Corrupt raw tick data found. Skipping.`);
-                 invalidTickCount++; return null;
+                 logger.warn(`${functionSig} Corrupt raw tick data found. Skipping.`); invalidTickCount++; return null;
             }
             const tickNumber = Number(tickInfo.tick);
             if (typeof tickInfo.liquidityNet !== 'bigint' || typeof tickInfo.liquidityGross !== 'bigint') {
@@ -89,7 +85,18 @@ async function getTickDataProvider(provider, poolAddress, tickSpacing) {
                  logger.warn(`${functionSig} Invalid tick! Tick ${tickNumber} out of range [${Tick.MIN_TICK}, ${Tick.MAX_TICK}]. Filtering.`);
                  invalidTickCount++; return null;
             }
-            return { tick: tickNumber, liquidityNet: tickInfo.liquidityNet, liquidityGross: tickInfo.liquidityGross };
+            // --- Convert BigInt to JSBI for SDK ---
+            try {
+                return {
+                    tick: tickNumber,
+                    liquidityNet: JSBI.BigInt(tickInfo.liquidityNet.toString()), // Convert BigInt -> String -> JSBI
+                    liquidityGross: JSBI.BigInt(tickInfo.liquidityGross.toString()) // Convert BigInt -> String -> JSBI
+                };
+            } catch (jsbiError) {
+                logger.warn(`${functionSig} Failed to convert liquidity to JSBI for tick ${tickNumber}: ${jsbiError.message}. Filtering.`);
+                invalidTickCount++; return null;
+            }
+            // --- End Conversion ---
         }).filter(tick => tick !== null);
 
         if (invalidTickCount > 0) { logger.warn(`${functionSig} Filtered out ${invalidTickCount} invalid raw/formatted ticks.`); }
@@ -100,28 +107,24 @@ async function getTickDataProvider(provider, poolAddress, tickSpacing) {
         }
 
         // --- Step 3: Attempt to Create TickListDataProvider ---
-        logger.debug(`${functionSig} Attempting to create TickListDataProvider with ${formattedTicks.length} valid ticks and spacing ${tickSpacing}.`);
-        // Log the data one last time before the try block
-        // logger.debug(`${functionSig} Final Data: ${JSON.stringify(formattedTicks, (k, v) => typeof v === 'bigint' ? v.toString() : v)}`);
+        logger.debug(`${functionSig} Attempting to create TickListDataProvider with ${formattedTicks.length} valid ticks (liquidity as JSBI) and spacing ${tickSpacing}.`);
+        // logger.debug(`${functionSig} Final Data (JSBI): ${JSON.stringify(formattedTicks)}`); // JSBI doesn't stringify nicely
 
         try {
-            // Isolate the constructor call
             const tickProvider = new TickListDataProvider(formattedTicks, tickSpacing);
             logger.debug(`${functionSig} TickListDataProvider created successfully.`);
             return tickProvider;
         } catch (constructorError) {
-            // Catch errors *specifically* from the constructor
             logger.error(`${functionSig} Error constructing TickListDataProvider: ${constructorError.message}`);
-            logger.error(`${functionSig} Data that caused constructor error: ${JSON.stringify(formattedTicks, (k, v) => typeof v === 'bigint' ? v.toString() : v)}`);
+            // logger.error(`${functionSig} Data that caused constructor error (JSBI): ${JSON.stringify(formattedTicks)}`);
             handleError(constructorError, `TickListDataProvider Constructor (${poolAddress})`);
-            return null; // Return null if constructor fails
+            return null;
         }
 
     } catch (fetchError) {
-        // Catch errors during the TickLens call itself
         logger.warn(`${functionSig} Error during TickLens fetch: ${fetchError.message}.`);
         handleError(fetchError, `TickLens Fetch (${poolAddress})`);
-        return null; // Return null on fetch error
+        return null;
     }
 }
 
@@ -136,57 +139,35 @@ async function getTickDataProvider(provider, poolAddress, tickSpacing) {
  * @returns {Promise<Trade<Token, Token, TradeType.EXACT_INPUT> | null>} The simulated trade object or null on failure.
  */
 async function simulateSingleTradeSDK(provider, poolData, tokenIn, tokenOut, amountIn) {
+    // ... (Function body mostly the same, just calls the updated getTickDataProvider) ...
     const functionSig = `[SimSDK Pool: ${poolData.address}]`;
     logger.debug(`${functionSig} Simulating ${ethers.formatUnits(amountIn.quotient.toString(), tokenIn.decimals)} ${tokenIn.symbol} -> ${tokenOut.symbol}`);
-
-    // ... (Input validation remains the same) ...
     if (!provider || !poolData || !tokenIn || !tokenOut || !amountIn || !(amountIn instanceof CurrencyAmount)) { logger.error(`${functionSig} Invalid arguments for simulateSingleTradeSDK.`); return null; }
     if (amountIn.quotient <= 0n) { logger.warn(`${functionSig} Input amount is zero or negative.`); return null; }
-
     try {
         if (poolData.sqrtPriceX96 == null || poolData.liquidity == null || poolData.tick == null || poolData.feeBps == null) { logger.error(`${functionSig} Missing required pool state data.`); return null; }
         if (!poolData.sdkToken0 || !poolData.sdkToken1) { logger.error(`${functionSig} Missing sdkToken0 or sdkToken1 in poolData.`); return null; }
-
-        const pool = new Pool(
-            poolData.sdkToken0, poolData.sdkToken1, poolData.feeBps,
-            poolData.sqrtPriceX96.toString(), poolData.liquidity.toString(), Number(poolData.tick)
-        );
-
+        const pool = new Pool( poolData.sdkToken0, poolData.sdkToken1, poolData.feeBps, poolData.sqrtPriceX96.toString(), poolData.liquidity.toString(), Number(poolData.tick) );
         const derivedTickSpacing = pool.tickSpacing;
         logger.debug(`${functionSig} Fee: ${poolData.feeBps}bps => Derived Tick Spacing: ${derivedTickSpacing}`);
-
-        // Fetch Tick Data (now with filtering and type checks) - PASS DERIVED SPACING
-        const tickDataProvider = await getTickDataProvider(provider, poolData.address, derivedTickSpacing);
-        if (!tickDataProvider) {
-            // Error should have been logged within getTickDataProvider
-            logger.warn(`${functionSig} Failed to get valid tick data provider (returned null). Cannot simulate accurately.`); return null;
-        }
-
+        const tickDataProvider = await getTickDataProvider(provider, poolData.address, derivedTickSpacing); // Fetches ticks with JSBI conversion
+        if (!tickDataProvider) { logger.warn(`${functionSig} Failed to get valid tick data provider (returned null). Cannot simulate accurately.`); return null; }
         const route = new Route([pool], tokenIn, tokenOut);
         logger.debug(`${functionSig} Route created.`);
-
-        // Wrap Trade.fromRoute in try/catch as it can fail too
         let trade = null;
         try {
              trade = await Trade.fromRoute(route, amountIn, TradeType.EXACT_INPUT, { tickDataProvider });
              logger.debug(`${functionSig} Trade.fromRoute successful.`);
         } catch(tradeError) {
-             // Handle specific SDK errors if possible
              if (tradeError.message.includes('NO_ROUTE_FOUND')) { logger.warn(`${functionSig} No route found by SDK for swap.`); }
              else if (tradeError.message.includes('InsufficientInputAmountError')) { logger.warn(`${functionSig} Insufficient input amount for swap.`); }
              else if (tradeError.message.includes('Invalid Ticks') || tradeError.message.includes('TickListDataProvider')) { logger.warn(`${functionSig} Invalid ticks or tick data provider error during trade routing: ${tradeError.message}`); }
              else { logger.error(`${functionSig} Error during Trade.fromRoute: ${tradeError.message}`); handleError(tradeError, `Trade.fromRoute (${tokenIn.symbol}->${tokenOut.symbol})`); }
-             return null; // Return null if trade construction fails
+             return null;
         }
-
-
-        if (!trade || !trade.outputAmount || trade.outputAmount.quotient <= 0n) {
-            logger.warn(`${functionSig} Trade simulation returned invalid trade object or zero output.`); return null;
-        }
-        return trade; // Return successful trade
-
+        if (!trade || !trade.outputAmount || trade.outputAmount.quotient <= 0n) { logger.warn(`${functionSig} Trade simulation returned invalid trade object or zero output.`); return null; }
+        return trade;
     } catch (poolError) {
-        // Catch errors related to pool creation itself (less likely now)
         logger.error(`${functionSig} Error creating SDK Pool object: ${poolError.message}`);
         handleError(poolError, `SDK Pool Constructor (${poolData.address})`);
         return null;
