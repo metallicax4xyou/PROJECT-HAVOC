@@ -1,12 +1,8 @@
 // core/arbitrageEngine.js
 const { ethers } = require('ethers');
-// --- CORRECTED LOGGER PATH ---
-const logger = require('../utils/logger'); // Go up one level to find utils/
-// --- ---
+const logger = require('../utils/logger'); // Corrected path from previous step
 const { handleError, ArbitrageError } = require('../utils/errorHandler');
-const quoteSimulator = require('./quoteSimulator'); // Assuming this is passed correctly now
-
-// Removed direct require for PoolScanner, FlashSwapManager, config as they should be injected via constructor
+const quoteSimulator = require('./quoteSimulator'); // Assuming needed internally or passed correctly
 
 class ArbitrageEngine {
     constructor(flashSwapManager, poolScanner, checkProfitabilityFn, provider, executeTransactionFn, config, engineLogger) {
@@ -17,9 +13,9 @@ class ArbitrageEngine {
         this.provider = provider;
         this.executeTransaction = executeTransactionFn;
         this.config = config;
-        this.logger = engineLogger || logger; // Use injected logger or fallback to the one required here (now fixed)
+        this.logger = engineLogger || logger; // Use injected logger or fallback
 
-        // Validation of dependencies (as added in previous step)
+        // --- Validation of dependencies ---
         if (!this.flashSwapManager || typeof this.flashSwapManager.executeFlashSwap !== 'function') {
             throw new Error('ArbitrageEngine dependency error: Invalid flashSwapManager.');
         }
@@ -35,9 +31,12 @@ class ArbitrageEngine {
         if (typeof this.executeTransaction !== 'function') {
             throw new Error('ArbitrageEngine dependency error: executeTransactionFn is not a function.');
         }
-        if (!this.config || !this.config.NETWORK_NAME) {
+        // --- CORRECTED CONFIG CHECK ---
+        // Use NAME instead of NETWORK_NAME as defined in config/index.js
+        if (!this.config || !this.config.NAME) { // Check for NAME property
              throw new Error('ArbitrageEngine dependency error: Invalid or missing config object.');
         }
+        // --- ---
         if (!this.logger || typeof this.logger.info !== 'function') {
              throw new Error('ArbitrageEngine dependency error: Invalid or missing logger object.');
         }
@@ -61,31 +60,36 @@ class ArbitrageEngine {
         this.logger.info('[Engine] Arbitrage Engine Initialized Successfully.');
     }
 
-    // startMonitoring and stopMonitoring remain the same
-     startMonitoring() {
-         if (this.isMonitoring) { this.logger.warn('[Engine] Monitoring is already active.'); return; }
-         this.isMonitoring = true;
-         this.cycleCount = 0;
-         this.logger.info(`[Engine] Starting arbitrage monitoring loop for ${this.config.NETWORK_NAME}...`);
-         this.logger.info(`[Engine] Cycle Interval: ${this.cycleInterval / 1000} seconds.`);
-         this.logger.info('>>> Engine started. Monitoring for opportunities... (Press Ctrl+C to stop) <<<');
-         // Run initial cycle immediately, then set interval
-         this.runCycle().catch(err => handleError(err, 'Engine.InitialRunCycle'));
-         this.monitorInterval = setInterval(() => {
-             this.runCycle().catch(err => handleError(err, `Engine.IntervalCycle (${this.cycleCount})`));
-         }, this.cycleInterval);
-     }
+    // startMonitoring and stopMonitoring methods...
+    startMonitoring() {
+        if (this.isMonitoring) { this.logger.warn('[Engine] Monitoring is already active.'); return; }
+        this.isMonitoring = true;
+        this.cycleCount = 0;
+        // Use the NAME property from the injected config
+        this.logger.info(`[Engine] Starting arbitrage monitoring loop for ${this.config.NAME}...`);
+        this.logger.info(`[Engine] Cycle Interval: ${this.cycleInterval / 1000} seconds.`);
+        this.logger.info('>>> Engine started. Monitoring for opportunities... (Press Ctrl+C to stop) <<<');
+        // Run initial cycle immediately, then set interval
+        this.runCycle().catch(err => handleError(err, 'Engine.InitialRunCycle'));
+        this.monitorInterval = setInterval(() => {
+            // Ensure monitoring hasn't been stopped between intervals
+            if (this.isMonitoring) {
+                this.runCycle().catch(err => handleError(err, `Engine.IntervalCycle (${this.cycleCount})`));
+            } else {
+                 if(this.monitorInterval) clearInterval(this.monitorInterval); // Clear interval if stopped
+            }
+        }, this.cycleInterval);
+    }
 
-     stopMonitoring() {
-          if (!this.isMonitoring) { this.logger.warn('[Engine] Monitoring is not active.'); return; }
-          this.isMonitoring = false;
-          if (this.monitorInterval) { clearInterval(this.monitorInterval); this.monitorInterval = null; }
-          this.logger.info('[Engine] Arbitrage monitoring stopped.');
-     }
+    stopMonitoring() {
+         if (!this.isMonitoring) { this.logger.warn('[Engine] Monitoring is not active.'); return; }
+         this.isMonitoring = false;
+         if (this.monitorInterval) { clearInterval(this.monitorInterval); this.monitorInterval = null; }
+         this.logger.info('[Engine] Arbitrage monitoring stopped.');
+    }
 
 
     async runCycle() {
-        // Added check from startMonitoring logic
         if (!this.isMonitoring) {
              this.logger.debug('[Engine] Monitoring stopped, skipping cycle run.');
              return;
@@ -121,8 +125,7 @@ class ArbitrageEngine {
             // Step 3: Simulate Opportunities
             this.logger.debug(`[Engine] Step 3: Simulating ${opportunities.length} opportunities...`);
             const simulationPromises = opportunities.map(opportunity =>
-                // Use the *injected* quoteSimulator object, calling its simulateArbitrage method
-                quoteSimulator.simulateArbitrage(opportunity, this.provider) // Pass provider if needed by simulator
+                quoteSimulator.simulateArbitrage(opportunity, this.provider) // Pass provider if needed
                     .then(simResult => ({ ...opportunity, simResult }))
                     .catch(error => {
                         this.logger.error(`[Engine] Error during simulation for opp ${opportunity.groupName}: ${error.message}`);
@@ -131,9 +134,7 @@ class ArbitrageEngine {
                     })
             );
             const simulationResults = await Promise.all(simulationPromises);
-            // Filter for successful simulations with SOME positive gross profit
             const successfulSimulations = simulationResults.filter(res => res.simResult !== null && res.simResult.profit > 0n);
-
 
             this.logger.info(`[Engine] ${successfulSimulations.length} opportunities passed simulation with gross profit > 0.`);
             if (successfulSimulations.length === 0) {
@@ -170,8 +171,7 @@ class ArbitrageEngine {
 
                  // Call the injected executeTransaction function
                  this.logger.info(`[Engine] Calling executeTransaction for group ${bestTrade.groupName}...`);
-                  // Ensure the signature matches what txExecutor expects
-                 const execResult = await this.executeTransaction(bestTrade, this.flashSwapManager, bestTrade.profitabilityResult); // Pass necessary parts
+                 const execResult = await this.executeTransaction(bestTrade, this.flashSwapManager, bestTrade.profitabilityResult);
 
                  if (execResult.success) {
                      this.logger.info(`[Engine] >>> Execution Successful! TxHash: ${execResult.txHash} <<<`);
