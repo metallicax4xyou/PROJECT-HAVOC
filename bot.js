@@ -1,18 +1,66 @@
 // bot.js
 
+// --- Ensure Logger is imported FIRST ---
+// Correctly import the logger object
+const logger = require('./utils/logger');
+// --- ---
+
+// --- Other Imports ---
 const { ethers } = require('ethers');
 const config = require('./config'); // Loads combined config object
-const { logger } = require('./utils/logger');
 const { handleError, ArbitrageError } = require('./utils/errorHandler');
-
-// --- Import Core Components ---
-// Use PascalCase for class import
 const FlashSwapManager = require('./core/flashSwapManager');
 const ArbitrageEngine = require('./core/arbitrageEngine');
-const PoolScanner = require('./core/poolScanner'); // Assuming PoolScanner exists
+const PoolScanner = require('./core/poolScanner');
 const QuoteSimulator = require('./core/quoteSimulator');
 const GasEstimator = require('./utils/gasEstimator');
 // --- ---
+
+
+// --- Global Error Handling - Registered AFTER logger import ---
+process.on('unhandledRejection', (reason, promise) => {
+    // Add safety check for logger existence
+    if (logger && typeof logger.fatal === 'function') {
+        logger.fatal('Unhandled Rejection at:', promise, 'reason:', reason);
+    } else {
+        console.error('[FATAL] Unhandled Rejection (logger missing):', promise, 'reason:', reason);
+    }
+    // process.exit(1); // Optional: Exit on unhandled rejection
+});
+
+process.on('uncaughtException', (error) => {
+    // Add safety check for logger existence
+    if (logger && typeof logger.fatal === 'function') {
+        logger.fatal('Uncaught Exception:', error); // This line (around 80) should now work
+    } else {
+        console.error('[FATAL] Uncaught Exception (logger missing):', error);
+    }
+    process.exit(1); // Recommended to exit on uncaught exceptions
+});
+// --- ---
+
+
+// --- Graceful Shutdown Handlers - Registered AFTER logger import ---
+const signals = {
+  'SIGHUP': 1,
+  'SIGINT': 2, // Ctrl+C
+  'SIGTERM': 15
+};
+
+Object.keys(signals).forEach((signal) => {
+  process.on(signal, () => {
+    // Add safety check for logger existence
+    if (logger && typeof logger.warn === 'function') {
+        logger.warn(`[Shutdown] Received ${signal}, shutting down gracefully...`);
+    } else {
+        console.warn(`[Shutdown] Received ${signal}, shutting down gracefully... (logger missing)`);
+    }
+    // Add cleanup logic here if needed
+    process.exit(signals[signal]);
+  });
+});
+// --- ---
+
 
 // --- Main Application Logic ---
 async function main() {
@@ -23,17 +71,12 @@ async function main() {
 
     try {
         // --- Instantiate Core Components ---
-        const provider = require('./utils/provider').getProvider(); // Get provider instance
+        const provider = require('./utils/provider').getProvider();
 
-        // Create instances - Initialization happens in constructors
         flashSwapManager = new FlashSwapManager(); // Constructor handles setup
-        const quoteSimulator = new QuoteSimulator(config, provider); // Pass needed dependencies
-        const gasEstimator = new GasEstimator(provider, config); // Pass needed dependencies
-        const poolScanner = new PoolScanner(config, provider); // Pass needed dependencies
-
-        // --- REMOVED THIS LINE - Initialization done in constructor ---
-        // await flashSwapManager.initialize(config);
-        // --- ---
+        const quoteSimulator = new QuoteSimulator(config, provider);
+        const gasEstimator = new GasEstimator(provider, config);
+        const poolScanner = new PoolScanner(config, provider);
 
         const arbitrageEngine = new ArbitrageEngine(
             config,
@@ -46,57 +89,22 @@ async function main() {
 
         // --- Start the main arbitrage loop ---
         logger.info("[MainLoop] Starting arbitrage cycle...");
-        // Use setInterval for periodic execution
         setInterval(async () => {
             try {
                 await arbitrageEngine.findAndExecuteArbitrage();
             } catch (cycleError) {
-                // Handle errors occurring within a single arbitrage cycle
                 handleError(cycleError, 'ArbitrageCycle');
             }
-        }, config.CYCLE_INTERVAL_MS); // Use interval from config
+        }, config.CYCLE_INTERVAL_MS);
 
-        // Keep the process alive (e.g., for setInterval)
-        // This creates an empty promise that never resolves, keeping the script running.
-        // Handle graceful shutdown elsewhere if needed (e.g., on SIGINT/SIGTERM).
+        // Keep the process alive
         await new Promise(() => {});
 
     } catch (error) {
-        // Handle critical initialization errors
         handleError(error, 'BotInitialization');
-        // Consider exiting if initialization fails critically
-        process.exit(1);
+        process.exit(1); // Exit if initialization fails critically
     }
 }
-
-// --- Global Error Handling (Optional but Recommended) ---
-process.on('unhandledRejection', (reason, promise) => {
-    logger.fatal('Unhandled Rejection at:', promise, 'reason:', reason);
-    // Decide if you need to crash or attempt recovery
-    // process.exit(1); // Crashing on unhandled rejection is often safest
-});
-
-process.on('uncaughtException', (error) => {
-    logger.fatal('Uncaught Exception:', error);
-    // It's generally recommended to exit cleanly after an uncaught exception
-    process.exit(1);
-});
-
-// --- Graceful Shutdown (Example) ---
-const signals = {
-  'SIGHUP': 1,
-  'SIGINT': 2,
-  'SIGTERM': 15
-};
-
-Object.keys(signals).forEach((signal) => {
-  process.on(signal, () => {
-    logger.warn(`[Shutdown] Received ${signal}, shutting down gracefully...`);
-    // Add any cleanup logic here (e.g., waiting for pending tx, closing connections)
-    // logger.info("[Shutdown] Cleanup finished.");
-    process.exit(signals[signal]); // Exit with appropriate code
-  });
-});
 
 
 // --- Start the bot ---
