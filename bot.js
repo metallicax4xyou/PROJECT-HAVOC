@@ -1,96 +1,103 @@
-// bot.js - Main Entry Point
-require('dotenv').config();
-const logger = require('./utils/logger');
-const config = require('./config/index.js');
-const { handleError } = require('./utils/errorHandler');
+// bot.js
 
-// Core Components / Functions
+const { ethers } = require('ethers');
+const config = require('./config'); // Loads combined config object
+const { logger } = require('./utils/logger');
+const { handleError, ArbitrageError } = require('./utils/errorHandler');
+
+// --- Import Core Components ---
+// Use PascalCase for class import
 const FlashSwapManager = require('./core/flashSwapManager');
-const { PoolScanner } = require('./core/poolScanner');
-const { checkProfitability } = require('./core/profitCalculator');
-// --->>> UPDATED IMPORT: Import the function <<<---
-const { executeTransaction } = require('./core/txExecutor');
 const ArbitrageEngine = require('./core/arbitrageEngine');
+const PoolScanner = require('./core/poolScanner'); // Assuming PoolScanner exists
+const QuoteSimulator = require('./core/quoteSimulator');
+const GasEstimator = require('./utils/gasEstimator');
+// --- ---
 
-// Utilities
-const { getSimpleGasParams } = require('./utils/gasEstimator');
-
+// --- Main Application Logic ---
 async function main() {
-    logger.info(`>>> PROJECT HAVOC ARBITRAGE BOT STARTING <<<`);
-    logger.info(`==============================================`);
+    logger.info(">>> PROJECT HAVOC ARBITRAGE BOT STARTING <<<");
+    logger.info("==============================================");
 
-    let engine = null;
+    let flashSwapManager; // Declare here for scope
 
     try {
-        // 1. Initialize FlashSwapManager
-        const flashSwapManager = new FlashSwapManager();
-        await flashSwapManager.initialize();
+        // --- Instantiate Core Components ---
+        const provider = require('./utils/provider').getProvider(); // Get provider instance
 
-        // Get components from flashSwapManager
-        const provider = flashSwapManager.getProvider();
-        const signer = flashSwapManager.getSigner();
-        const flashSwapContract = flashSwapManager.getFlashSwapContract();
-        const nonceManager = flashSwapManager.getNonceManager();
+        // Create instances - Initialization happens in constructors
+        flashSwapManager = new FlashSwapManager(); // Constructor handles setup
+        const quoteSimulator = new QuoteSimulator(config, provider); // Pass needed dependencies
+        const gasEstimator = new GasEstimator(provider, config); // Pass needed dependencies
+        const poolScanner = new PoolScanner(config, provider); // Pass needed dependencies
 
-        // 2. Initialize PoolScanner
-        const poolScanner = new PoolScanner(config, provider);
+        // --- REMOVED THIS LINE - Initialization done in constructor ---
+        // await flashSwapManager.initialize(config);
+        // --- ---
 
-        // --->>> REMOVED instantiation of TxExecutor <<<---
-        // const txExecutor = new TxExecutor(flashSwapManager, nonceManager, provider, getSimpleGasParams); // THIS WAS WRONG
-
-        // 3. Instantiate ArbitrageEngine
-        // --->>> UPDATED: Pass executeTransaction function <<<---
-        engine = new ArbitrageEngine(
-            flashSwapManager,      // Pass manager instance
-            poolScanner,           // Pass scanner instance
-            checkProfitability,    // Pass profitability check function
-            provider,              // Pass provider instance
-            executeTransaction     // Pass the transaction execution function
+        const arbitrageEngine = new ArbitrageEngine(
+            config,
+            flashSwapManager,
+            poolScanner,
+            quoteSimulator,
+            gasEstimator,
+            logger // Pass logger instance
         );
 
-        // 4. Start the Engine's Monitoring Loop
-        await engine.startMonitoring();
+        // --- Start the main arbitrage loop ---
+        logger.info("[MainLoop] Starting arbitrage cycle...");
+        // Use setInterval for periodic execution
+        setInterval(async () => {
+            try {
+                await arbitrageEngine.findAndExecuteArbitrage();
+            } catch (cycleError) {
+                // Handle errors occurring within a single arbitrage cycle
+                handleError(cycleError, 'ArbitrageCycle');
+            }
+        }, config.CYCLE_INTERVAL_MS); // Use interval from config
 
-        // 5. Graceful Shutdown Handling (remains the same)
-        const shutdownHandler = async (signal) => { /* ... */ };
-        process.on('SIGINT', shutdownHandler.bind(null, 'SIGINT'));
-        process.on('SIGTERM', shutdownHandler.bind(null, 'SIGTERM'));
-
-        // Error Handling (remains the same)
-        process.on('uncaughtException', async (error) => {
-             logger.error('!!! UNCAUGHT EXCEPTION !!! Shutting down...', error);
-             handleError(error, 'UncaughtException');
-             try { if (engine && typeof engine.shutdown === 'function') await engine.shutdown(); }
-             catch (shutdownError) { logger.error('Error during emergency shutdown:', shutdownError); }
-             process.exit(1);
-        });
-        process.on('unhandledRejection', async (reason, promise) => {
-            logger.error('!!! UNHANDLED REJECTION !!!', { reason });
-            handleError(reason instanceof Error ? reason : new Error(String(reason)), 'UnhandledRejection');
-        });
+        // Keep the process alive (e.g., for setInterval)
+        // This creates an empty promise that never resolves, keeping the script running.
+        // Handle graceful shutdown elsewhere if needed (e.g., on SIGINT/SIGTERM).
+        await new Promise(() => {});
 
     } catch (error) {
-        logger.error('Error during bot initialization or startup:', error);
+        // Handle critical initialization errors
         handleError(error, 'BotInitialization');
+        // Consider exiting if initialization fails critically
         process.exit(1);
     }
 }
 
-// Execute main function (remains the same)
-main().catch((error) => {
-    logger.error('Critical error executing main function promise:', error);
+// --- Global Error Handling (Optional but Recommended) ---
+process.on('unhandledRejection', (reason, promise) => {
+    logger.fatal('Unhandled Rejection at:', promise, 'reason:', reason);
+    // Decide if you need to crash or attempt recovery
+    // process.exit(1); // Crashing on unhandled rejection is often safest
+});
+
+process.on('uncaughtException', (error) => {
+    logger.fatal('Uncaught Exception:', error);
+    // It's generally recommended to exit cleanly after an uncaught exception
     process.exit(1);
 });
 
-// Simplified shutdown handler for copy-paste
-const shutdownHandler = async (signal) => {
-    logger.info(`${signal} received. Shutting down gracefully...`);
-    // Need engine defined outside try block to be accessible here
-    const engineInstance = typeof engine !== 'undefined' ? engine : null;
-    if (engineInstance && typeof engineInstance.shutdown === 'function') {
-        await engineInstance.shutdown();
-    } else {
-        logger.warn('Engine not available or shutdown method missing during signal handling.');
-    }
-    process.exit(0);
+// --- Graceful Shutdown (Example) ---
+const signals = {
+  'SIGHUP': 1,
+  'SIGINT': 2,
+  'SIGTERM': 15
 };
+
+Object.keys(signals).forEach((signal) => {
+  process.on(signal, () => {
+    logger.warn(`[Shutdown] Received ${signal}, shutting down gracefully...`);
+    // Add any cleanup logic here (e.g., waiting for pending tx, closing connections)
+    // logger.info("[Shutdown] Cleanup finished.");
+    process.exit(signals[signal]); // Exit with appropriate code
+  });
+});
+
+
+// --- Start the bot ---
+main(); // Execute the main function
