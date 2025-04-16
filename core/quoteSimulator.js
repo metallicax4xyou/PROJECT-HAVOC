@@ -2,14 +2,44 @@
 
 const { ethers } = require('ethers');
 const JSBI = require('jsbi');
+const path = require('path'); // Import the path module
 // Import specific V3 SDK components
 const { Pool, TickListDataProvider, TickMath, tickToWord } = require('@uniswap/v3-sdk');
-// Import the ABI for TickLens
-const TickLensABI = require('../abis/TickLens.json');
-// Assuming these utility functions exist and paths are correct
-const { calculateSqrtPriceX96, calculateTick } = require('../utils/priceTickConversions');
-const { getPoolState } = require('../utils/poolState');
-const { logger } = require('../utils/logger'); // Assuming logger exists
+
+// --- Load ABI using path relative to project root ---
+const tickLensAbiPath = path.join(process.cwd(), 'abis', 'TickLens.json');
+let TickLensABI;
+try {
+    TickLensABI = require(tickLensAbiPath);
+} catch (err) {
+    console.error(`FATAL: Could not load TickLens ABI from expected path: ${tickLensAbiPath}`);
+    console.error("Please ensure 'TickLens.json' exists in the 'abis' directory at the project root.");
+    process.exit(1); // Exit if ABI can't be loaded
+}
+// --- End ABI Loading ---
+
+// --- Load Required Utilities ---
+// Assuming logger exists in utils/logger.js relative to project root
+let logger;
+try {
+    const loggerPath = path.join(process.cwd(), 'utils', 'logger.js'); // Adjust if filename/path is different
+    logger = require(loggerPath).logger; // Assuming logger is exported as { logger }
+     if (!logger) throw new Error("Logger object not found in export");
+} catch (err) {
+    console.error(`FATAL: Could not load logger utility from expected path: utils/logger.js`);
+    console.error(err);
+    // Fallback to console if logger fails
+    logger = {
+        info: console.log,
+        warn: console.warn,
+        error: console.error,
+        debug: console.log, // Simple fallback
+        log: console.log // Ensure .log exists if used directly
+    };
+    logger.warn("!!! Logger utility failed to load, falling back to console !!!");
+}
+// --- End Utility Loading ---
+
 
 // --- Constants ---
 // Use the actual TickLens contract address on Arbitrum
@@ -30,6 +60,12 @@ async function getTickDataProvider(poolAddress, poolState, provider) {
     if (!poolState || typeof poolState.tickCurrent !== 'number' || typeof poolState.tickSpacing !== 'number') {
         logger.error(`[TickData-${poolAddress.substring(0,10)}] Invalid poolState provided for tick fetching.`);
         return null;
+    }
+
+    // Ensure TickLensABI was loaded correctly
+    if (!TickLensABI) {
+         logger.error(`[TickData-${poolAddress.substring(0,10)}] TickLens ABI not loaded. Cannot proceed.`);
+         return null;
     }
 
     const tickLens = new ethers.Contract(TICKLENS_ADDRESS, TickLensABI, provider);
@@ -140,10 +176,15 @@ async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn,
         logger.error(`${logPrefix} Missing required arguments for simulation.`);
         return null;
     }
-    if (!poolState.sqrtPriceX96 || !poolState.liquidity || typeof poolState.tickCurrent !== 'number' || !poolState.fee || !poolState.tickSpacing) {
+    if (!poolState.sqrtPriceX96 || !poolState.liquidity || typeof poolState.tickCurrent !== 'number' || !poolState.fee || typeof poolState.tickSpacing !== 'number') {
         logger.error(`${logPrefix} Invalid poolState object provided.`);
         return null;
     }
+     // Add check for tickSpacing validity here as well before using it
+     if (poolState.tickSpacing <= 0) {
+         logger.error(`${logPrefix} Invalid tickSpacing (${poolState.tickSpacing}) in poolState for simulation.`);
+         return null;
+     }
     if (JSBI.equal(amountIn, JSBI.BigInt(0))) {
          logger.warn(`${logPrefix} Input amount is zero, skipping simulation.`);
          // Return state representing no swap occurred
@@ -172,13 +213,22 @@ async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn,
         );
 
         // --- Perform Simulation ---
+        // Determine zeroForOne based on token order
+        // zeroForOne is true if tokenIn's address is lexicographically smaller than tokenOut's address
+        const zeroForOne = tokenIn.address.toLowerCase() < tokenOut.address.toLowerCase();
+        logger.debug(`${logPrefix} zeroForOne: ${zeroForOne} (tokenIn: ${tokenIn.address}, tokenOut: ${tokenOut.address})`);
+
+
         // Simulate the swap using swapExactInput method from the SDK Pool instance
-        // The third parameter is the amountIn (JSBI)
-        // The fourth parameter (optional) is sqrtPriceLimitX96 - setting to null for no limit
-        const [amountOut, poolAfter] = await pool.simulateSwap(
-            false, // zeroForOne: true if tokenIn is token0, false otherwise. Let pool figure it out.
+        // Pass the correct zeroForOne flag
+        // Note: The SDK might have changed method names or arguments. This call matches common examples.
+        // Ensure this call signature is correct for the version of @uniswap/v3-sdk you are using.
+        const [amountOut, poolAfter] = await pool.simulateSwap( // Check if 'simulateSwap' is correct; might be 'getOutputAmount' or similar depending on SDK version/intent
+            zeroForOne,
             amountIn,
-            null // sqrtPriceLimitX96: Optional price limit, null for no limit
+            {
+                sqrtPriceLimitX96: null // Provide price limit if needed, null for none
+            }
         );
 
         // --- Process Results ---
@@ -217,22 +267,37 @@ async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn,
  */
 async function simulateArbitrage(opportunity) {
     const { poolBorrow, poolSwap, token0, token1, flashLoanAmount, provider } = opportunity;
-    const logPrefix = `[SimArb Group: ${token0.symbol}_${token1.symbol}]`; // Assuming token0/1 are Token instances
+    const logPrefix = `[SimArb Group: ${token0?.symbol || '?'}_${token1?.symbol || '?'}]`; // Safer logging
+
+    // Basic validation
+     if (!poolBorrow || !poolSwap || !token0 || !token1 || !flashLoanAmount || !provider) {
+         logger.error(`${logPrefix} Invalid opportunity object received. Missing required fields.`);
+         logger.debug(`${logPrefix} Received opportunity: ${JSON.stringify(opportunity)}`); // Log the object
+         return null;
+     }
 
     logger.info(`${logPrefix} Starting simulation (using direct pool simulation with fetched ticks)...`);
-    logger.info(`${logPrefix} Path: ${token0.symbol} -> ${token1.symbol} (on ${poolSwap.address}) -> ${token0.symbol} (on ${poolBorrow.address})`); // Corrected swap order for standard arb notation
+    // Path: Borrow token0 (flash loan), Swap token0 -> token1 (on poolSwap), Swap token1 -> token0 (on poolBorrow to repay loan)
+    logger.info(`${logPrefix} Path: ${token0.symbol} -> ${token1.symbol} (on ${poolSwap.address}) -> ${token0.symbol} (on ${poolBorrow.address})`);
 
     // --- Define Tokens and Amount ---
     // We borrow token0, swap it for token1, then swap token1 back to token0
-    const initialBorrowAmountJSBI = JSBI.BigInt(flashLoanAmount.toString()); // Ensure flashLoanAmount is BigInt/String from config
+    let initialBorrowAmountJSBI;
+    try {
+        initialBorrowAmountJSBI = JSBI.BigInt(flashLoanAmount.toString()); // Ensure flashLoanAmount is BigInt/String convertible
+    } catch (e) {
+        logger.error(`${logPrefix} Invalid flashLoanAmount format: ${flashLoanAmount}`);
+        return null;
+    }
+
 
     // --- Simulate Hop 1: Borrow token0, Swap for token1 on `poolSwap` ---
     logger.info(`${logPrefix} Simulating Hop 1: ${ethers.formatUnits(initialBorrowAmountJSBI.toString(), token0.decimals)} ${token0.symbol} -> ${token1.symbol} on pool ${poolSwap.address} (Fee: ${poolSwap.fee})`);
     const hop1Result = await simulateSingleSwapExactIn(
         poolSwap, // The state of the pool we are swapping ON
-        token0,   // Input token for this hop
-        token1,   // Output token for this hop
-        initialBorrowAmountJSBI, // Amount of token0 we are swapping
+        token0,   // Input token for this hop (Token object)
+        token1,   // Output token for this hop (Token object)
+        initialBorrowAmountJSBI, // Amount of token0 we are swapping (JSBI)
         provider
     );
 
@@ -250,9 +315,9 @@ async function simulateArbitrage(opportunity) {
     logger.info(`${logPrefix} Simulating Hop 2: ${ethers.formatUnits(amountToken1Received.toString(), token1.decimals)} ${token1.symbol} -> ${token0.symbol} on pool ${poolBorrow.address} (Fee: ${poolBorrow.fee})`);
     const hop2Result = await simulateSingleSwapExactIn(
         poolBorrow, // The state of the pool we are swapping ON (the borrow pool)
-        token1,     // Input token for this hop
-        token0,     // Output token for this hop
-        amountToken1Received, // Amount received from Hop 1
+        token1,     // Input token for this hop (Token object)
+        token0,     // Output token for this hop (Token object)
+        amountToken1Received, // Amount received from Hop 1 (JSBI)
         provider
     );
 
@@ -287,7 +352,4 @@ async function simulateArbitrage(opportunity) {
 
 module.exports = {
     simulateArbitrage,
-    // Potentially export others if needed by external modules, but maybe not needed if only used internally
-    // getTickDataProvider,
-    // simulateSingleSwapExactIn
 };
