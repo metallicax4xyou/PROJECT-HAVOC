@@ -8,101 +8,148 @@ const ErrorHandler = require('../utils/errorHandler'); // Assuming error handler
 
 // Helper to safely stringify for logging
 function safeStringify(obj, indent = 2) {
-    try { return JSON.stringify(obj, (_, value) => typeof value === 'bigint' ? value.toString() : value, indent); }
-    catch (e) { return "[Unstringifiable Object]"; }
+    // Handle BigInt serialization
+    try {
+        return JSON.stringify(obj, (_, value) =>
+            typeof value === 'bigint' ? value.toString() : value,
+        indent);
+    } catch (e) {
+        return "[Unstringifiable Object]";
+    }
 }
 
-// Minimal Tick Data Provider Stub
+// Minimal Tick Data Provider Stub - THIS IS LIKELY THE BOTTLENECK
+// It doesn't provide real tick data, which V3 simulations need.
 const simpleTickProvider = {
-    getTick: async (tick) => Promise.resolve({ liquidityNet: 0n, liquidityGross: 0n }),
-    nextInitializedTickWithinOneWord: async (tick, lte, tickSpacing) => Promise.resolve([tick, false])
+    getTick: async (tick) => {
+        // logger.debug(`[TickProviderStub] getTick called for tick: ${tick}`); // Optional: Log tick calls
+        // Returns a default structure assuming no specific liquidity info at the tick.
+        // The actual Uniswap SDK might expect more detailed info for accurate simulation,
+        // especially concerning initialized ticks and liquidity distribution.
+        return {
+            liquidityNet: 0n, // Represented as bigint
+            liquidityGross: 0n, // Represented as bigint
+            // Other potential fields like feeGrowthOutside0X128, initialized, etc., are missing.
+        };
+    },
+    // This is a very basic stub. A real provider would need to search the bitmap.
+    nextInitializedTickWithinOneWord: async (tick, lte, tickSpacing) => {
+        // logger.debug(`[TickProviderStub] nextInitializedTickWithinOneWord called for tick: ${tick}, lte: ${lte}, spacing: ${tickSpacing}`);
+        // This stub simply returns the *input* tick and 'false', indicating it didn't find
+        // an *initialized* tick different from the input one within the word.
+        // This is likely incorrect for almost all real scenarios.
+        // Returning the input tick might cause the SDK to think there's no liquidity boundary
+        // or no liquidity available beyond the current tick.
+        // A more realistic (but still basic) stub *might* return +/- tickSpacing, but even
+        // that lacks knowledge of actual initialized ticks.
+        const nextTick = lte ? tick - tickSpacing : tick + tickSpacing;
+        // Even returning the next potential tick doesn't say if it's *initialized*.
+        // Forcing 'false' as initialized status.
+        return [lte ? tick - tickSpacing : tick + tickSpacing, false]; // Return next potential tick based on spacing, but mark as uninitialized
+    }
 };
 
 /**
  * Simulates a single swap using Uniswap V3 SDK based on live pool state.
  */
 const simulateSingleSwapExactIn = async (poolState, tokenIn, tokenOut, amountIn) => {
-    const log = logger || console; // Define log for this scope
+    const log = logger || console; // Ensure log is defined
     const context = `SimSwap ${tokenIn?.symbol}->${tokenOut?.symbol} (${poolState?.address}, ${poolState?.fee}bps)`;
 
-    // Input Validation
+    // --- Input Validation ---
     if (!poolState || !tokenIn || !tokenOut || !poolState.sqrtPriceX96 || !poolState.liquidity || typeof poolState.tick === 'undefined' || !poolState.fee) {
         log.error(`[${context}] Invalid pool state or tokens for simulation.`);
         log.debug(`[${context}] PoolState: ${safeStringify(poolState)}, TokenIn: ${tokenIn?.symbol}, TokenOut: ${tokenOut?.symbol}, AmountIn: ${amountIn?.toString()}`);
+        return null; // Return null to indicate failure
+    }
+    if (!(tokenIn instanceof Token) || !(tokenOut instanceof Token)) {
+        log.error(`[${context}] tokenIn or tokenOut is not an SDK Token instance.`);
         return null;
     }
-    if (amountIn <= 0n) {
-        log.warn(`[${context}] AmountIn is zero or negative.`);
-        return { amountOut: 0n, sdkTokenIn: tokenIn, sdkTokenOut: tokenOut, trade: null }; // Return zero output but valid structure
-    }
-
+     if (amountIn <= 0n) { // Use bigint comparison
+         log.warn(`[${context}] AmountIn is zero or negative (${amountIn?.toString()}). Cannot simulate.`);
+         // Return a structure indicating zero output, but not necessarily an error
+         return { amountOut: 0n, sdkTokenIn: tokenIn, sdkTokenOut: tokenOut, trade: null };
+     }
+     const amountInStr = amountIn.toString(); // Convert bigint to string for SDK
+     if (!/^\d+$/.test(amountInStr)) {
+         log.error(`[${context}] Invalid amountIn format for CurrencyAmount: ${amountInStr}`);
+         return null;
+     }
+    // --- End Input Validation ---
 
     try {
         let tokenA, tokenB;
-        // Ensure tokenIn and tokenOut are SDK Token instances
-        if (!(tokenIn instanceof Token) || !(tokenOut instanceof Token)) {
-             log.error(`[${context}] tokenIn or tokenOut is not an SDK Token instance.`);
-             return null;
-        }
-
+        // Determine token order for the Pool constructor
         if (tokenIn.sortsBefore(tokenOut)) {
             tokenA = tokenIn; tokenB = tokenOut;
+            // log.debug(`[${context}] Token Order (sortsBefore): Input ${tokenIn.symbol} is tokenA.`);
         } else {
-            tokenA = tokenOut; tokenB = tokenIn;
+            tokenA = tokenOut; tokenB = tokenIn; // Pool constructor needs sorted tokens
+            // log.debug(`[${context}] Token Order (sortsBefore): Input ${tokenIn.symbol} is tokenB (Pool tokens: ${tokenA.symbol}/${tokenB.symbol}).`);
         }
 
         // Ensure pool state values are valid strings/numbers for the SDK
         const sqrtPriceX96Str = poolState.sqrtPriceX96.toString();
         const liquidityStr = poolState.liquidity.toString();
-        const tickNumber = Number(poolState.tick); // SDK expects number
+        const tickNumber = Number(poolState.tick); // SDK expects number for tick
 
         if (isNaN(tickNumber)) {
-            log.error(`[${context}] Invalid tick number: ${poolState.tick}`);
+            log.error(`[${context}] Invalid tick number provided: ${poolState.tick}`);
             return null;
         }
 
-
+        // --- Create Uniswap SDK Pool Instance ---
+        // This uses the live state fetched by PoolScanner
         const pool = new Pool(
-            tokenA, tokenB, poolState.fee,
-            sqrtPriceX96Str,
-            liquidityStr,
-            tickNumber, // Pass the number here
-            simpleTickProvider // Using the stub provider
+            tokenA,             // The token that sorts first (Token instance)
+            tokenB,             // The token that sorts second (Token instance)
+            poolState.fee,      // Fee tier in bips (e.g., 500 for 0.05%)
+            sqrtPriceX96Str,    // Current sqrt(price) as string
+            liquidityStr,       // Current liquidity as string
+            tickNumber,         // Current tick index as number
+            simpleTickProvider  // *** Using the problematic STUB Tick Provider ***
         );
 
+        // --- Create Route ---
+        // For a single pool swap, the route just contains that one pool
         const swapRoute = new Route([pool], tokenIn, tokenOut);
-        if (!swapRoute.pools || swapRoute.pools.length === 0) {
-            log.warn(`[${context}] No valid pool in route constructed by SDK.`); return null;
-        }
 
-        // Ensure amountIn is a valid string representation for CurrencyAmount
-         const amountInStr = amountIn.toString();
-         if (!/^\d+$/.test(amountInStr)) {
-            log.error(`[${context}] Invalid amountIn format for CurrencyAmount: ${amountInStr}`);
-            return null;
-         }
-
+        // --- Create Trade ---
+        // This performs the simulation using the SDK's internal logic
         const trade = await Trade.fromRoute(
-            swapRoute,
-            CurrencyAmount.fromRawAmount(tokenIn, amountInStr), // Use string here
-            TradeType.EXACT_INPUT
+            swapRoute,                                          // The route object
+            CurrencyAmount.fromRawAmount(tokenIn, amountInStr), // Input amount as CurrencyAmount
+            TradeType.EXACT_INPUT                               // Specify we know the exact input amount
         );
 
-        // Defensive check for trade result
+        // --- Process Result ---
         if (!trade || !trade.outputAmount || !trade.outputAmount.quotient) {
              log.warn(`[${context}] SDK Trade.fromRoute did not return a valid trade object or output amount.`);
+             log.debug(`[${context}] Trade object: ${safeStringify(trade)}`);
              return null;
         }
 
+        // Extract output amount as bigint
         const amountOutBI = BigInt(trade.outputAmount.quotient.toString());
-        return { amountOut: amountOutBI, sdkTokenIn: tokenIn, sdkTokenOut: tokenOut, trade: trade };
+
+        // Return detailed result
+        return {
+            amountOut: amountOutBI,
+            sdkTokenIn: tokenIn,
+            sdkTokenOut: tokenOut,
+            trade: trade // Include the trade object for price impact etc.
+        };
 
     } catch (error) {
+        // Catch errors during SDK interaction
         log.error(`[${context}] Error during single swap simulation: ${error.message}`);
-        // Add more detailed error logging if possible
-        log.debug(`[${context}] Error Details: ${safeStringify(error)}`);
-        log.debug(`[${context}] Failed with Pool State: ${safeStringify(poolState)}, AmountIn: ${amountIn?.toString()}`);
-        return null;
+        log.debug(`[${context}] Error Stack: ${error.stack}`);
+        log.debug(`[${context}] Failed with Pool State: ${safeStringify(poolState)}, AmountIn: ${amountInStr}`);
+        // Log specific SDK errors if available
+        if (error.isInsufficientReservesError) { log.error(`[${context}] SDK Error: Insufficient Reserves.`); }
+        if (error.isInsufficientInputAmountError) { log.error(`[${context}] SDK Error: Insufficient Input Amount.`); }
+        return null; // Return null on error
     }
 };
 
@@ -113,7 +160,7 @@ const simulateSingleSwapExactIn = async (poolState, tokenIn, tokenOut, amountIn)
 const simulateArbitrage = async (opportunity, initialAmountToken0) => {
     const log = logger || console; // Ensure log is defined
 
-    // Input Validation
+    // --- Input Validation ---
      if (!opportunity || !opportunity.token0 || !opportunity.token1 || !opportunity.poolHop1 || !opportunity.poolHop2 || !opportunity.group || !initialAmountToken0) {
          log.error("[SimArb FATAL] Invalid opportunity structure or initial amount.", safeStringify({ opportunity, initialAmountToken0 }));
          return { profitable: false, error: "Invalid opportunity structure or initial amount", grossProfit: -1n, initialAmountToken0: initialAmountToken0 || 0n, finalAmountToken0: 0n, amountToken1Received: 0n };
@@ -130,21 +177,23 @@ const simulateArbitrage = async (opportunity, initialAmountToken0) => {
 
     const initialAmountFormatted = ethers.formatUnits(initialAmountToken0, token0.decimals);
 
-    // Logging Start
+    // --- Logging Start ---
     log.info(`--- Simulation Start (${logPrefix}) ---`);
     log.info(`[SIM] Borrow Amount: ${initialAmountFormatted} ${token0.symbol}`);
     log.info(`[SIM] Path: Pool1 (${poolHop1.address} / ${poolHop1.fee}bps) -> Pool2 (${poolHop2.address} / ${poolHop2.fee}bps)`);
 
     try {
-        // --- Simulate Hop 1 ---
+        // --- Simulate Hop 1 (Token0 -> Token1) ---
         const hop1Result = await simulateSingleSwapExactIn(poolHop1, token0, token1, initialAmountToken0);
-        if (!hop1Result || typeof hop1Result.amountOut === 'undefined') {
+
+        if (!hop1Result || typeof hop1Result.amountOut !== 'bigint') { // Check for null or invalid amountOut
              log.warn(`[${logPrefix}] Hop 1 simulation failed or returned invalid structure.`);
              log.debug(`[${logPrefix}] Hop 1 Result: ${safeStringify(hop1Result)}`);
              log.info(`--- Simulation END (${logPrefix}) - FAILED (Hop 1 Sim) ---`);
              return { profitable: false, error: 'Hop 1 simulation failed internally', initialAmountToken0, finalAmountToken0: 0n, amountToken1Received: 0n, grossProfit: -1n };
         }
-        const amountToken1Received = hop1Result.amountOut;
+
+        const amountToken1Received = hop1Result.amountOut; // This is a bigint
         const amountHop1Formatted = ethers.formatUnits(amountToken1Received, token1.decimals);
         const hop1FeePercent = new Percent(poolHop1.fee, 1_000_000);
         // Defensive check for trade object before accessing properties
@@ -156,13 +205,14 @@ const simulateArbitrage = async (opportunity, initialAmountToken0) => {
         log.info(`    - Fee Tier: ${hop1FeePercent.toFixed(3)}%`);
         log.info(`    - Price Impact: ~${priceImpactHop1}%`);
 
-        if (amountToken1Received <= 0n) {
-             log.warn(`[${logPrefix}] Hop 1 resulted in 0 output.`);
+        if (amountToken1Received <= 0n) { // Use bigint comparison
+             log.warn(`[${logPrefix}] Hop 1 resulted in 0 output. Cannot proceed to Hop 2.`);
              log.info(`--- Simulation END (${logPrefix}) - FAILED (Zero Output Hop 1) ---`);
              return { profitable: false, error: 'Hop 1 simulation resulted in zero output', initialAmountToken0, finalAmountToken0: 0n, amountToken1Received: 0n, grossProfit: -1n };
         }
 
         // --- START: Added Debug Logging for Hop 2 ---
+        // Check poolHop2 state *before* attempting the simulation
         log.debug(`[DEBUG] --- Preparing for Hop 2 Simulation (${logPrefix}) ---`);
         log.debug(`[DEBUG] Pool for Hop 2: ${poolHop2.address}`);
         log.debug(`    - Fee Tier: ${poolHop2.fee}bps`);
@@ -180,7 +230,7 @@ const simulateArbitrage = async (opportunity, initialAmountToken0) => {
         log.debug(`    - Input Amount for Hop 2 (Sim Arg): ${amountToken1Received.toString()} (Raw) / ${ethers.formatUnits(amountToken1Received, token1.decimals)} ${token1.symbol}`);
         // --- END: Added Debug Logging for Hop 2 ---
 
-        // --- Simulate Hop 2 ---
+        // --- Simulate Hop 2 (Token1 -> Token0) ---
         const hop2Result = await simulateSingleSwapExactIn(poolHop2, token1, token0, amountToken1Received); // Use token1 as input, token0 as output
 
         // More robust check for Hop 2 result
@@ -191,12 +241,12 @@ const simulateArbitrage = async (opportunity, initialAmountToken0) => {
              // Ensure amountToken1Received is carried over even on failure for logging/debugging
              return { profitable: false, error: 'Hop 2 simulation failed internally', initialAmountToken0, finalAmountToken0: 0n, amountToken1Received, grossProfit: -1n };
         }
-        const finalAmountToken0 = hop2Result.amountOut;
+
+        const finalAmountToken0 = hop2Result.amountOut; // This is a bigint
         const finalAmountFormatted = ethers.formatUnits(finalAmountToken0, token0.decimals);
         const hop2FeePercent = new Percent(poolHop2.fee, 1_000_000);
         // Defensive check for trade object before accessing properties
         const priceImpactHop2 = hop2Result.trade?.priceImpact?.toSignificant(3) || 'N/A';
-
 
         log.info(`[SIM] Hop 2 (${token1.symbol} -> ${token0.symbol} @ ${poolHop2.fee}bps):`);
         log.info(`    - Input:  ${amountHop1Formatted} ${token1.symbol}`);
@@ -205,8 +255,9 @@ const simulateArbitrage = async (opportunity, initialAmountToken0) => {
         log.info(`    - Price Impact: ~${priceImpactHop2}%`);
 
         // --- Calculate & Log Profit ---
-        const grossProfit = finalAmountToken0 - initialAmountToken0;
-        const profitable = grossProfit > 0n;
+        // Ensure both are bigints before subtraction
+        const grossProfit = finalAmountToken0 - initialAmountToken0; // Both should be bigint
+        const profitable = grossProfit > 0n; // Bigint comparison
         const grossProfitFormatted = ethers.formatUnits(grossProfit, token0.decimals);
 
         log.info(`[SIM] Gross Profit: ${grossProfitFormatted} ${token0.symbol}`);
@@ -214,20 +265,40 @@ const simulateArbitrage = async (opportunity, initialAmountToken0) => {
         log.info(`--- Simulation END (${logPrefix}) ---`);
 
         return {
-            profitable, initialAmountToken0, finalAmountToken0, amountToken1Received, grossProfit, error: null,
-            details: { group, token0Symbol: token0.symbol, token1Symbol: token1.symbol, hop1Pool: poolHop1.address, hop2Pool: poolHop2.address, hop1Fee: poolHop1.fee, hop2Fee: poolHop2.fee }
+            profitable,
+            initialAmountToken0, // bigint
+            finalAmountToken0,   // bigint
+            amountToken1Received,// bigint
+            grossProfit,         // bigint
+            error: null,
+            details: {
+                group,
+                token0Symbol: token0.symbol,
+                token1Symbol: token1.symbol,
+                hop1Pool: poolHop1.address,
+                hop2Pool: poolHop2.address,
+                hop1Fee: poolHop1.fee,
+                hop2Fee: poolHop2.fee
+            }
         };
 
     } catch (error) {
+        // Catch high-level errors in simulateArbitrage logic
         log.error(`[${logPrefix}] UNEXPECTED High-Level Error in simulateArbitrage: ${error.message}`);
-        // Add stack trace if available
         if (error.stack) { log.error(`Stack Trace: ${error.stack}`); }
         if (ErrorHandler && typeof ErrorHandler.handleError === 'function') { ErrorHandler.handleError(error, logPrefix); }
         log.info(`--- Simulation END (${logPrefix}) - FAILED (Unexpected) ---`);
         // Ensure amountToken1Received is included in the return object even on error, if available before the crash
-        const hop1Output = typeof amountToken1Received !== 'undefined' ? amountToken1Received : 0n;
-        return { profitable: false, error: `Unexpected simulation error: ${error.message}`, initialAmountToken0, finalAmountToken0: 0n, amountToken1Received: hop1Output, grossProfit: -1n };
+        const hop1Output = typeof amountToken1Received !== 'undefined' ? amountToken1Received : 0n; // bigint
+        return {
+            profitable: false,
+            error: `Unexpected simulation error: ${error.message}`,
+            initialAmountToken0: initialAmountToken0, // bigint
+            finalAmountToken0: 0n, // bigint
+            amountToken1Received: hop1Output, // bigint
+            grossProfit: -1n // bigint
+        };
     }
 };
 
-module.exports = { simulateArbitrage, simulateSingleSwapExactIn }; // Export both if needed elsewhere, otherwise just simulateArbitrage
+module.exports = { simulateArbitrage, simulateSingleSwapExactIn }; // Export both
