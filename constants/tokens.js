@@ -19,19 +19,19 @@ const ARBITRUM_TOKENS = {
         'WETH',
         'Wrapped Ether'
     ),
-    USDC: new Token( // Note: There are multiple USDC versions, ensure this is the desired one (likely the bridged Circle USDC)
+    USDC: new Token( // Representing native Arbitrum USDC
         ARBITRUM_CHAIN_ID,
-        '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', // Official Bridged USDC (from Circle) on Arbitrum
+        '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', // Official Native USDC on Arbitrum
         6,
         'USDC',
         'USD Coin'
     ),
-     USDC_e: new Token( // Bridged from Ethereum (often has .e suffix) - Include if needed by specific pools
+     USDC_e: new Token( // Representing bridged USDC from Ethereum (often has .e suffix)
          ARBITRUM_CHAIN_ID,
-         '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8', // Older Bridged USDC.e on Arbitrum
+         '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8', // Bridged USDC.e on Arbitrum
          6,
          'USDC.e',
-         'USD Coin (Arb1)'
+         'USD Coin Bridged' // Keep distinct name if using both
      ),
     USDT: new Token(
         ARBITRUM_CHAIN_ID,
@@ -40,10 +40,29 @@ const ARBITRUM_TOKENS = {
         'USDT',
         'Tether USD'
     ),
-    // Add other tokens if your pool definitions require them
-    // e.g., WBTC, ARB, etc.
-    // WBTC: new Token(ARBITRUM_CHAIN_ID, '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f', 8, 'WBTC', 'Wrapped BTC'),
-    // ARB: new Token(ARBITRUM_CHAIN_ID, '0x912CE59144191C1204E64559FE8253a0e49E6548', 18, 'ARB', 'Arbitrum'),
+    // --- ADDED TOKENS ---
+    ARB: new Token(
+        ARBITRUM_CHAIN_ID,
+        '0x912CE59144191C1204E64559FE8253a0e49E6548', // Verified ARB
+        18,
+        'ARB',
+        'Arbitrum'
+    ),
+    DAI: new Token(
+        ARBITRUM_CHAIN_ID,
+        '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1', // Verified DAI
+        18,
+        'DAI',
+        'Dai Stablecoin'
+    ),
+    WBTC: new Token(
+        ARBITRUM_CHAIN_ID,
+        '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f', // Verified WBTC
+        8, // WBTC has 8 decimals
+        'WBTC',
+        'Wrapped BTC'
+    ),
+    // --- END ADDED TOKENS ---
 };
 
 // --- Export based on current network ---
