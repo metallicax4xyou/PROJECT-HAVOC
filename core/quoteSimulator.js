@@ -7,8 +7,10 @@ if (!BigInt.prototype.toJSON) {
 const { ethers } = require('ethers');
 const JSBI = require('jsbi');
 const path = require('path');
-// --- *** Import TickMath *** ---
-const { Pool, TickListDataProvider, TickMath } = require('@uniswap/v3-sdk'); // Removed tickToWord, Added TickMath
+// Remove TickMath unless needed elsewhere, remove tickToWord
+const { Pool, TickListDataProvider, TickMath } = require('@uniswap/v3-sdk'); // Keep TickMath for MIN/MAX constants if needed
+// --- *** Import the local utility *** ---
+const { tickToWord } = require('../utils/tickUtils'); // Use the local helper
 // --- ---
 
 // Load ABI
@@ -33,52 +35,45 @@ async function getTickDataProvider(poolAddress, poolState, provider) {
     const logPrefix = `[TickData-${poolAddress?.substring(0, 10) || 'N/A'}]`;
     currentLogger.debug(`${logPrefix} Entering getTickDataProvider...`);
 
-    if (!poolAddress || !ethers.isAddress(poolAddress)) { /* ... validation ... */ return null; }
-    if (!poolState || typeof poolState.tick !== 'number' || typeof poolState.tickSpacing !== 'number') { /* ... validation ... */ return null; }
-    if (!provider) { /* ... validation ... */ return null; }
-    if (!TickLensABI) { /* ... validation ... */ return null; }
+    // Input validation...
+    if (!poolAddress || !ethers.isAddress(poolAddress)) { currentLogger.error(`${logPrefix} Invalid poolAddress.`); return null; }
+    if (!poolState || typeof poolState.tick !== 'number' || typeof poolState.tickSpacing !== 'number') { currentLogger.error(`${logPrefix} Invalid poolState (tick/tickSpacing).`); return null; }
+    if (!provider) { currentLogger.error(`${logPrefix} Provider missing.`); return null; }
+    if (!TickLensABI) { currentLogger.error(`${logPrefix} TickLens ABI missing.`); return null; }
 
     let tickLens;
     try { tickLens = new ethers.Contract(TICKLENS_ADDRESS, TickLensABI, provider); }
-    catch (contractError) { /* ... error handling ... */ return null; }
+    catch (contractError) { currentLogger.error(`${logPrefix} Failed TickLens instance: ${contractError.message}`); return null; }
 
     try {
         const tickCurrent = poolState.tick;
         const tickSpacing = poolState.tickSpacing;
         if (tickSpacing <= 0) { currentLogger.error(`${logPrefix} Invalid tickSpacing (${tickSpacing}).`); return null; }
 
-        // --- *** CORRECTED: Use TickMath.tickToWord with compressed tick *** ---
-        const compressedTickCurrent = Math.floor(tickCurrent / tickSpacing);
-        const currentWordPos = TickMath.tickToWord(compressedTickCurrent); // Use SDK method
+        // --- *** CORRECTED: Use local tickToWord utility *** ---
+        const currentWordPos = tickToWord(tickCurrent, tickSpacing);
+        if (currentWordPos === null) { // Handle potential null return from utility
+             currentLogger.error(`${logPrefix} Failed to calculate word position for tick ${tickCurrent}, spacing ${tickSpacing}.`);
+             return null;
+        }
         // --- *** ---
         const lowerWordPos = currentWordPos - 1;
         const upperWordPos = currentWordPos + 1;
 
         currentLogger.info(`${logPrefix} Fetching ticks for words: ${lowerWordPos}, ${currentWordPos}, ${upperWordPos} (Tick: ${tickCurrent}, Spacing: ${tickSpacing})`);
 
-        // ... rest of tick fetching logic (populatedTicksPromises, Promise.allSettled) remains the same ...
-         const populatedTicksPromises = [
-              tickLens.getPopulatedTicksInWordRange(poolAddress, lowerWordPos, lowerWordPos).catch(e => { currentLogger.error(`${logPrefix} Error fetching word ${lowerWordPos}: ${e.message}`); return Promise.reject(e); }),
-              tickLens.getPopulatedTicksInWordRange(poolAddress, currentWordPos, currentWordPos).catch(e => { currentLogger.error(`${logPrefix} Error fetching word ${currentWordPos}: ${e.message}`); return Promise.reject(e); }),
-              tickLens.getPopulatedTicksInWordRange(poolAddress, upperWordPos, upperWordPos).catch(e => { currentLogger.error(`${logPrefix} Error fetching word ${upperWordPos}: ${e.message}`); return Promise.reject(e); }),
-          ];
-         const populatedTicksResults = await Promise.allSettled(populatedTicksPromises);
-         currentLogger.debug(`${logPrefix} Tick fetch results settled:`, populatedTicksResults);
-         let allFetchedTicks = [];
-         let fetchFailed = false;
-         populatedTicksResults.forEach((result, index) => { /* ... process results ... */ });
-         if (fetchFailed && allFetchedTicks.length === 0) { /* ... handle critical failure ... */ return null; }
-         if (allFetchedTicks.length === 0) { /* ... handle no ticks found ... */ return new TickListDataProvider([], tickSpacing); }
+        // ... rest of tick fetching logic ...
+        const populatedTicksPromises = [ /* ... */ ];
+        const populatedTicksResults = await Promise.allSettled(populatedTicksPromises);
+        let allFetchedTicks = [];
+        let fetchFailed = false;
+        populatedTicksResults.forEach((result, index) => { /* ... */ });
+        if (fetchFailed && allFetchedTicks.length === 0) { /* ... */ return null; }
+        if (allFetchedTicks.length === 0) { /* ... */ return new TickListDataProvider([], tickSpacing); }
 
-
-        // ... formatting ticks logic remains the same ...
-         currentLogger.debug(`${logPrefix} Formatting ${allFetchedTicks.length} fetched ticks...`);
-         const formattedTicks = allFetchedTicks
-             .map(tick => { /* ... */ })
-             .filter(tick => tick !== null)
-             .sort((a, b) => a.tick - b.tick);
-         if (formattedTicks.length === 0) { /* ... handle formatting failure ... */ return null; }
-
+        // ... formatting ticks logic ...
+        const formattedTicks = allFetchedTicks.map(tick => { /* ... */ }).filter(tick => tick !== null).sort((a, b) => a.tick - b.tick);
+        if (formattedTicks.length === 0) { /* ... */ return null; }
 
         const minTick = formattedTicks[0]?.tick ?? 'N/A';
         const maxTick = formattedTicks[formattedTicks.length - 1]?.tick ?? 'N/A';
@@ -87,7 +82,6 @@ async function getTickDataProvider(poolAddress, poolState, provider) {
         return new TickListDataProvider(formattedTicks, tickSpacing);
 
     } catch (error) {
-        // Catch setup errors BEFORE contract calls
         currentLogger.error(`${logPrefix} Unexpected error within getTickDataProvider setup:`, error);
         return null;
     }
@@ -95,33 +89,27 @@ async function getTickDataProvider(poolAddress, poolState, provider) {
 
 
 // --- Single Swap Simulation Function ---
-// No changes needed here if getTickDataProvider is fixed
+// No changes needed here if getTickDataProvider works
 async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn, provider) {
     const currentLogger = logger || console;
     const logPrefix = `[SimSwap Pool: ${poolState?.address?.substring(0, 10) || 'N/A'}]`;
 
-    // Input Validation
-    if (!poolState || !tokenIn || !tokenOut || typeof amountIn === 'undefined' || !provider) { currentLogger.error(`${logPrefix} Missing required arguments.`); return null; }
+    // Input Validation...
+    if (!poolState || !tokenIn || !tokenOut || typeof amountIn === 'undefined' || !provider) { /* ... */ return null; }
     let amountInJSBI;
     try { amountInJSBI = JSBI.BigInt(amountIn.toString()); }
-    catch (e) { currentLogger.error(`${logPrefix} Invalid amountIn: ${amountIn}`); return null; }
-    if (!poolState.sqrtPriceX96 || !poolState.liquidity || typeof poolState.tick !== 'number' || typeof poolState.feeBps !== 'number' || typeof poolState.tickSpacing !== 'number') {
-        currentLogger.error(`${logPrefix} Invalid poolState object. Check tick/feeBps/tickSpacing.`);
-        currentLogger.debug(`${logPrefix} Pool State: ${JSON.stringify(poolState)}`); return null;
-    }
-    if (poolState.tickSpacing <= 0) { currentLogger.error(`${logPrefix} Invalid tickSpacing (${poolState.tickSpacing}).`); return null; }
-    if (JSBI.equal(amountInJSBI, JSBI.BigInt(0))) { currentLogger.warn(`${logPrefix} Input amount zero.`); return { amountOut: JSBI.BigInt(0), /* ... */ }; }
+    catch (e) { /* ... */ return null; }
+    if (!poolState.sqrtPriceX96 || !poolState.liquidity || typeof poolState.tick !== 'number' || typeof poolState.feeBps !== 'number' || typeof poolState.tickSpacing !== 'number') { /* ... */ return null; }
+    if (poolState.tickSpacing <= 0) { /* ... */ return null; }
+    if (JSBI.equal(amountInJSBI, JSBI.BigInt(0))) { /* ... */ }
 
     currentLogger.info(`${logPrefix} Simulating exact IN: ${ethers.formatUnits(amountInJSBI.toString(), tokenIn.decimals)} ${tokenIn.symbol} -> ${tokenOut.symbol}`);
 
     // Get Tick Data Provider
     currentLogger.debug(`${logPrefix} Attempting to get tick data provider...`);
     const tickProviderState = { tick: poolState.tick, tickSpacing: poolState.tickSpacing };
-    const tickDataProvider = await getTickDataProvider(poolState.address, tickProviderState, provider); // Call the fixed function
-    if (!tickDataProvider) {
-        currentLogger.error(`${logPrefix} Failed to get tick data provider (returned null/empty). Cannot simulate swap.`);
-        return null;
-    }
+    const tickDataProvider = await getTickDataProvider(poolState.address, tickProviderState, provider); // Should work now
+    if (!tickDataProvider) { currentLogger.error(`${logPrefix} Failed to get tick data provider. Cannot simulate.`); return null; }
     currentLogger.debug(`${logPrefix} Successfully obtained tick data provider.`);
 
     try {
@@ -146,7 +134,6 @@ async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn,
               throw new Error("Suitable simulation method (e.g., simulateSwap) not found on Pool object.");
          }
          const amountOutJSBI = swapResult.amountOut;
-         // Need to update pool state based on result (check SDK docs for correct properties)
          const poolAfter = pool.clone();
          poolAfter.sqrtRatioX96 = swapResult.sqrtRatioNextX96;
          poolAfter.tickCurrent = swapResult.tickNext;
@@ -167,13 +154,13 @@ async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn,
 
 
 // --- Arbitrage Simulation Function ---
-// No changes needed here if simulateSingleSwapExactIn works
+// No changes needed here
 async function simulateArbitrage(opportunity) {
     const currentLogger = logger || console;
     const { poolBorrow, poolSwap, token0, token1, flashLoanAmount, provider, groupName } = opportunity;
     const logPrefix = `[SimArb Group: ${groupName || `${token0?.symbol || '?'}_${token1?.symbol || '?'}`}]`;
 
-    // Validation
+    // Validation...
     if (!poolBorrow || !poolSwap || !token0 || !token1 || typeof flashLoanAmount === 'undefined' || !provider) { /* ... */ return null; }
     if (!poolBorrow.address || !poolSwap.address || !token0.address || !token1.address || typeof poolBorrow.tick !== 'number' || typeof poolSwap.tick !== 'number') { /* ... */ return null; }
 
@@ -188,7 +175,7 @@ async function simulateArbitrage(opportunity) {
     currentLogger.info(`${logPrefix} Simulating Hop 1: ${ethers.formatUnits(initialBorrowAmountJSBI.toString(), token0.decimals)} ${token0.symbol} -> ${token1.symbol} on pool ${poolSwap.address}`);
     const hop1Result = await simulateSingleSwapExactIn(poolSwap, token0, token1, initialBorrowAmountJSBI, provider);
     if (!hop1Result || typeof hop1Result.amountOut === 'undefined') { currentLogger.warn(`${logPrefix} Hop 1 simulation failed.`); return null; }
-    if (JSBI.equal(hop1Result.amountOut, JSBI.BigInt(0))) { /* ... */ }
+    if (JSBI.equal(hop1Result.amountOut, JSBI.BigInt(0))) { /* ... handle zero output ... */ return { /* zero/loss result */ }; }
     const amountToken1Received = hop1Result.amountOut;
     currentLogger.info(`${logPrefix} Hop 1 Result: Received ${ethers.formatUnits(amountToken1Received.toString(), token1.decimals)} ${token1.symbol}`);
 
@@ -196,7 +183,7 @@ async function simulateArbitrage(opportunity) {
     currentLogger.info(`${logPrefix} Simulating Hop 2: ${ethers.formatUnits(amountToken1Received.toString(), token1.decimals)} ${token1.symbol} -> ${token0.symbol} on pool ${poolBorrow.address}`);
     const hop2Result = await simulateSingleSwapExactIn(poolBorrow, token1, token0, amountToken1Received, provider);
     if (!hop2Result || typeof hop2Result.amountOut === 'undefined') { currentLogger.warn(`${logPrefix} Hop 2 simulation failed.`); return null; }
-    if (JSBI.equal(hop2Result.amountOut, JSBI.BigInt(0))) { /* ... */ }
+    if (JSBI.equal(hop2Result.amountOut, JSBI.BigInt(0))) { /* ... */ return { /* zero/loss result */ }; }
     const finalAmountToken0 = hop2Result.amountOut;
     currentLogger.info(`${logPrefix} Hop 2 Result: Received ${ethers.formatUnits(finalAmountToken0.toString(), token0.decimals)} ${token0.symbol}`);
 
