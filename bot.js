@@ -1,5 +1,11 @@
 // bot.js
-
+// ADD THIS AT THE VERY TOP (before any other requires)
+require('dotenv').config({ 
+  path: '/workspaces/arbitrum-flash/.env',
+  override: true,
+  debug: true 
+});
+console.log('[DEBUG] Env vars:', Object.keys(process.env));
 const logger = require('./utils/logger');
 
 // --- Load Config FIRST at top level ---
