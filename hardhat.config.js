@@ -10,7 +10,7 @@ const ARBITRUM_RPC_URL = process.env.ARBITRUM_RPC_URL;
 const POLYGON_RPC_URL = process.env.POLYGON_RPC_URL;
 const BASE_RPC_URL = process.env.BASE_RPC_URL;
 const OPTIMISM_RPC_URL = process.env.OPTIMISM_RPC_URL;
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const PRIVATE_KEY = process.env.PRIVATE_KEY; // Should NOT have '0x' prefix in .env file
 const ARBISCAN_API_KEY = process.env.ARBISCAN_API_KEY;
 const POLYGONSCAN_API_KEY = process.env.POLYGONSCAN_API_KEY;
 const BASESCAN_API_KEY = process.env.BASESCAN_API_KEY;
@@ -161,10 +161,12 @@ module.exports = {
   defaultNetwork: "hardhat",
   networks: {
     hardhat: { ...(MAINNET_FORK_URL && { forking: { url: MAINNET_FORK_URL } }) },
-    arbitrum: { url: ARBITRUM_RPC_URL || "", accounts: PRIVATE_KEY ? [`0x${PRIVATE_KEY}`] : [], chainId: 42161, timeout: 120000 },
-    polygon: { url: POLYGON_RPC_URL || "", accounts: PRIVATE_KEY ? [`0x${PRIVATE_KEY}`] : [], chainId: 137, timeout: 120000 },
-    base: { url: BASE_RPC_URL || "", accounts: PRIVATE_KEY ? [`0x${PRIVATE_KEY}`] : [], chainId: 8453, timeout: 120000 },
-    optimism: { url: OPTIMISM_RPC_URL || "", accounts: PRIVATE_KEY ? [`0x${PRIVATE_KEY}`] : [], chainId: 10, timeout: 120000 },
+    // --- FIXED: Removed '0x' prefix from PRIVATE_KEY usage ---
+    arbitrum: { url: ARBITRUM_RPC_URL || "", accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [], chainId: 42161, timeout: 120000 },
+    polygon: { url: POLYGON_RPC_URL || "", accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [], chainId: 137, timeout: 120000 },
+    base: { url: BASE_RPC_URL || "", accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [], chainId: 8453, timeout: 120000 },
+    optimism: { url: OPTIMISM_RPC_URL || "", accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [], chainId: 10, timeout: 120000 },
+    // --- End Fix ---
   },
   paths: { sources: "./contracts", tests: "./test", cache: "./cache", artifacts: "./artifacts" },
   etherscan: {
