@@ -44,13 +44,27 @@ const simulateSingleSwapExactIn = async (poolState, tokenIn, tokenOut, amountIn)
             poolState.sqrtPriceX96.toString(),
             poolState.liquidity.toString(),
             poolState.tick,
-            simpleTickProvider
+            simpleTickProvider // Using the stub provider
         );
 
         const swapRoute = new Route([pool], tokenIn, tokenOut);
         if (!swapRoute.pools || swapRoute.pools.length === 0) {
             log.warn(`[${context}] No valid pool in route by SDK.`); return null;
         }
+
+        // --- START: Added Debug Logging for Single Swap SDK Input ---
+        // Moved this specific log here from inside simulateArbitrage to be closer to the SDK call
+        log.debug(`[DEBUG] Creating V3 Pool Object for ${context}`);
+        log.debug(`    - Pool Params (TokenA): ${tokenA.symbol} (${tokenA.address})`);
+        log.debug(`    - Pool Params (TokenB): ${tokenB.symbol} (${tokenB.address})`);
+        log.debug(`    - Pool Params (Fee): ${poolState.fee}`);
+        log.debug(`    - Pool Params (sqrtPriceX96): ${poolState.sqrtPriceX96.toString()}`);
+        log.debug(`    - Pool Params (Liquidity): ${poolState.liquidity.toString()}`);
+        log.debug(`    - Pool Params (Tick): ${poolState.tick}`);
+        log.debug(`    - Route Input Token: ${tokenIn.symbol}`);
+        log.debug(`    - Route Output Token: ${tokenOut.symbol}`);
+        log.debug(`    - Trade Input Amount: ${amountIn.toString()} (Raw)`);
+        // --- END: Added Debug Logging for Single Swap SDK Input ---
 
         const trade = await Trade.fromRoute(
             swapRoute,
@@ -61,7 +75,9 @@ const simulateSingleSwapExactIn = async (poolState, tokenIn, tokenOut, amountIn)
         return { amountOut: amountOutBI, sdkTokenIn: tokenIn, sdkTokenOut: tokenOut, trade: trade };
 
     } catch (error) {
-        log.error(`[${context}] Sim Error: ${error.message}`);
+        log.error(`[${context}] Sim Error inside simulateSingleSwapExactIn: ${error.message}`);
+        // Add more detail if available
+        if (error.stack) log.debug(error.stack);
         return null;
     }
 };
@@ -115,45 +131,14 @@ const simulateArbitrage = async (opportunity, initialAmountToken0) => {
              return { profitable: false, error: 'Hop 1 simulation resulted in zero output', initialAmountToken0, finalAmountToken0: 0n, amountToken1Received: 0n, grossProfit: -1n };
         }
 
-        // --- Simulate Hop 2 ---
-        const hop2Result = await simulateSingleSwapExactIn(poolHop2, token1, token0, amountToken1Received);
-        if (!hop2Result || typeof hop2Result.amountOut === 'undefined') {
-             log.warn(`[${logPrefix}] Hop 2 simulation failed.`);
-             log.info(`--- Simulation END (${logPrefix}) - FAILED (Hop 2 Sim) ---`);
-             return { profitable: false, error: 'Hop 2 simulation failed internally', initialAmountToken0, finalAmountToken0: 0n, amountToken1Received, grossProfit: -1n };
-        }
-        const finalAmountToken0 = hop2Result.amountOut;
-        const finalAmountFormatted = ethers.formatUnits(finalAmountToken0, token0.decimals);
-        const hop2FeePercent = new Percent(poolHop2.fee, 1_000_000);
-        const priceImpactHop2 = hop2Result.trade?.priceImpact?.toSignificant(3) || 'N/A';
-
-        log.info(`[SIM] Hop 2 (${token1.symbol} -> ${token0.symbol} @ ${poolHop2.fee}bps):`);
-        log.info(`    - Input:  ${amountHop1Formatted} ${token1.symbol}`);
-        log.info(`    - Output: ${finalAmountFormatted} ${token0.symbol}`);
-        log.info(`    - Fee Tier: ${hop2FeePercent.toFixed(3)}%`);
-        log.info(`    - Price Impact: ~${priceImpactHop2}%`);
-
-        // --- Calculate & Log Profit ---
-        const grossProfit = finalAmountToken0 - initialAmountToken0;
-        const profitable = grossProfit > 0n;
-        const grossProfitFormatted = ethers.formatUnits(grossProfit, token0.decimals);
-
-        log.info(`[SIM] Gross Profit: ${grossProfitFormatted} ${token0.symbol}`);
-        log.info(`[SIM] Trade Profitable (Gross): ${profitable ? 'YES' : 'NO'}`);
-        log.info(`--- Simulation END (${logPrefix}) ---`);
-
-        return {
-            profitable, initialAmountToken0, finalAmountToken0, amountToken1Received, grossProfit, error: null,
-            details: { group, token0Symbol: token0.symbol, token1Symbol: token1.symbol, hop1Pool: poolHop1.address, hop2Pool: poolHop2.address, hop1Fee: poolHop1.fee, hop2Fee: poolHop2.fee }
-        };
-
-    } catch (error) {
-        // Use the defined log variable
-        log.error(`[${logPrefix}] UNEXPECTED High-Level Error: ${error.message}`);
-        if (ErrorHandler && typeof ErrorHandler.handleError === 'function') { ErrorHandler.handleError(error, logPrefix); }
-        log.info(`--- Simulation END (${logPrefix}) - FAILED (Unexpected) ---`);
-        return { profitable: false, error: `Unexpected simulation error: ${error.message}`, initialAmountToken0, finalAmountToken0: 0n, amountToken1Received: 0n, grossProfit: -1n };
-    }
-};
-
-module.exports = { simulateArbitrage };
+        // --- START: Added Debug Logging for Hop 2 ---
+        log.debug(`[DEBUG] --- Preparing for Hop 2 Simulation (${logPrefix}) ---`);
+        log.debug(`[DEBUG] Pool for Hop 2: ${poolHop2.address}`);
+        log.debug(`    - Fee Tier: ${poolHop2.fee}bps`);
+        // Log pool's token0/1 as defined in the pool state object for reference
+        log.debug(`    - Token0 (from pool state): ${poolHop2.token0?.symbol} (${poolHop2.token0?.address})`);
+        log.debug(`    - Token1 (from pool state): ${poolHop2.token1?.symbol} (${poolHop2.token1?.address})`);
+        // Log the actual state values received from PoolScanner
+        log.debug(`    - Tick Current (from scanner): ${poolHop2.tick}`);
+        log.debug(`    - SqrtRatioX96 (from scanner): ${poolHop2.sqrtPriceX96?.toString()}`);
+        log.debug(`    - Liquidity (
