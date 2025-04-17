@@ -2,105 +2,120 @@
 
 // --- Force .env loading FIRST ---
 console.log('[Bot Start] Attempting to load .env...');
-const dotenvResult = require('dotenv').config(); // Default path is project root/.env
+const dotenvResult = require('dotenv').config();
 if (dotenvResult.error) {
     console.error('[Bot Start] FATAL: Error loading .env file:', dotenvResult.error);
-    process.exit(1); // Exit if .env fails to load
+    process.exit(1);
 }
 console.log('[Bot Start] .env loaded check. Verifying key vars from process.env...');
-// Verify crucial vars loaded from .env into process.env
 console.log(`[Bot Start] NETWORK = ${process.env.NETWORK}`);
 console.log(`[Bot Start] PRIVATE_KEY exists = ${!!process.env.PRIVATE_KEY}, length = ${process.env.PRIVATE_KEY?.length}`);
-// Check the PLURAL version based on previous grep results for provider.js
 console.log(`[Bot Start] ARBITRUM_RPC_URLS exists = ${!!process.env.ARBITRUM_RPC_URLS}`);
 console.log(`[Bot Start] FLASH_SWAP_ADDRESS exists = ${!!process.env.FLASH_SWAP_ADDRESS}`);
 console.log(`[Bot Start] WETH_USDC_POOLS loaded length = ${process.env.WETH_USDC_POOLS?.length || 0}`);
 // --- End .env loading ---
 
 // --- Other Requires (AFTER dotenv) ---
-const { ArbitrageEngine } = require('./core/arbitrageEngine'); // Engine uses Config, Provider, Signer
-const logger = require('./utils/logger'); // Logger might be used early
+const { ethers } = require('ethers'); // Need ethers for Wallet
+const logger = require('./utils/logger');
+// ErrorHandler exports { ArbitrageError, handleError }
 const ErrorHandler = require('./utils/errorHandler');
-const { initializeProvider, getSigner } = require('./utils/provider'); // Provider uses env vars
-const Config = require('./utils/config'); // Config reads env vars
+// Provider exports { provider, getProvider }
+const { getProvider } = require('./utils/provider'); // Only need getProvider here
+const Config = require('./utils/config');
+const { ArbitrageEngine } = require('./core/arbitrageEngine');
 
 
 // --- Main Application Logic ---
 
 async function main() {
-    // Logger should be safe to use now
     logger.info('>>> PROJECT HAVOC ARBITRAGE BOT STARTING (inside main) <<<');
     logger.info('==============================================');
 
+    let signer; // Define signer here to be accessible in catch block if needed
+
     try {
-        // 1. Load Config (triggers internal validation using populated process.env)
-        // Config.getNetworkConfig() will likely be called implicitly or explicitly soon.
-        // We can call it here to ensure validation passes before proceeding.
+        // 1. Load Config (triggers internal validation)
         logger.info('[Main] Loading and validating configuration...');
-        const networkConfig = Config.getNetworkConfig(); // This will run validation checks based on process.env
+        const networkConfig = Config.getNetworkConfig(); // Validates required ENV vars
         logger.info('[Main] Configuration validated successfully.');
 
-        // 2. Initialize Provider (uses config/env vars)
-        logger.info('[Main] Initializing Provider...');
-        await initializeProvider(); // Ensure this uses the correct RPC from process.env.ARBITRUM_RPC_URLS
-        logger.info('[Main] Provider initialized.');
+        // 2. Get Provider (Initialization happens inside provider.js)
+        logger.info('[Main] Getting Provider instance...');
+        const provider = getProvider(); // Call the exported function
+        // Optional: Add a small delay or check if provider connection test passed if needed
+        logger.info('[Main] Provider instance obtained.');
 
-        // 3. Initialize Signer (uses provider and env vars)
+        // 3. Initialize Signer (using PRIVATE_KEY and the obtained provider)
         logger.info('[Main] Initializing Signer...');
-        const signer = getSigner(); // Ensure this uses the correct PRIVATE_KEY from process.env
-        logger.info('[Main] Signer initialized.');
+        const privateKey = process.env.PRIVATE_KEY;
+        if (!privateKey || !/^[a-fA-F0-9]{64}$/.test(privateKey)) {
+             // This validation is technically done in config.js, but good safeguard
+             throw new Error("CRITICAL: Invalid or missing PRIVATE_KEY environment variable for signer creation.");
+        }
+        signer = new ethers.Wallet(privateKey, provider);
+        logger.info(`[Main] Signer ready for address: ${signer.address}`);
 
-        // 4. Initialize Engine (uses config, provider, signer)
+        // 4. Initialize Engine (Pass dependencies if constructor requires them)
         logger.info('[Main] Initializing Arbitrage Engine...');
-        const engine = new ArbitrageEngine(); // Constructor should now have access to valid config and provider/signer
-        await engine.initialize(); // Any async engine setup
+        // Modify constructor call if Engine needs provider/signer explicitly
+        // const engine = new ArbitrageEngine(provider, signer, networkConfig); // Example
+        const engine = new ArbitrageEngine(); // Assuming engine gets provider/signer via utils
+        await engine.initialize();
         logger.info('[Main] Arbitrage Engine initialized.');
 
         // 5. Start Engine Loop
         await engine.start();
 
-        // Keep the main thread alive
         logger.info('[MainLoop] Main thread waiting indefinitely (engine loop running)...');
-        await new Promise(() => {}); // Keep alive indefinitely
+        await new Promise(() => {}); // Keep alive
 
     } catch (error) {
-        // Catch critical startup errors (e.g., invalid config, provider connection fail)
-        logger.fatal(`[Main] CRITICAL ERROR DURING BOT INITIALIZATION OR STARTUP: ${error.message}`, { stack: error.stack });
-        ErrorHandler.logError(error, 'MainProcess');
-        console.error("!!! BOT FAILED TO START !!!"); // Ensure visibility
-        process.exit(1); // Exit on critical startup failure
+        console.error("!!! BOT FAILED TO START !!! Error during main execution:", error);
+        // --- FIXED: Use handleError instead of logError ---
+        if (ErrorHandler && typeof ErrorHandler.handleError === 'function') {
+            ErrorHandler.handleError(error, 'MainProcess');
+        } else {
+            console.error("[Main Emergency Log] ErrorHandler.handleError is not available. Raw Error:", error);
+        }
+        process.exit(1);
     }
 }
 
 // --- Global Error Handlers ---
 process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    logger.error('Unhandled Rejection', { reason: reason, stack: reason?.stack });
-    ErrorHandler.logError(reason, 'UnhandledRejection');
-    // Decide if you want to exit on unhandled rejections
-    // process.exit(1);
+    // --- FIXED: Use handleError instead of logError ---
+    if (ErrorHandler && typeof ErrorHandler.handleError === 'function') {
+        ErrorHandler.handleError(reason instanceof Error ? reason : new Error(`Unhandled Rejection: ${reason}`), 'UnhandledRejection');
+    } else {
+        console.error("[Emergency Log] Unhandled Rejection: ErrorHandler not available.");
+    }
 });
 
 process.on('uncaughtException', (error) => {
     console.error(`Uncaught Exception: ${error.message}`);
-    logger.fatal('Uncaught Exception', { message: error.message, stack: error.stack });
-    ErrorHandler.logError(error, 'UncaughtException');
-    process.exit(1); // Mandatory exit after uncaught exception
+     // --- FIXED: Use handleError instead of logError ---
+    if (ErrorHandler && typeof ErrorHandler.handleError === 'function') {
+        ErrorHandler.handleError(error, 'UncaughtException');
+    } else {
+         console.error("[Emergency Log] Uncaught Exception: ErrorHandler not available.");
+    }
+    process.exit(1);
 });
 
 // --- Graceful Shutdown ---
-process.on('SIGINT', () => {
-    logger.info("SIGINT received. Shutting down gracefully...");
-    // Add cleanup logic here if needed (e.g., stop engine monitoring, close connections)
-    // Example: if (engine) engine.stop();
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    logger.info("SIGTERM received. Shutting down gracefully...");
-    // Add cleanup logic here if needed
-    process.exit(0);
-});
-
+function gracefulShutdown() {
+    logger.info("Shutdown signal received. Cleaning up...");
+    // Add cleanup logic here
+    // if (engine) engine.stop(); // Need access to engine instance
+    setTimeout(() => {
+        logger.info("Exiting.");
+        process.exit(0);
+    }, 500);
+}
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
 
 // --- Start the application ---
-main(); // Execute the main async function
+main();
