@@ -1,131 +1,106 @@
-// bot.js
-// ADD THIS AT THE VERY TOP (before any other requires)
-require('dotenv').config({ 
-  path: '/workspaces/arbitrum-flash/.env',
-  override: true,
-  debug: true 
-});
-console.log('[DEBUG] Env vars:', Object.keys(process.env));
-const logger = require('./utils/logger');
+// /workspaces/arbitrum-flash/bot.js
 
-// --- Load Config FIRST at top level ---
-const config = require('./config');
-if (!config || !config.NAME) {
-    console.error("!!! FATAL: Config loaded improperly or missing NAME at top level !!!", config);
-    process.exit(1);
+// --- Force .env loading FIRST ---
+console.log('[Bot Start] Attempting to load .env...');
+const dotenvResult = require('dotenv').config(); // Default path is project root/.env
+if (dotenvResult.error) {
+    console.error('[Bot Start] FATAL: Error loading .env file:', dotenvResult.error);
+    process.exit(1); // Exit if .env fails to load
 }
-logger.info(`[Bot] Initial config loaded. Network: ${config.NAME}`);
-// --- ---
+console.log('[Bot Start] .env loaded check. Verifying key vars from process.env...');
+// Verify crucial vars loaded from .env into process.env
+console.log(`[Bot Start] NETWORK = ${process.env.NETWORK}`);
+console.log(`[Bot Start] PRIVATE_KEY exists = ${!!process.env.PRIVATE_KEY}, length = ${process.env.PRIVATE_KEY?.length}`);
+// Check the PLURAL version based on previous grep results for provider.js
+console.log(`[Bot Start] ARBITRUM_RPC_URLS exists = ${!!process.env.ARBITRUM_RPC_URLS}`);
+console.log(`[Bot Start] FLASH_SWAP_ADDRESS exists = ${!!process.env.FLASH_SWAP_ADDRESS}`);
+console.log(`[Bot Start] WETH_USDC_POOLS loaded length = ${process.env.WETH_USDC_POOLS?.length || 0}`);
+// --- End .env loading ---
 
-// --- Other Imports ---
-const { ethers } = require('ethers');
-const { handleError, ArbitrageError } = require('./utils/errorHandler');
+// --- Other Requires (AFTER dotenv) ---
+const { ArbitrageEngine } = require('./core/arbitrageEngine'); // Engine uses Config, Provider, Signer
+const logger = require('./utils/logger'); // Logger might be used early
+const ErrorHandler = require('./utils/errorHandler');
+const { initializeProvider, getSigner } = require('./utils/provider'); // Provider uses env vars
+const Config = require('./utils/config'); // Config reads env vars
 
-// --- Core Components ---
-const FlashSwapManager = require('./core/flashSwapManager');
-const ArbitrageEngine = require('./core/arbitrageEngine');
-const { PoolScanner } = require('./core/poolScanner');
-const quoteSimulator = require('./core/quoteSimulator');
-const gasEstimator = require('./utils/gasEstimator');
-const profitCalculator = require('./core/profitCalculator');
-const txExecutor = require('./core/txExecutor');
-// --- ---
 
-// --- Global Error Handling ---
-process.on('unhandledRejection', (reason, promise) => {
-    // Safety check for logger added
-    if (logger && typeof logger.fatal === 'function') {
-        logger.fatal('Unhandled Rejection at:', promise, 'reason:', reason);
-    } else {
-        console.error('[FATAL] Unhandled Rejection (logger missing):', promise, 'reason:', reason);
+// --- Main Application Logic ---
+
+async function main() {
+    // Logger should be safe to use now
+    logger.info('>>> PROJECT HAVOC ARBITRAGE BOT STARTING (inside main) <<<');
+    logger.info('==============================================');
+
+    try {
+        // 1. Load Config (triggers internal validation using populated process.env)
+        // Config.getNetworkConfig() will likely be called implicitly or explicitly soon.
+        // We can call it here to ensure validation passes before proceeding.
+        logger.info('[Main] Loading and validating configuration...');
+        const networkConfig = Config.getNetworkConfig(); // This will run validation checks based on process.env
+        logger.info('[Main] Configuration validated successfully.');
+
+        // 2. Initialize Provider (uses config/env vars)
+        logger.info('[Main] Initializing Provider...');
+        await initializeProvider(); // Ensure this uses the correct RPC from process.env.ARBITRUM_RPC_URLS
+        logger.info('[Main] Provider initialized.');
+
+        // 3. Initialize Signer (uses provider and env vars)
+        logger.info('[Main] Initializing Signer...');
+        const signer = getSigner(); // Ensure this uses the correct PRIVATE_KEY from process.env
+        logger.info('[Main] Signer initialized.');
+
+        // 4. Initialize Engine (uses config, provider, signer)
+        logger.info('[Main] Initializing Arbitrage Engine...');
+        const engine = new ArbitrageEngine(); // Constructor should now have access to valid config and provider/signer
+        await engine.initialize(); // Any async engine setup
+        logger.info('[Main] Arbitrage Engine initialized.');
+
+        // 5. Start Engine Loop
+        await engine.start();
+
+        // Keep the main thread alive
+        logger.info('[MainLoop] Main thread waiting indefinitely (engine loop running)...');
+        await new Promise(() => {}); // Keep alive indefinitely
+
+    } catch (error) {
+        // Catch critical startup errors (e.g., invalid config, provider connection fail)
+        logger.fatal(`[Main] CRITICAL ERROR DURING BOT INITIALIZATION OR STARTUP: ${error.message}`, { stack: error.stack });
+        ErrorHandler.logError(error, 'MainProcess');
+        console.error("!!! BOT FAILED TO START !!!"); // Ensure visibility
+        process.exit(1); // Exit on critical startup failure
     }
-    // process.exit(1); // Consider if you want to exit on unhandled rejections
+}
+
+// --- Global Error Handlers ---
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    logger.error('Unhandled Rejection', { reason: reason, stack: reason?.stack });
+    ErrorHandler.logError(reason, 'UnhandledRejection');
+    // Decide if you want to exit on unhandled rejections
+    // process.exit(1);
 });
 
 process.on('uncaughtException', (error) => {
-    if (logger && typeof logger.fatal === 'function') {
-        logger.fatal('Uncaught Exception:', error);
-    } else {
-        console.error('[FATAL] Uncaught Exception (logger missing):', error);
-    }
-    process.exit(1); // Exit on uncaught exceptions is generally recommended
+    console.error(`Uncaught Exception: ${error.message}`);
+    logger.fatal('Uncaught Exception', { message: error.message, stack: error.stack });
+    ErrorHandler.logError(error, 'UncaughtException');
+    process.exit(1); // Mandatory exit after uncaught exception
 });
-// --- ---
 
-// Declare arbitrageEngine in a scope accessible by shutdown handler
-let arbitrageEngine;
-
-// --- Graceful Shutdown Handlers ---
-const signals = { 'SIGHUP': 1, 'SIGINT': 2, 'SIGTERM': 15 };
-Object.keys(signals).forEach((signal) => {
-  process.on(signal, async () => { // Make handler async if shutdown is async
-    if (logger && typeof logger.warn === 'function') {
-        logger.warn(`[Shutdown] Received ${signal}, attempting graceful shutdown...`);
-    } else {
-        console.warn(`[Shutdown] Received ${signal}, attempting graceful shutdown... (logger missing)`);
-    }
-    // Call engine shutdown if it exists and is implemented
-    if (arbitrageEngine && typeof arbitrageEngine.stopMonitoring === 'function') {
-        try {
-            await arbitrageEngine.stopMonitoring(); // Assuming stopMonitoring might be async later
-             logger.info("[Shutdown] Arbitrage engine monitoring stopped.");
-        } catch (shutdownError) {
-             logger.error("[Shutdown] Error during engine stop:", shutdownError);
-        }
-    }
-    process.exit(signals[signal]); // Exit after attempting shutdown
-  });
+// --- Graceful Shutdown ---
+process.on('SIGINT', () => {
+    logger.info("SIGINT received. Shutting down gracefully...");
+    // Add cleanup logic here if needed (e.g., stop engine monitoring, close connections)
+    // Example: if (engine) engine.stop();
+    process.exit(0);
 });
-// --- ---
+process.on('SIGTERM', () => {
+    logger.info("SIGTERM received. Shutting down gracefully...");
+    // Add cleanup logic here if needed
+    process.exit(0);
+});
 
-// --- Main Application Logic ---
-async function main() {
-    logger.info(">>> PROJECT HAVOC ARBITRAGE BOT STARTING (inside main) <<<");
-    logger.info("==============================================");
 
-    let flashSwapManager;
-    let poolScanner;
-    // arbitrageEngine is declared outside main for shutdown handler access
-
-    try {
-        const provider = require('./utils/provider').getProvider();
-
-        flashSwapManager = new FlashSwapManager();
-        poolScanner = new PoolScanner(config, provider);
-
-        // Instantiate ArbitrageEngine
-        arbitrageEngine = new ArbitrageEngine(
-            flashSwapManager,
-            poolScanner,
-            profitCalculator.checkProfitability,
-            provider,
-            txExecutor.executeTransaction,
-            config,
-            logger
-        );
-
-        // --- Start the engine's monitoring loop ---
-        // This will set isMonitoring = true, run an initial cycle, and manage the interval
-        await arbitrageEngine.startMonitoring();
-        // --- ---
-
-        // --- Remove manual initial run and setInterval ---
-        // logger.info("[MainLoop] Running initial arbitrage cycle...");
-        // await arbitrageEngine.runCycle(); // Handled by startMonitoring
-        // logger.info("[MainLoop] Initial cycle finished.");
-        // logger.info(`[MainLoop] Starting scheduled arbitrage cycles every ${config.CYCLE_INTERVAL_MS / 1000} seconds...`);
-        // setInterval(async () => { ... }); // Handled by startMonitoring
-        // --- ---
-
-        // Keep the process alive (startMonitoring likely handles the loop now)
-        logger.info("[MainLoop] Main thread waiting indefinitely (engine loop running)...");
-        await new Promise(() => {}); // Keep script running
-
-    } catch (error) {
-        handleError(error, 'BotInitialization');
-        process.exit(1);
-    }
-}
-
-// --- Start the bot ---
-main();
+// --- Start the application ---
+main(); // Execute the main async function
