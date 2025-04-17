@@ -7,11 +7,8 @@ if (!BigInt.prototype.toJSON) {
 const { ethers } = require('ethers');
 const JSBI = require('jsbi');
 const path = require('path');
-// Remove TickMath unless needed elsewhere, remove tickToWord
-const { Pool, TickListDataProvider, TickMath } = require('@uniswap/v3-sdk'); // Keep TickMath for MIN/MAX constants if needed
-// --- *** Import the local utility *** ---
-const { tickToWord } = require('../utils/tickUtils'); // Use the local helper
-// --- ---
+const { Pool, TickListDataProvider, TickMath } = require('@uniswap/v3-sdk');
+const { tickToWord } = require('../utils/tickUtils'); // Use local helper
 
 // Load ABI
 const tickLensAbiPath = path.join(process.cwd(), 'abis', 'TickLens.json');
@@ -36,44 +33,97 @@ async function getTickDataProvider(poolAddress, poolState, provider) {
     currentLogger.debug(`${logPrefix} Entering getTickDataProvider...`);
 
     // Input validation...
-    if (!poolAddress || !ethers.isAddress(poolAddress)) { currentLogger.error(`${logPrefix} Invalid poolAddress.`); return null; }
-    if (!poolState || typeof poolState.tick !== 'number' || typeof poolState.tickSpacing !== 'number') { currentLogger.error(`${logPrefix} Invalid poolState (tick/tickSpacing).`); return null; }
-    if (!provider) { currentLogger.error(`${logPrefix} Provider missing.`); return null; }
-    if (!TickLensABI) { currentLogger.error(`${logPrefix} TickLens ABI missing.`); return null; }
+    if (!poolAddress || !ethers.isAddress(poolAddress)) { /* ... */ return null; }
+    if (!poolState || typeof poolState.tick !== 'number' || typeof poolState.tickSpacing !== 'number') { /* ... */ return null; }
+    if (!provider) { /* ... */ return null; }
+    if (!TickLensABI) { /* ... */ return null; }
 
     let tickLens;
     try { tickLens = new ethers.Contract(TICKLENS_ADDRESS, TickLensABI, provider); }
-    catch (contractError) { currentLogger.error(`${logPrefix} Failed TickLens instance: ${contractError.message}`); return null; }
+    catch (contractError) { /* ... */ return null; }
 
     try {
         const tickCurrent = poolState.tick;
         const tickSpacing = poolState.tickSpacing;
         if (tickSpacing <= 0) { currentLogger.error(`${logPrefix} Invalid tickSpacing (${tickSpacing}).`); return null; }
 
-        // --- *** CORRECTED: Use local tickToWord utility *** ---
         const currentWordPos = tickToWord(tickCurrent, tickSpacing);
-        if (currentWordPos === null) { // Handle potential null return from utility
-             currentLogger.error(`${logPrefix} Failed to calculate word position for tick ${tickCurrent}, spacing ${tickSpacing}.`);
-             return null;
-        }
-        // --- *** ---
+        if (currentWordPos === null) { currentLogger.error(`${logPrefix} Failed to calculate word position.`); return null; }
         const lowerWordPos = currentWordPos - 1;
         const upperWordPos = currentWordPos + 1;
 
-        currentLogger.info(`${logPrefix} Fetching ticks for words: ${lowerWordPos}, ${currentWordPos}, ${upperWordPos} (Tick: ${tickCurrent}, Spacing: ${tickSpacing})`);
+        currentLogger.info(`${logPrefix} Fetching ticks for words: ${lowerWordPos}, ${currentWordPos}, ${upperWordPos}`);
 
-        // ... rest of tick fetching logic ...
-        const populatedTicksPromises = [ /* ... */ ];
+        // --- *** ADDED LOGGING AROUND CONTRACT CALLS *** ---
+        currentLogger.debug(`${logPrefix} Preparing TickLens contract calls...`);
+        const populatedTicksPromises = [
+             tickLens.getPopulatedTicksInWordRange(poolAddress, lowerWordPos, lowerWordPos),
+             tickLens.getPopulatedTicksInWordRange(poolAddress, currentWordPos, currentWordPos),
+             tickLens.getPopulatedTicksInWordRange(poolAddress, upperWordPos, upperWordPos),
+         ];
+        currentLogger.debug(`${logPrefix} Awaiting Promise.allSettled for TickLens calls...`);
         const populatedTicksResults = await Promise.allSettled(populatedTicksPromises);
+        currentLogger.debug(`${logPrefix} TickLens call results received:`, JSON.stringify(populatedTicksResults)); // Log the results (BigInts handled by patch)
+        // --- *** ---
+
         let allFetchedTicks = [];
         let fetchFailed = false;
-        populatedTicksResults.forEach((result, index) => { /* ... */ });
-        if (fetchFailed && allFetchedTicks.length === 0) { /* ... */ return null; }
-        if (allFetchedTicks.length === 0) { /* ... */ return new TickListDataProvider([], tickSpacing); }
+        populatedTicksResults.forEach((result, index) => {
+            const wordPos = index === 0 ? lowerWordPos : index === 1 ? currentWordPos : upperWordPos;
+            if (result.status === 'fulfilled' && result.value) {
+                currentLogger.debug(`${logPrefix} Fetched ${result.value.length} ticks from word ${wordPos}`);
+                allFetchedTicks = allFetchedTicks.concat(result.value);
+            } else {
+                 const reason = result.reason?.error?.reason || result.reason?.message || result.reason || 'Unknown fetch error';
+                 // Log RPC errors more prominently
+                 if (result.reason?.code) { // Ethers RPC errors often have a code
+                    currentLogger.error(`${logPrefix} RPC Error fetching word ${wordPos}: ${reason} (Code: ${result.reason.code})`);
+                 } else {
+                    currentLogger.warn(`${logPrefix} Failed to fetch/process ticks for word ${wordPos}: ${reason}`);
+                 }
+                 if (result.status === 'rejected') fetchFailed = true;
+            }
+        });
 
-        // ... formatting ticks logic ...
-        const formattedTicks = allFetchedTicks.map(tick => { /* ... */ }).filter(tick => tick !== null).sort((a, b) => a.tick - b.tick);
-        if (formattedTicks.length === 0) { /* ... */ return null; }
+        if (fetchFailed && allFetchedTicks.length === 0) {
+             currentLogger.error(`${logPrefix} Critical failure: One or more TickLens fetches failed AND no ticks were retrieved.`);
+             return null;
+        }
+        if (allFetchedTicks.length === 0) {
+            currentLogger.warn(`${logPrefix} No initialized ticks found in range via TickLens. Simulation may be inaccurate.`);
+            return new TickListDataProvider([], tickSpacing); // Return empty provider
+        }
+
+        // Formatting ticks...
+        currentLogger.debug(`${logPrefix} Formatting ${allFetchedTicks.length} fetched ticks...`);
+        const formattedTicks = allFetchedTicks
+            .map(tick => {
+                 try {
+                     // Add more robust check for BigInt conversion source
+                     const rawTick = tick?.tick;
+                     const rawLiqNet = tick?.liquidityNet;
+                     const rawLiqGross = tick?.liquidityGross;
+                     if (rawTick === undefined || rawLiqNet === undefined || rawLiqGross === undefined) {
+                         throw new Error(`Missing required properties (tick/liquidityNet/liquidityGross)`);
+                     }
+                     return {
+                         tick: Number(rawTick),
+                         // Ensure the source values are indeed BigNumberish before calling toString()
+                         liquidityNet: JSBI.BigInt(rawLiqNet.toString()),
+                         liquidityGross: JSBI.BigInt(rawLiqGross.toString()),
+                     };
+                 } catch (conversionError) {
+                     currentLogger.error(`${logPrefix} Error converting tick data: ${conversionError.message || conversionError} on raw tick data: ${JSON.stringify(tick)}`);
+                     return null;
+                 }
+            })
+            .filter(tick => tick !== null)
+            .sort((a, b) => a.tick - b.tick);
+
+        if (formattedTicks.length === 0) {
+             currentLogger.error(`${logPrefix} All fetched ticks failed formatting/filtering. Cannot create provider.`);
+             return null;
+        }
 
         const minTick = formattedTicks[0]?.tick ?? 'N/A';
         const maxTick = formattedTicks[formattedTicks.length - 1]?.tick ?? 'N/A';
@@ -82,14 +132,14 @@ async function getTickDataProvider(poolAddress, poolState, provider) {
         return new TickListDataProvider(formattedTicks, tickSpacing);
 
     } catch (error) {
-        currentLogger.error(`${logPrefix} Unexpected error within getTickDataProvider setup:`, error);
+        currentLogger.error(`${logPrefix} Unexpected error within getTickDataProvider setup/execution:`, error);
         return null;
     }
 }
 
 
 // --- Single Swap Simulation Function ---
-// No changes needed here if getTickDataProvider works
+// No changes needed here
 async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn, provider) {
     const currentLogger = logger || console;
     const logPrefix = `[SimSwap Pool: ${poolState?.address?.substring(0, 10) || 'N/A'}]`;
@@ -108,8 +158,8 @@ async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn,
     // Get Tick Data Provider
     currentLogger.debug(`${logPrefix} Attempting to get tick data provider...`);
     const tickProviderState = { tick: poolState.tick, tickSpacing: poolState.tickSpacing };
-    const tickDataProvider = await getTickDataProvider(poolState.address, tickProviderState, provider); // Should work now
-    if (!tickDataProvider) { currentLogger.error(`${logPrefix} Failed to get tick data provider. Cannot simulate.`); return null; }
+    const tickDataProvider = await getTickDataProvider(poolState.address, tickProviderState, provider);
+    if (!tickDataProvider) { currentLogger.error(`${logPrefix} Failed to get tick data provider (returned null/empty). Cannot simulate swap.`); return null; }
     currentLogger.debug(`${logPrefix} Successfully obtained tick data provider.`);
 
     try {
@@ -126,18 +176,16 @@ async function simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn,
         const zeroForOne = tokenIn.address.toLowerCase() < tokenOut.address.toLowerCase();
         currentLogger.debug(`${logPrefix} zeroForOne: ${zeroForOne}`);
 
-        // Adapt based on SDK version - assuming simulateSwap exists
         let swapResult;
-         if (typeof pool.simulateSwap === 'function') {
+        if (typeof pool.simulateSwap === 'function') {
              swapResult = await pool.simulateSwap(zeroForOne, amountInJSBI, { /* options */ });
          } else {
               throw new Error("Suitable simulation method (e.g., simulateSwap) not found on Pool object.");
          }
-         const amountOutJSBI = swapResult.amountOut;
-         const poolAfter = pool.clone();
-         poolAfter.sqrtRatioX96 = swapResult.sqrtRatioNextX96;
-         poolAfter.tickCurrent = swapResult.tickNext;
-
+        const amountOutJSBI = swapResult.amountOut;
+        const poolAfter = pool.clone();
+        poolAfter.sqrtRatioX96 = swapResult.sqrtRatioNextX96;
+        poolAfter.tickCurrent = swapResult.tickNext;
 
         // Process Results
         const amountOutNum = ethers.formatUnits(amountOutJSBI.toString(), tokenOut.decimals);
