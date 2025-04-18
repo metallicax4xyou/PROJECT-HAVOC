@@ -6,7 +6,7 @@ const { Token } = require('@uniswap/sdk-core');
 const { ABIS } = require('../constants/abis'); // Make sure this file exists and exports ABIS.UniswapV3Pool
 const logger = require('../utils/logger');
 const { ArbitrageError, handleError } = require('../utils/errorHandler'); // Assuming this exports handleError
-const { getPoolInfo } = require('./poolDataProvider'); // Assuming this exists and works
+const { getPoolInfo } = require('./poolDataProvider'); // Kept for context, though not used in findOpportunities
 const { TOKENS } = require('../constants/tokens'); // Assuming this exists and works
 
 const MAX_UINT128 = (1n << 128n) - 1n;
@@ -24,11 +24,10 @@ function getTickSpacingFromFeeBps(feeBps) {
 }
 
 class PoolScanner {
-    // --- Constructor expects main config and provider ---
+    // --- Constructor remains the same ---
     constructor(config, provider) {
-        logger.debug(`[Scanner Constructor] Initializing...`); // Added log
+        logger.debug(`[Scanner Constructor] Initializing...`);
         if (!config || !provider) {
-            // Use handleError for consistency if available, otherwise throw raw error
              const errMsg = 'PoolScanner requires config and provider.';
              if (handleError) handleError(new Error(errMsg), 'ScannerInit'); else console.error(errMsg);
              throw new ArbitrageError(errMsg, 'INITIALIZATION_ERROR');
@@ -36,10 +35,11 @@ class PoolScanner {
         this.config = config; // Store the main config
         this.provider = provider;
         this.poolContractCache = {};
-        logger.debug(`[Scanner Constructor] Config object received keys: ${Object.keys(config || {}).join(', ')}`); // Added log
-        logger.info(`[Scanner] Initialized.`); // Simplified log
+        logger.debug(`[Scanner Constructor] Config object received keys: ${Object.keys(config || {}).join(', ')}`);
+        logger.info(`[Scanner] Initialized.`);
     }
 
+    // --- _getPoolContract remains the same ---
     _getPoolContract(poolAddress) {
         if (!this.poolContractCache[poolAddress]) {
             try {
@@ -62,43 +62,38 @@ class PoolScanner {
         return this.poolContractCache[poolAddress];
     }
 
-    // --- fetchPoolStates requires poolInfos array as argument ---
+    // --- fetchPoolStates (with minor modification to add symbols) ---
     async fetchPoolStates(poolInfos) {
-         logger.debug(`[Scanner fetchPoolStates] Received ${poolInfos?.length ?? 0} poolInfos to fetch.`); // Added log
+         logger.debug(`[Scanner fetchPoolStates] Received ${poolInfos?.length ?? 0} poolInfos to fetch.`);
         if (!poolInfos || poolInfos.length === 0) {
-            // This is the source of the warning seen previously
             logger.warn('[Scanner fetchPoolStates] No pool configurations provided (poolInfos array is empty). Cannot fetch states.');
-            return {}; // Return empty object as per original logic
+            return {};
         }
 
         logger.info(`[Scanner] Fetching live states for ${poolInfos.length} configured pools...`);
         const statePromises = [];
-        const validPoolConfigsForStateFetch = []; // Keep track of configs we attempt to fetch
+        const validPoolConfigsForStateFetch = [];
 
         for (const poolInfo of poolInfos) {
-            // Basic validation of the passed info
             if (!poolInfo || !poolInfo.address || !ethers.isAddress(poolInfo.address) || poolInfo.address === ethers.ZeroAddress || typeof poolInfo.fee !== 'number') {
                 logger.warn(`[Scanner fetchPoolStates] Skipping invalid poolInfo received: ${JSON.stringify(poolInfo)}`);
                 continue;
             }
             try {
                 const poolContract = this._getPoolContract(poolInfo.address);
-                // Fetch slot0 and liquidity using Promise.allSettled for resilience
                 statePromises.push(
                     Promise.allSettled([
                         poolContract.slot0({ blockTag: 'latest' }),
                         poolContract.liquidity({ blockTag: 'latest' })
                     ]).then(results => ({
-                        poolInfo: poolInfo, // Pass the original poolInfo through
+                        poolInfo: poolInfo,
                         slot0Result: results[0],
                         liquidityResult: results[1]
                     }))
                 );
-                validPoolConfigsForStateFetch.push(poolInfo); // Add to list of pools we're trying to fetch
+                validPoolConfigsForStateFetch.push(poolInfo);
             } catch (error) {
-                // Error likely from _getPoolContract if ABI is missing
                 logger.error(`[Scanner fetchPoolStates] Error preparing fetch for pool ${poolInfo.address}: ${error.message}`);
-                // No need to call handleError here as it's called within _getPoolContract or below
             }
         }
 
@@ -108,36 +103,32 @@ class PoolScanner {
         }
 
         logger.debug(`[Scanner fetchPoolStates] Attempting to fetch state for ${statePromises.length} pools.`);
-        const livePoolStates = {}; // Use address as key
+        const livePoolStates = {};
         try {
             const results = await Promise.all(statePromises);
 
             for (const stateResult of results) {
                  const { poolInfo, slot0Result, liquidityResult } = stateResult;
-                 const address = poolInfo.address; // Address from the original info passed in
+                 const address = poolInfo.address;
 
                 if (slot0Result.status !== 'fulfilled' || liquidityResult.status !== 'fulfilled') {
                     const reason = slot0Result.reason?.message || liquidityResult.reason?.message || 'Unknown RPC/Contract Error';
                     logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Fetch FAIL: ${reason}`);
-                    continue; // Skip this pool if fetching failed
+                    continue;
                 }
 
                 const slot0 = slot0Result.value;
                 const liquidity = liquidityResult.value;
 
-                // Validate the fetched data
                 if (slot0 == null || typeof slot0.sqrtPriceX96 === 'undefined' || typeof slot0.tick === 'undefined' || liquidity == null) {
                     logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Invalid State Data: SqrtPrice=${slot0?.sqrtPriceX96}, Tick=${slot0?.tick}, Liquidity=${liquidity}`);
-                    continue; // Skip this pool if state data is invalid
+                    continue;
                 }
-                 // Check for excessively large liquidity which might indicate an issue
                  if (liquidity > MAX_UINT128) {
                       logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Liquidity value > MAX_UINT128 (${liquidity}). Skipping.`);
                       continue;
                  }
 
-
-                // Resolve Token objects using the TOKENS constant map
                 const token0 = TOKENS[poolInfo.token0Symbol];
                 const token1 = TOKENS[poolInfo.token1Symbol];
 
@@ -149,28 +140,12 @@ class PoolScanner {
                 try {
                     const tickCurrent = Number(slot0.tick);
                     const sqrtPriceX96 = slot0.sqrtPriceX96;
-                    const tickSpacing = getTickSpacingFromFeeBps(poolInfo.fee); // Use fee from poolInfo
-
-                    // Create SDK Pool object - simplified constructor usage
-                    // IMPORTANT: Ensure your @uniswap/v3-sdk version doesn't require tickDataProvider here
-                    // If it does, you'll need to implement or mock one.
-                    const sdkPool = new Pool(
-                        token0.sortsBefore(token1) ? token0 : token1, // Ensure tokens are sorted for Pool constructor
-                        token0.sortsBefore(token1) ? token1 : token0,
-                        poolInfo.fee,
-                        sqrtPriceX96.toString(),
-                        liquidity.toString(),
-                        tickCurrent
-                        // tickSpacing argument might not be needed depending on SDK version
-                        // tickSpacing // Add if required
-                    );
+                    const tickSpacing = getTickSpacingFromFeeBps(poolInfo.fee);
 
                     // Store the fetched and processed state
                     livePoolStates[address] = {
                         address: address,
                         fee: poolInfo.fee, // Keep original fee
-                        group: poolInfo.group, // Keep original group name
-                        // Store live data
                         tick: tickCurrent,
                         liquidity: liquidity,
                         sqrtPriceX96: sqrtPriceX96,
@@ -178,22 +153,22 @@ class PoolScanner {
                         // Store resolved SDK Token instances
                         token0: token0,
                         token1: token1,
-                        // Optional: store the SDK Pool instance if simulator doesn't create its own
-                        // sdkPool: sdkPool,
+                        // Added symbols for easier graph building
+                        token0Symbol: poolInfo.token0Symbol,
+                        token1Symbol: poolInfo.token1Symbol,
                     };
                      logger.debug(`[Scanner fetchPoolStates] Successfully processed state for ${address}`);
 
                 } catch (sdkError) {
                      logger.error(`[Scanner fetchPoolStates] Pool ${address} SDK Pool Creation Error: ${sdkError.message}`);
                      if (handleError) handleError(sdkError, `PoolScanner.CreateSDKPool (${address})`);
-                     // Continue to next pool if SDK creation fails
                 }
             } // End processing results loop
 
         } catch (error) {
             logger.error(`[Scanner fetchPoolStates] CRITICAL Error processing pool states: ${error.message}`);
             if (handleError) handleError(error, 'PoolScanner.fetchPoolStates');
-             return {}; // Return empty object on critical error during processing
+             return {};
         }
 
         const finalCount = Object.keys(livePoolStates).length;
@@ -204,126 +179,110 @@ class PoolScanner {
         return livePoolStates; // Return object keyed by address
     }
 
-     // --- findOpportunities needs to process the livePoolStates object returned by fetchPoolStates ---
-     findOpportunities(livePoolStatesMap) { // Changed param name for clarity
-         logger.debug(`[Scanner findOpportunities] Scanning ${Object.keys(livePoolStatesMap || {}).length} live pool states...`);
+     // --- REFACTORED findOpportunities ---
+     findOpportunities(livePoolStatesMap) {
+         logger.info(`[Scanner] Starting opportunity scan with ${Object.keys(livePoolStatesMap || {}).length} live pool states.`);
          const opportunities = [];
-         if (!livePoolStatesMap || Object.keys(livePoolStatesMap).length < 2) {
-              logger.info('[Scanner] Not enough live pool states to find opportunities.');
+         if (!livePoolStatesMap || Object.keys(livePoolStatesMap).length < 3) { // Need at least 3 pools for a potential triangle
+              logger.info('[Scanner] Not enough live pool states (< 3) to form a triangular arbitrage path.');
               return opportunities;
          }
 
-         // --- Reconstruct pools grouped by their 'group' property ---
-         const poolsByGroup = {};
-         for (const address in livePoolStatesMap) {
-             const poolData = livePoolStatesMap[address];
-             const groupName = poolData.group; // Get group from the live state object
-             if (!groupName) {
-                 logger.warn(`[Scanner findOpportunities] Pool ${address} missing group name in live state. Skipping.`);
+         // --- Step 1: Build Token Graph ---
+         const tokenGraph = {}; // Structure: { TokenA_Symbol: { TokenB_Symbol: [poolState1, poolState2, ...] } }
+
+         logger.debug('[Scanner] Building token graph from live pool states...');
+         for (const poolAddress in livePoolStatesMap) {
+             const poolState = livePoolStatesMap[poolAddress];
+
+             if (!poolState.token0Symbol || !poolState.token1Symbol) {
+                 logger.warn(`[Scanner] Pool ${poolAddress} missing token symbols in live state. Skipping during graph build.`);
                  continue;
              }
-             if (!poolsByGroup[groupName]) { poolsByGroup[groupName] = []; }
-             poolsByGroup[groupName].push(poolData);
+             const sym0 = poolState.token0Symbol;
+             const sym1 = poolState.token1Symbol;
+
+             if (!tokenGraph[sym0]) tokenGraph[sym0] = {};
+             if (!tokenGraph[sym0][sym1]) tokenGraph[sym0][sym1] = [];
+             tokenGraph[sym0][sym1].push(poolState);
+
+             if (!tokenGraph[sym1]) tokenGraph[sym1] = {};
+             if (!tokenGraph[sym1][sym0]) tokenGraph[sym1][sym0] = [];
+             tokenGraph[sym1][sym0].push(poolState);
          }
-         // --- ---
-
-         logger.debug(`[Scanner] Scanning groups: ${Object.keys(poolsByGroup).join(', ')}`);
-
-         for (const groupName in poolsByGroup) {
-             const poolsInGroup = poolsByGroup[groupName];
-             if (poolsInGroup.length < 2) { continue; } // Need >= 2 pools per group
-
-             logger.debug(`[Scanner] Comparing ${poolsInGroup.length} pools in group ${groupName}...`);
-
-             // --- Need Borrow Token definition - Get from main config ---
-             // Assuming config structure holds this, adjust if needed
-             const groupConfig = this.config.networks[process.env.NETWORK?.toLowerCase() || 'arbitrum']?.poolGroups?.[groupName];
-             if (!groupConfig || !groupConfig.token0Symbol || !groupConfig.token1Symbol) {
-                 logger.error(`[Scanner findOpportunities] Config Error: Could not find group config for ${groupName} in main config.`);
-                 continue;
-             }
-             // Determine which token (token0 or token1 of the group) is the borrow token
-             // This needs a clear definition in your config or logic based on convention (e.g., WETH in WETH_USDC)
-             // For now, let's assume token0 of the group is the borrow token - THIS MIGHT BE WRONG!
-             const borrowTokenSymbol = groupConfig.token0Symbol; // *** ASSUMPTION ***
-             const sdkBorrowToken = TOKENS[borrowTokenSymbol];
-             if (!sdkBorrowToken) {
-                  logger.error(`[Scanner findOpportunities] Config Error: Borrow token symbol ${borrowTokenSymbol} for group ${groupName} not found in TOKENS constant.`);
-                  continue;
-             }
-             // --- ---
+         logger.debug(`[Scanner] Token graph built. Tokens with edges: ${Object.keys(tokenGraph).join(', ')}`);
+         // --- End Step 1 ---
 
 
-             // Compare each pair of pools within the group
-             for (let i = 0; i < poolsInGroup.length; i++) {
-                 for (let j = i + 1; j < poolsInGroup.length; j++) {
-                     const pool1 = poolsInGroup[i];
-                     const pool2 = poolsInGroup[j];
+         // --- Step 2: Triangle Detection Loop ---
+         logger.debug('[Scanner] Starting triangle detection loops...');
+         const checkedTriangles = new Set(); // To avoid duplicates like A->B->C and A->C->B if pricing isn't checked yet
 
-                     // --- Actual Price Comparison Logic Needed Here ---
-                     // Compare prices derived from pool1.sqrtPriceX96 and pool2.sqrtPriceX96
-                     // This needs careful implementation considering token decimals and direction
-                     // Placeholder: Compare ticks (simple, but often inaccurate for real arb)
-                     const tick1 = pool1.tick;
-                     const tick2 = pool2.tick;
-                     const TICK_DIFF_THRESHOLD = 1; // Minimal difference to consider
+         // Iterate through all possible starting tokens (Token A)
+         for (const tokenASymbol in tokenGraph) {
+             // Iterate through all possible intermediate tokens (Token B) connected to Token A
+             for (const tokenBSymbol in tokenGraph[tokenASymbol]) {
+                 // Iterate through all pools connecting Token A and Token B (P_AB)
+                 for (const poolAB of tokenGraph[tokenASymbol][tokenBSymbol]) {
 
-                     let poolHop1 = null, poolHop2 = null; // Pool to borrow/first swap, pool for second swap
+                     // Iterate through all possible final tokens (Token C) connected to Token B
+                     // Ensure Token C is not the same as Token A (to avoid A->B->A)
+                     if (!tokenGraph[tokenBSymbol]) continue; // Should not happen if graph built correctly, but safe check
+                     for (const tokenCSymbol in tokenGraph[tokenBSymbol]) {
+                         if (tokenCSymbol === tokenASymbol) continue; // Skip A->B->A
 
-                     if (tick2 > tick1 + TICK_DIFF_THRESHOLD) { // Price in pool2 is higher (Sell high)
-                         poolHop1 = pool1; // Borrow/Swap on lower price pool
-                         poolHop2 = pool2; // Swap back on higher price pool
-                     } else if (tick1 > tick2 + TICK_DIFF_THRESHOLD) { // Price in pool1 is higher
-                         poolHop1 = pool2; // Borrow/Swap on lower price pool
-                         poolHop2 = pool1; // Swap back on higher price pool
-                     } else {
-                         continue; // Ticks too close, no obvious opportunity
-                     }
-                     // --- End Placeholder Logic ---
+                         // Iterate through all pools connecting Token B and Token C (P_BC)
+                         for (const poolBC of tokenGraph[tokenBSymbol][tokenCSymbol]) {
+
+                             // Check if Token C is connected back to Token A
+                             if (tokenGraph[tokenCSymbol] && tokenGraph[tokenCSymbol][tokenASymbol]) {
+                                 // Iterate through all pools connecting Token C and Token A (P_CA)
+                                 for (const poolCA of tokenGraph[tokenCSymbol][tokenASymbol]) {
+
+                                     // Now we have a potential triangle: A -> B -> C -> A
+                                     // Using pools: poolAB, poolBC, poolCA
+                                     const path = [tokenASymbol, tokenBSymbol, tokenCSymbol, tokenASymbol];
+                                     const pools = [poolAB, poolBC, poolCA];
+
+                                     // Optional: Prevent checking the same triangle path multiple times
+                                     // E.g. WETH->USDC->ARB->WETH via specific pools
+                                     const triangleId = pools.map(p => p.address).sort().join('-');
+                                     if (checkedTriangles.has(triangleId)) {
+                                         continue;
+                                     }
+                                     checkedTriangles.add(triangleId);
+
+                                     logger.debug(`[Scanner] Found potential triangle: ${path.join(' -> ')} using pools [${pools.map(p => `${p.address}(${p.fee})`).join(', ')}]`);
 
 
-                     // --- Determine Intermediate Token ---
-                     // This assumes poolHop1 has token0 and token1 properties that are SDK Tokens
-                     let sdkIntermediateToken;
-                     if (!poolHop1.token0 || !poolHop1.token1){
-                        logger.warn(`[Scanner] Pool ${poolHop1.address} missing token data in live state. Skipping opp check.`);
-                        continue;
-                     }
-                     if (sdkBorrowToken.equals(poolHop1.token0)) {
-                         sdkIntermediateToken = poolHop1.token1;
-                     } else if (sdkBorrowToken.equals(poolHop1.token1)) {
-                         sdkIntermediateToken = poolHop1.token0;
-                     } else {
-                         logger.error(`[Scanner] Logic Error: Borrow token ${sdkBorrowToken.symbol} doesn't match tokens ${poolHop1.token0.symbol}/${poolHop1.token1.symbol} in pool ${poolHop1.address}.`);
-                         continue;
-                     }
-                     // --- ---
+                                     // --- Step 3: Profitability Check & Opportunity Creation (Placeholder) ---
+                                     // TODO: Calculate theoretical price rate (ignoring fees/slippage first)
+                                     // TODO: If rate > 1, then calculate rate with fees
+                                     // TODO: If rateWithFees > PROFIT_THRESHOLD, create opportunity object
+                                     // Example structure:
+                                     // const opportunity = {
+                                     //     type: 'triangular',
+                                     //     pathSymbols: path, // [A_Symbol, B_Symbol, C_Symbol, A_Symbol]
+                                     //     pathTokens: [TOKENS[tokenASymbol], TOKENS[tokenBSymbol], TOKENS[tokenCSymbol], TOKENS[tokenASymbol]], // SDK Token objects
+                                     //     pools: pools, // [poolAB_State, poolBC_State, poolCA_State]
+                                     //     // estimatedRate: calculatedRate // Add this later
+                                     // };
+                                     // opportunities.push(opportunity);
+                                     // --- End Step 3 Placeholder ---
 
-                     // --- Optional: Liquidity Check ---
-                     // const minLiquidity = ... // Get threshold from config if needed
-                     // if (poolHop1.liquidity < minLiquidity || poolHop2.liquidity < minLiquidity) continue;
-                     // --- ---
+                                 } // End loop P_CA
+                             } // End check C -> A
+                         } // End loop P_BC
+                     } // End loop Token C
+                 } // End loop P_AB
+             } // End loop Token B
+         } // End loop Token A
+         logger.debug(`[Scanner] Finished triangle detection loops.`);
+         // --- End Step 2 ---
 
-                     logger.info(`[Scanner] Potential Opportunity Found: Group ${groupName}, Borrow ${sdkBorrowToken.symbol} from ${poolHop1.fee}bps -> Swap on ${poolHop2.fee}bps`);
 
-                     // Construct opportunity object - Ensure simulator gets all needed data
-                     const opportunity = {
-                         group: groupName, // Pass group name
-                         token0: sdkBorrowToken, // Token being borrowed (starting/ending token)
-                         token1: sdkIntermediateToken, // Intermediate token
-                         // Pass the full live state objects for both hops
-                         poolHop1: poolHop1, // Includes address, fee, tick, liquidity, sqrtPriceX96, tickSpacing, token0, token1
-                         poolHop2: poolHop2,
-                         // Add borrow amount if needed by simulator, get from config
-                         // borrowAmount: Config.flashSwap.borrowAmount // Example
-                     };
-                     opportunities.push(opportunity);
-                 }
-             }
-         } // End group loop
-
-        logger.info(`[Scanner] Found ${opportunities.length} potential opportunities.`);
-        return opportunities;
+         logger.info(`[Scanner] Opportunity scan complete. Found ${opportunities.length} potential opportunities (Profit Check Pending).`);
+         return opportunities;
      }
 }
 
