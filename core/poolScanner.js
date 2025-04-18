@@ -13,7 +13,7 @@ const Q96 = (1n << 96n);
 
 // --- Configuration for Profitability ---
 const PROFIT_THRESHOLD = FixedNumber.fromString("1.0005"); // 0.05% profit threshold
-const LOG_ALL_TRIANGLES = true; // Keep true for now
+const LOG_ALL_TRIANGLES = true; // Keep true for debugging
 
 // Helper Function to get Tick Spacing from Fee Tier
 function getTickSpacingFromFeeBps(feeBps) {
@@ -27,10 +27,11 @@ function getTickSpacingFromFeeBps(feeBps) {
 }
 
 
-// --- REVISED HELPER FUNCTION for Price Calculation (BigInt First) ---
+// --- REVISED HELPER FUNCTION #3 for Price Calculation (Direct FixedNumber) ---
 /**
  * Calculates the price of one token in terms of another using sqrtPriceX96.
  * Returns a FixedNumber for precision.
+ * Uses FixedNumber math inspired by common Q-format handling.
  * @param {object} poolState - The live state object for the pool.
  * @param {string} baseTokenSymbol - The symbol of the token we want the price denominated in.
  * @returns {FixedNumber|null} The price of the other token in terms of the baseToken, or null if invalid.
@@ -46,33 +47,31 @@ function getFixedPriceQuote(poolState, baseTokenSymbol) {
              logger.warn(`[getFixedPriceQuote] sqrtPriceX96 is zero for pool ${poolState.address}.`); return null;
         }
 
-        // --- BigInt Calculation ---
-        // Calculate price^2 = (sqrtPriceX96 / 2^96)^2 = (sqrtPriceX96 * sqrtPriceX96) / (2^192)
-        const numerator = sqrtPriceX96 * sqrtPriceX96;
-        const denominator = Q96 * Q96; // = 1n << 192n;
+        // --- FixedNumber Calculation (Attempt 3) ---
+        // Represent sqrtPriceX96 as a FixedNumber (interpreting it as a value, no implied decimals yet)
+        const sqrtP_FN = FixedNumber.fromValue(sqrtPriceX96, 0);
 
-        // To maintain precision for FixedNumber conversion, scale the numerator.
-        // Using 10^36 for scaling should be sufficient for most price ranges and fits within FixedNumber limits.
-        const scaleFactor = 10n**36n;
-        const scaledNumerator = numerator * scaleFactor;
+        // Represent 2^192 as a FixedNumber (Q96 * Q96)
+        // Note: FixedNumber might struggle with powers this large directly. Let's compute Q192 as BigInt first.
+        const Q192_BigInt = Q96 * Q96; // 1n << 192n
+        const Q192_FN = FixedNumber.fromValue(Q192_BigInt, 0);
 
-        // Perform the division
-        const priceRatioSquaredScaled = scaledNumerator / denominator;
-
-        // Convert the scaled BigInt result to FixedNumber with 36 decimals of precision
-        const priceRatioSquaredFixed = FixedNumber.fromValue(priceRatioSquaredScaled, 36);
-        // --- End BigInt Calculation ---
-
-
-        // This priceRatioSquaredFixed represents Price(Token1 / Token0) * 10^36 / 10^36, without decimal adjustment yet.
+        // Calculate price^2 = (sqrtPriceX96 * sqrtPriceX96) / (2^192) using FixedNumber math
+        // This calculates the raw price ratio of Token1/Token0
+        if (Q192_FN.isZero()) { // Should not happen, but safety check
+             logger.error("[getFixedPriceQuote] Calculated Q192_FN is zero. Cannot divide.");
+             return null;
+        }
+        const priceRatioSquared_FN = sqrtP_FN.mulUnsafe(sqrtP_FN).divUnsafe(Q192_FN);
 
         // Decimal adjustment factor: 10^(decimals0 - decimals1)
         const decimalDiff = token0.decimals - token1.decimals;
-        // Use strings for creating FixedNumbers from powers of 10
         const decimalFactor = FixedNumber.fromString("10").powUnsafe(FixedNumber.fromString(decimalDiff.toString()));
 
         // Price of Token1 in terms of Token0, adjusted for decimals
-        const priceToken1InToken0 = priceRatioSquaredFixed.mulUnsafe(decimalFactor);
+        const priceToken1InToken0 = priceRatioSquared_FN.mulUnsafe(decimalFactor);
+        // --- End FixedNumber Calculation ---
+
 
         // --- Return based on baseTokenSymbol ---
         if (baseTokenSymbol === token0Symbol) {
@@ -84,7 +83,6 @@ function getFixedPriceQuote(poolState, baseTokenSymbol) {
                 logger.warn(`[getFixedPriceQuote] Calculated price of ${token1Symbol}/${token0Symbol} is zero for pool ${poolState.address}. Cannot invert.`);
                 return null;
             }
-            // Price(Token0/Token1) = 1 / Price(Token1/Token0)
             return FixedNumber.fromString("1.0").divUnsafe(priceToken1InToken0);
         } else {
             logger.warn(`[getFixedPriceQuote] baseTokenSymbol ${baseTokenSymbol} not found in pool ${poolState.address} (${token0Symbol}/${token1Symbol})`);
@@ -92,9 +90,10 @@ function getFixedPriceQuote(poolState, baseTokenSymbol) {
         }
     } catch (error) {
         // Catch potential errors during FixedNumber/BigInt operations
-        logger.error(`[getFixedPriceQuote] Error calculating price for pool ${poolState?.address}: ${error.message}`);
-        if (error instanceof Error && (error.message.includes('overflow') || error.message.includes('underflow'))) {
-             logger.error(`[getFixedPriceQuote] Possible overflow/underflow during calculation. Pool: ${poolState?.address}, sqrtPrice: ${poolState?.sqrtPriceX96}`);
+        logger.error(`[getFixedPriceQuote] Error calculating price for pool ${poolState?.address}: ${error.message} (sqrtPriceX96: ${poolState?.sqrtPriceX96})`);
+        // Log specific numeric faults if they occur
+        if (error.code === 'NUMERIC_FAULT') {
+             logger.error(`[getFixedPriceQuote] Numeric fault detail: ${error.fault} on value ${error.value}`);
         }
         return null;
     }
@@ -205,7 +204,7 @@ class PoolScanner {
         return livePoolStates;
     }
 
-     // --- REFACTORED findOpportunities (Using Revised Price Calc) ---
+     // --- REFACTORED findOpportunities (Using Revised Price Calc #3) ---
      findOpportunities(livePoolStatesMap) {
          logger.info(`[Scanner] Starting opportunity scan with ${Object.keys(livePoolStatesMap || {}).length} live pool states.`);
          const opportunities = [];
@@ -291,8 +290,6 @@ class PoolScanner {
                                          }
                                      } catch (calcError) {
                                         logger.warn(`[Scanner] Error during rate/fee calculation for triangle ${pathSymbols.join('->')}: ${calcError.message}`);
-                                        // Log individual prices if calculation fails
-                                        // logger.warn(`Prices: A->B=${priceB_in_A?.toString()}, B->C=${priceC_in_B?.toString()}, C->A=${priceA_in_C?.toString()}`);
                                      }
                                  } // End loop P_CA
                              } // End check C -> A
