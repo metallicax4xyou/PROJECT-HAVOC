@@ -12,10 +12,8 @@ const MAX_UINT128 = (1n << 128n) - 1n;
 const Q96 = (1n << 96n);
 
 // --- Configuration for Profitability ---
-// Define PROFIT_THRESHOLD as a FixedNumber (e.g., 1.0005 for 0.05% profit after fees)
-// IMPORTANT: Adjust this based on expected gas costs and desired profit
-const PROFIT_THRESHOLD = FixedNumber.fromString("1.0005");
-const LOG_ALL_TRIANGLES = false; // Set to true for verbose logging of every triangle rate
+const PROFIT_THRESHOLD = FixedNumber.fromString("1.0005"); // 0.05% profit threshold
+const LOG_ALL_TRIANGLES = true; // *** CHANGED TO TRUE FOR DETAILED LOGGING ***
 
 // Helper Function to get Tick Spacing from Fee Tier
 function getTickSpacingFromFeeBps(feeBps) {
@@ -150,7 +148,8 @@ class PoolScanner {
                         tickSpacing: getTickSpacingFromFeeBps(poolInfo.fee), token0, token1,
                         token0Symbol: poolInfo.token0Symbol, token1Symbol: poolInfo.token1Symbol,
                     };
-                     logger.debug(`[Scanner fetchPoolStates] Successfully processed state for ${address}`);
+                     // Removed the per-pool success log from fetch to reduce noise when LOG_ALL_TRIANGLES is on
+                     // logger.debug(`[Scanner fetchPoolStates] Successfully processed state for ${address}`);
                 } catch (sdkError) {
                      logger.error(`[Scanner fetchPoolStates] Pool ${address} SDK Pool Creation Error: ${sdkError.message}`);
                      if (handleError) handleError(sdkError, `PoolScanner.CreateSDKPool (${address})`);
@@ -168,7 +167,7 @@ class PoolScanner {
         return livePoolStates;
     }
 
-     // --- REFACTORED findOpportunities (Now with Fee Calculation & Threshold Check) ---
+     // --- REFACTORED findOpportunities (Logging Enabled) ---
      findOpportunities(livePoolStatesMap) {
          logger.info(`[Scanner] Starting opportunity scan with ${Object.keys(livePoolStatesMap || {}).length} live pool states.`);
          const opportunities = [];
@@ -179,7 +178,7 @@ class PoolScanner {
 
          // --- Step 1: Build Token Graph ---
          const tokenGraph = {};
-         logger.debug('[Scanner] Building token graph from live pool states...');
+         if (LOG_ALL_TRIANGLES) logger.debug('[Scanner] Building token graph...'); // Less verbose graph build log
          for (const poolAddress in livePoolStatesMap) {
              const poolState = livePoolStatesMap[poolAddress];
              if (!poolState.token0Symbol || !poolState.token1Symbol) { logger.warn(`[Scanner] Pool ${poolAddress} missing token symbols. Skipping.`); continue; }
@@ -187,13 +186,13 @@ class PoolScanner {
              if (!tokenGraph[sym0]) tokenGraph[sym0] = {}; if (!tokenGraph[sym0][sym1]) tokenGraph[sym0][sym1] = []; tokenGraph[sym0][sym1].push(poolState);
              if (!tokenGraph[sym1]) tokenGraph[sym1] = {}; if (!tokenGraph[sym1][sym0]) tokenGraph[sym1][sym0] = []; tokenGraph[sym1][sym0].push(poolState);
          }
-         logger.debug(`[Scanner] Token graph built. Tokens with edges: ${Object.keys(tokenGraph).join(', ')}`);
+         if (LOG_ALL_TRIANGLES) logger.debug(`[Scanner] Token graph built. Edges: ${Object.keys(tokenGraph).join(', ')}`);
          // --- End Step 1 ---
 
          // --- Step 2 & 3: Triangle Detection, Price Calculation & Fee-Adjusted Profit Check ---
          logger.debug(`[Scanner] Starting triangle detection and profitability analysis (Threshold: ${PROFIT_THRESHOLD.toString()})...`);
          const checkedTriangles = new Set();
-         const ONE = FixedNumber.fromString("1.0"); // Use FixedNumber for 1.0
+         const ONE = FixedNumber.fromString("1.0");
 
          for (const tokenASymbol in tokenGraph) {
              for (const tokenBSymbol in tokenGraph[tokenASymbol]) {
@@ -212,10 +211,9 @@ class PoolScanner {
 
                                      const pathSymbols = [tokenASymbol, tokenBSymbol, tokenCSymbol, tokenASymbol];
 
-                                     // --- Calculate Theoretical Rate (Ignoring Fees First) ---
-                                     const priceB_in_A = getFixedPriceQuote(poolAB, tokenASymbol); // Price of B per 1 A
-                                     const priceC_in_B = getFixedPriceQuote(poolBC, tokenBSymbol); // Price of C per 1 B
-                                     const priceA_in_C = getFixedPriceQuote(poolCA, tokenCSymbol); // Price of A per 1 C
+                                     const priceB_in_A = getFixedPriceQuote(poolAB, tokenASymbol);
+                                     const priceC_in_B = getFixedPriceQuote(poolBC, tokenBSymbol);
+                                     const priceA_in_C = getFixedPriceQuote(poolCA, tokenCSymbol);
 
                                      if (!priceB_in_A || !priceC_in_B || !priceA_in_C) {
                                          if (LOG_ALL_TRIANGLES) logger.debug(`[Scanner] Skipping triangle ${pathSymbols.join('->')} due to price calculation error.`);
@@ -223,41 +221,28 @@ class PoolScanner {
                                      }
 
                                      try {
-                                         // Overall raw rate: If you start with 1 A, how many A do you get back?
                                          const rawRate = priceB_in_A.mulUnsafe(priceC_in_B).mulUnsafe(priceA_in_C);
-
-                                         // --- Calculate Fee Multiplier ---
-                                         // Fee is charged on input amount. Multiplier = (1 - fee_rate)
-                                         // Fee rate = fee_bps / 10000
                                          const feeAB = FixedNumber.fromString(poolAB.fee.toString()).divUnsafe(FixedNumber.fromString("10000"));
                                          const feeBC = FixedNumber.fromString(poolBC.fee.toString()).divUnsafe(FixedNumber.fromString("10000"));
                                          const feeCA = FixedNumber.fromString(poolCA.fee.toString()).divUnsafe(FixedNumber.fromString("10000"));
-
                                          const feeMultiplier = ONE.subUnsafe(feeAB).mulUnsafe(ONE.subUnsafe(feeBC)).mulUnsafe(ONE.subUnsafe(feeCA));
-
-                                         // --- Calculate Rate Adjusted for Fees ---
                                          const rateWithFees = rawRate.mulUnsafe(feeMultiplier);
 
+                                         // *** DETAILED LOGGING ENABLED ***
                                          if (LOG_ALL_TRIANGLES) {
-                                             logger.debug(`[Scanner] Triangle ${pathSymbols.join('->')} | Pools [${pools.map(p => `${p.address.slice(0, 6)}..(${p.fee})`).join(', ')}] | Raw Rate: ${rawRate.toString()} | Fee Adj Rate: ${rateWithFees.toString()}`);
+                                             // Log with slightly more precision using toFixed
+                                             logger.debug(`[Scanner] Triangle ${pathSymbols.join('->')} | Pools [${pools.map(p => `${p.address.slice(0, 6)}..(${p.fee})`).join(', ')}] | Raw Rate: ${rawRate.toUnsafeFloat().toFixed(8)} | Fee Adj Rate: ${rateWithFees.toUnsafeFloat().toFixed(8)}`);
                                          }
 
-                                         // --- Final Profitability Check (Rate with Fees > Threshold) ---
                                          if (rateWithFees.gt(PROFIT_THRESHOLD)) {
                                              logger.info(`✅ [Scanner] PROFITABLE OPPORTUNITY FOUND: ${pathSymbols.join('->')} | Pools: [${pools.map(p => `${p.address.slice(0, 6)}..(${p.fee})`).join(', ')}] | Fee Adj Rate: ${rateWithFees.toString()} > ${PROFIT_THRESHOLD.toString()}`);
-
                                              const opportunity = {
-                                                 type: 'triangular',
-                                                 pathSymbols: pathSymbols,
+                                                 type: 'triangular', pathSymbols,
                                                  pathTokens: [TOKENS[tokenASymbol], TOKENS[tokenBSymbol], TOKENS[tokenCSymbol], TOKENS[tokenASymbol]],
-                                                 pools: pools, // Full pool state objects needed by simulator
-                                                 estimatedRate: rateWithFees.toString(), // Store fee-adjusted rate
-                                                 rawRate: rawRate.toString() // Also store raw rate for info
+                                                 pools, estimatedRate: rateWithFees.toString(), rawRate: rawRate.toString()
                                              };
                                              opportunities.push(opportunity);
                                          }
-                                         // --- End Profitability Check ---
-
                                      } catch (calcError) {
                                         logger.warn(`[Scanner] Error during rate/fee calculation for triangle ${pathSymbols.join('->')}: ${calcError.message}`);
                                      }
@@ -271,8 +256,7 @@ class PoolScanner {
          logger.debug(`[Scanner] Finished triangle detection and profitability analysis.`);
          // --- End Step 2 & 3 ---
 
-
-         logger.info(`[Scanner] Opportunity scan complete. Found ${opportunities.length} profitable opportunities (Fee Adjusted Rate > ${PROFIT_THRESHOLD.toString()}).`);
+         logger.info(`[Scanner] Opportunity scan complete. Found ${opportunities.length} profitable opportunities (Fee Adjusted Rate > ${PROFIT_THRESHOLD.toString()}). Checked ${checkedTriangles.size} unique triangles.`); // Added triangle count
          return opportunities;
      }
 }
