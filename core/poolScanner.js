@@ -1,11 +1,11 @@
 // /workspaces/arbitrum-flash/core/poolScanner.js
-const { ethers, FixedNumber } = require('ethers'); // Keep FixedNumber for threshold constant formatting & final rate output string
-const { Pool } = require('@uniswap/v3-sdk'); // Keep for context, not directly used in price calc
+const { ethers, FixedNumber } = require('ethers'); // Keep FixedNumber for formatting
+const { Pool } = require('@uniswap/v3-sdk');
 const { Token } = require('@uniswap/sdk-core');
 const { ABIS } = require('../constants/abis');
 const logger = require('../utils/logger');
 const { ArbitrageError, handleError } = require('../utils/errorHandler');
-const { getPoolInfo } = require('./poolDataProvider'); // Kept for context
+const { getPoolInfo } = require('./poolDataProvider');
 const { TOKENS } = require('../constants/tokens');
 
 const MAX_UINT128 = (1n << 128n) - 1n;
@@ -13,12 +13,11 @@ const Q96 = (1n << 96n);
 const Q192 = Q96 * Q96; // Precompute Q192
 
 // --- Configuration ---
-// Using BigInt representation for threshold comparison
 const BIGNUM_SCALE_DECIMALS = 36; // Number of decimals for scaling
 const BIGNUM_SCALE = 10n ** BigInt(BIGNUM_SCALE_DECIMALS);
 // PROFIT_THRESHOLD = 1.0005 --> represented as BigInt scaled
 const PROFIT_THRESHOLD_SCALED = (10005n * BIGNUM_SCALE) / 10000n;
-const LOG_ALL_TRIANGLES = true; // Set to true for verbose debugging logs
+const LOG_ALL_TRIANGLES = true; // Keep true for debugging
 
 // Helper Function to get Tick Spacing from Fee Tier
 function getTickSpacingFromFeeBps(feeBps) {
@@ -40,23 +39,17 @@ function getTickSpacingFromFeeBps(feeBps) {
  * @returns {bigint|null} The scaled price ratio, or null on error.
  */
 function getScaledPriceRatio(sqrtPriceX96) {
-    if (sqrtPriceX96 === 0n) return 0n; // Price is 0
+    if (sqrtPriceX96 === 0n) return 0n;
     try {
-        // Calculate numerator = sqrtPriceX96 * sqrtPriceX96 * SCALE
-        // Use intermediate variable to potentially catch overflow earlier if sqrtPriceX96 is huge
         const sqrtP_squared = sqrtPriceX96 * sqrtPriceX96;
         const numerator = sqrtP_squared * BIGNUM_SCALE;
-
-        // Ensure Q192 is not zero (should never happen)
         if (Q192 === 0n) {
             logger.error("[getScaledPriceRatio] Q192 constant is zero!");
             return null;
         }
-
         const priceRatioScaled = numerator / Q192;
         return priceRatioScaled;
     } catch (error) {
-        // Catch potential BigInt calculation errors (e.g., overflow if intermediate numbers exceed BigInt limits, though unlikely here)
         logger.error(`[getScaledPriceRatio] Error calculating scaled price ratio: ${error.message} for sqrtP=${sqrtPriceX96}`);
         return null;
     }
@@ -66,21 +59,22 @@ function getScaledPriceRatio(sqrtPriceX96) {
 function formatScaledBigIntForLogging(scaledValue, scaleDecimals = BIGNUM_SCALE_DECIMALS) {
     if (typeof scaledValue !== 'bigint') return 'N/A';
     try {
-        // Basic string formatting for logging, might lose some precision visually
         const scaleFactor = 10n ** BigInt(scaleDecimals);
-        const integerPart = scaledValue / scaleFactor;
-        const fractionalPart = scaledValue % scaleFactor;
+        // Handle potential negative values if they ever occur (unlikely for rates)
+        const isNegative = scaledValue < 0n;
+        const absValue = isNegative ? -scaledValue : scaledValue;
 
-        // Pad fractional part and take leading digits for readability
+        const integerPart = absValue / scaleFactor;
+        const fractionalPart = absValue % scaleFactor;
+
         const fractionalString = fractionalPart.toString().padStart(scaleDecimals, '0');
         const displayDecimals = 8; // How many decimals to show in logs
         const displayFractional = fractionalString.slice(0, displayDecimals);
 
-        return `${integerPart}.${displayFractional}`;
+        return `${isNegative ? '-' : ''}${integerPart}.${displayFractional}`;
     } catch (e) {
         logger.error(`Error formatting BigInt ${scaledValue} for logging: ${e.message}`);
-        // Fallback to raw string if formatting fails
-        return scaledValue.toString() + ` (Scale ${scaleDecimals})`;
+        return scaledValue.toString() + ` (Scale ${scaleDecimals})`; // Fallback
     }
 }
 
@@ -108,7 +102,6 @@ class PoolScanner {
                 this.poolContractCache[poolAddress] = new ethers.Contract(
                     poolAddress, ABIS.UniswapV3Pool, this.provider
                 );
-                 // logger.debug(`[Scanner _getPoolContract] Created contract instance for ${poolAddress}`); // Reduce noise
             } catch (error) {
                  logger.error(`[Scanner _getPoolContract] Error creating contract instance for ${poolAddress}: ${error.message}`);
                  if (handleError) handleError(error, `PoolScanner._getPoolContract (${poolAddress})`);
@@ -143,7 +136,6 @@ class PoolScanner {
         if (statePromises.length === 0) {
             logger.warn('[Scanner fetchPoolStates] No valid pools to fetch states for.'); return {};
         }
-        // logger.debug(`[Scanner fetchPoolStates] Attempting to fetch state for ${statePromises.length} pools.`); // Reduce noise
         const livePoolStates = {};
         try {
             const results = await Promise.all(statePromises);
@@ -154,12 +146,11 @@ class PoolScanner {
                     logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Fetch FAIL: ${reason}`); continue;
                 }
                 const slot0 = slot0Result.value; const liquidity = liquidityResult.value;
-                // Ensure sqrtPriceX96 is treated as BigInt
                 if (slot0 == null || typeof slot0.sqrtPriceX96 === 'undefined' || typeof slot0.tick === 'undefined' || liquidity == null) {
                     logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Invalid State Data: SqrtPrice=${slot0?.sqrtPriceX96}, Tick=${slot0?.tick}, Liquidity=${liquidity}`); continue;
                 }
-                 const currentSqrtPriceX96 = BigInt(slot0.sqrtPriceX96); // Explicitly cast to BigInt
-                 const currentLiquidity = BigInt(liquidity); // Explicitly cast to BigInt
+                 const currentSqrtPriceX96 = BigInt(slot0.sqrtPriceX96);
+                 const currentLiquidity = BigInt(liquidity);
 
                  if (currentLiquidity > MAX_UINT128) {
                       logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Liquidity value > MAX_UINT128 (${currentLiquidity}). Skipping.`); continue;
@@ -170,9 +161,8 @@ class PoolScanner {
                 }
                 try {
                     livePoolStates[address] = {
-                        address, fee: poolInfo.fee, tick: Number(slot0.tick), // tick is usually safe as Number
-                        liquidity: currentLiquidity, // Store as BigInt
-                        sqrtPriceX96: currentSqrtPriceX96, // Store as BigInt
+                        address, fee: poolInfo.fee, tick: Number(slot0.tick),
+                        liquidity: currentLiquidity, sqrtPriceX96: currentSqrtPriceX96,
                         tickSpacing: getTickSpacingFromFeeBps(poolInfo.fee), token0, token1,
                         token0Symbol: poolInfo.token0Symbol, token1Symbol: poolInfo.token1Symbol,
                     };
@@ -207,7 +197,6 @@ class PoolScanner {
          if (LOG_ALL_TRIANGLES) logger.debug('[Scanner] Building token graph...');
          for (const poolAddress in livePoolStatesMap) {
              const poolState = livePoolStatesMap[poolAddress];
-             // Ensure poolState and tokens exist before accessing symbols
              if (!poolState || !poolState.token0Symbol || !poolState.token1Symbol) {
                  logger.warn(`[Scanner] Pool ${poolAddress} missing token symbols or state. Skipping graph build.`);
                  continue;
@@ -225,29 +214,19 @@ class PoolScanner {
 
          for (const tokenASymbol in tokenGraph) {
              for (const tokenBSymbol in tokenGraph[tokenASymbol]) {
-                 for (const poolAB of tokenGraph[tokenASymbol][tokenBSymbol]) { // Pool for A -> B
-                     // Add checks for pool validity before accessing properties
-                     if (!poolAB || !poolAB.token0 || !poolAB.token1 || !poolAB.sqrtPriceX96) {
-                          logger.warn(`[Scanner] Invalid poolAB state encountered for ${tokenASymbol}->${tokenBSymbol}. Skipping.`);
-                          continue;
-                     }
-                     if (!tokenGraph[tokenBSymbol]) continue; // Check intermediate token exists in graph
+                 for (const poolAB of tokenGraph[tokenASymbol][tokenBSymbol]) {
+                     if (!poolAB || !poolAB.token0 || !poolAB.token1 || !poolAB.sqrtPriceX96) { continue; }
+                     if (!tokenGraph[tokenBSymbol]) continue;
 
                      for (const tokenCSymbol in tokenGraph[tokenBSymbol]) {
-                         if (tokenCSymbol === tokenASymbol) continue; // Skip A->B->A
+                         if (tokenCSymbol === tokenASymbol) continue;
 
-                         for (const poolBC of tokenGraph[tokenBSymbol][tokenCSymbol]) { // Pool for B -> C
-                              if (!poolBC || !poolBC.token0 || !poolBC.token1 || !poolBC.sqrtPriceX96) {
-                                   logger.warn(`[Scanner] Invalid poolBC state encountered for ${tokenBSymbol}->${tokenCSymbol}. Skipping.`);
-                                   continue;
-                              }
+                         for (const poolBC of tokenGraph[tokenBSymbol][tokenCSymbol]) {
+                              if (!poolBC || !poolBC.token0 || !poolBC.token1 || !poolBC.sqrtPriceX96) { continue; }
 
                              if (tokenGraph[tokenCSymbol] && tokenGraph[tokenCSymbol][tokenASymbol]) {
-                                 for (const poolCA of tokenGraph[tokenCSymbol][tokenASymbol]) { // Pool for C -> A
-                                     if (!poolCA || !poolCA.token0 || !poolCA.token1 || !poolCA.sqrtPriceX96) {
-                                          logger.warn(`[Scanner] Invalid poolCA state encountered for ${tokenCSymbol}->${tokenASymbol}. Skipping.`);
-                                          continue;
-                                     }
+                                 for (const poolCA of tokenGraph[tokenCSymbol][tokenASymbol]) {
+                                     if (!poolCA || !poolCA.token0 || !poolCA.token1 || !poolCA.sqrtPriceX96) { continue; }
 
                                      const pools = [poolAB, poolBC, poolCA];
                                      const triangleId = pools.map(p => p.address).sort().join('-');
@@ -257,8 +236,6 @@ class PoolScanner {
                                      const pathSymbols = [tokenASymbol, tokenBSymbol, tokenCSymbol, tokenASymbol];
 
                                      try {
-                                         // --- Calculate SCALED prices using BigInt ---
-
                                          // 1. Get Price Ratios (Token1/Token0) * SCALE
                                          const priceRatioAB_scaled = getScaledPriceRatio(poolAB.sqrtPriceX96);
                                          const priceRatioBC_scaled = getScaledPriceRatio(poolBC.sqrtPriceX96);
@@ -269,45 +246,71 @@ class PoolScanner {
                                              continue;
                                          }
 
-                                         // 2. Adjust for direction and decimals (A -> B, B -> C, C -> A)
+                                         // 2. Adjust for direction and decimals
                                          let scaledPrice_AtoB, scaledPrice_BtoC, scaledPrice_CtoA;
 
-                                         // Price A -> B (How many B for 1 A?) - Uses priceRatioAB (T1/T0)
+                                         // Price A -> B
                                          const decimals_T0_AB = BigInt(poolAB.token0.decimals);
                                          const decimals_T1_AB = BigInt(poolAB.token1.decimals);
                                          const decimalDiff_AB = decimals_T0_AB - decimals_T1_AB;
-                                         const scaleDecimalFactor_AB = 10n ** BIGNUM_SCALE; // Use BIGNUM_SCALE directly
-
-                                         if (poolAB.token0Symbol === tokenASymbol) { // A is Token0, B is Token1. Need Price(B/A) = Price(T1/T0)
-                                             scaledPrice_AtoB = decimalDiff_AB > 0
-                                                 ? (priceRatioAB_scaled * (10n ** decimalDiff_AB)) / scaleDecimalFactor_AB // Apply decimal adjust, keep scale
-                                                 : (priceRatioAB_scaled * scaleDecimalFactor_AB) / (10n ** (-decimalDiff_AB)); // Apply decimal adjust, keep scale
-                                         } else { // A is Token1, B is Token0. Need Price(B/A) = Price(T0/T1) = 1 / Price(T1/T0)
-                                             const price_T1T0_adj_scaled = decimalDiff_AB > 0
-                                                 ? (priceRatioAB_scaled * (10n ** decimalDiff_AB)) / scaleDecimalFactor_AB
-                                                 : (priceRatioAB_scaled * scaleDecimalFactor_AB) / (10n ** (-decimalDiff_AB));
-
-                                             if (price_T1T0_adj_scaled === 0n) { throw new Error('Zero price in inversion A->B'); }
-                                             // Inverse (1*SCALE) / (Price*SCALE) = (1 / Price) * SCALE
-                                             scaledPrice_AtoB = (BIGNUM_SCALE * BIGNUM_SCALE) / price_T1T0_adj_scaled;
+                                         if (poolAB.token0Symbol === tokenASymbol) { // A=T0, B=T1. Price(B/A) = P(T1/T0)
+                                              scaledPrice_AtoB = decimalDiff_AB > 0
+                                                   ? (priceRatioAB_scaled * (10n ** decimalDiff_AB))
+                                                   : (priceRatioAB_scaled / (10n ** (-decimalDiff_AB)));
+                                         } else { // A=T1, B=T0. Price(B/A) = P(T0/T1) = 1 / P(T1/T0)
+                                              const price_T1T0_adj_scaled = decimalDiff_AB > 0
+                                                   ? (priceRatioAB_scaled * (10n ** decimalDiff_AB))
+                                                   : (priceRatioAB_scaled / (10n ** (-decimalDiff_AB)));
+                                              if (price_T1T0_adj_scaled === 0n) { throw new Error('Zero price in inversion A->B'); }
+                                              scaledPrice_AtoB = (BIGNUM_SCALE * BIGNUM_SCALE) / price_T1T0_adj_scaled;
                                          }
 
-                                         // Price B -> C (How many C for 1 B?) - Uses priceRatioBC (T1/T0)
+                                         // Price B -> C
                                          const decimals_T0_BC = BigInt(poolBC.token0.decimals);
                                          const decimals_T1_BC = BigInt(poolBC.token1.decimals);
                                          const decimalDiff_BC = decimals_T0_BC - decimals_T1_BC;
-                                         const scaleDecimalFactor_BC = 10n ** BIGNUM_SCALE;
-
-                                         if (poolBC.token0Symbol === tokenBSymbol) { // B is T0, C is T1. Need Price(C/B) = Price(T1/T0)
+                                         if (poolBC.token0Symbol === tokenBSymbol) { // B=T0, C=T1. Price(C/B) = P(T1/T0)
                                               scaledPrice_BtoC = decimalDiff_BC > 0
-                                                 ? (priceRatioBC_scaled * (10n ** decimalDiff_BC)) / scaleDecimalFactor_BC
-                                                 : (priceRatioBC_scaled * scaleDecimalFactor_BC) / (10n ** (-decimalDiff_BC));
-                                         } else { // B is T1, C is T0. Need Price(C/B) = Price(T0/T1) = 1 / Price(T1/T0)
+                                                 ? (priceRatioBC_scaled * (10n ** decimalDiff_BC))
+                                                 : (priceRatioBC_scaled / (10n ** (-decimalDiff_BC)));
+                                         } else { // B=T1, C=T0. Price(C/B) = P(T0/T1) = 1 / P(T1/T0)
                                              const price_T1T0_adj_scaled = decimalDiff_BC > 0
-                                                 ? (priceRatioBC_scaled * (10n ** decimalDiff_BC)) / scaleDecimalFactor_BC
-                                                 : (priceRatioBC_scaled * scaleDecimalFactor_BC) / (10n ** (-decimalDiff_BC));
+                                                 ? (priceRatioBC_scaled * (10n ** decimalDiff_BC))
+                                                 : (priceRatioBC_scaled / (10n ** (-decimalDiff_BC)));
                                              if (price_T1T0_adj_scaled === 0n) { throw new Error('Zero price in inversion B->C'); }
                                              scaledPrice_BtoC = (BIGNUM_SCALE * BIGNUM_SCALE) / price_T1T0_adj_scaled;
                                          }
 
-                            
+                                         // Price C -> A
+                                         const decimals_T0_CA = BigInt(poolCA.token0.decimals);
+                                         const decimals_T1_CA = BigInt(poolCA.token1.decimals);
+                                         const decimalDiff_CA = decimals_T0_CA - decimals_T1_CA;
+                                         if (poolCA.token0Symbol === tokenCSymbol) { // C=T0, A=T1. Price(A/C) = P(T1/T0)
+                                              scaledPrice_CtoA = decimalDiff_CA > 0
+                                                 ? (priceRatioCA_scaled * (10n ** decimalDiff_CA))
+                                                 : (priceRatioCA_scaled / (10n ** (-decimalDiff_CA)));
+                                         } else { // C=T1, A=T0. Price(A/C) = P(T0/T1) = 1 / P(T1/T0)
+                                             const price_T1T0_adj_scaled = decimalDiff_CA > 0
+                                                 ? (priceRatioCA_scaled * (10n ** decimalDiff_CA))
+                                                 : (priceRatioCA_scaled / (10n ** (-decimalDiff_CA)));
+                                             if (price_T1T0_adj_scaled === 0n) { throw new Error('Zero price in inversion C->A'); }
+                                             scaledPrice_CtoA = (BIGNUM_SCALE * BIGNUM_SCALE) / price_T1T0_adj_scaled;
+                                         }
+
+                                         // 3. Calculate Raw Rate (scaled)
+                                         const rawRate_scaled = (scaledPrice_AtoB * scaledPrice_BtoC * scaledPrice_CtoA) / (BIGNUM_SCALE * BIGNUM_SCALE);
+
+                                         // 4. Calculate Fee Multiplier (scaled)
+                                         const feeAB_bps = BigInt(poolAB.fee);
+                                         const feeBC_bps = BigInt(poolBC.fee);
+                                         const feeCA_bps = BigInt(poolCA.fee);
+                                         const feeNum_scaled = (10000n - feeAB_bps) * (10000n - feeBC_bps) * (10000n - feeCA_bps) * BIGNUM_SCALE;
+                                         const feeDenom = 10000n * 10000n * 10000n;
+                                         const feeMultiplier_scaled = feeNum_scaled / feeDenom;
+
+                                         // 5. Calculate Final Rate (scaled)
+                                         const rateWithFees_scaled = (rawRate_scaled * feeMultiplier_scaled) / BIGNUM_SCALE;
+
+                                         // Log details if enabled
+                                         if (LOG_ALL_TRIANGLES) {
+                                             logger.debug(`[Scanner] Triangle ${pathSymbols.join('->')} | Pools [${pools.map(p => `${p.address.slice(
