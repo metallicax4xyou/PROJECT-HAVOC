@@ -1,5 +1,5 @@
 // /workspaces/arbitrum-flash/core/poolScanner.js
-const { ethers, FixedNumber } = require('ethers'); // Added FixedNumber
+const { ethers, FixedNumber } = require('ethers'); // FixedNumber import is correct
 const { Pool } = require('@uniswap/v3-sdk');
 const { Token } = require('@uniswap/sdk-core');
 const { ABIS } = require('../constants/abis');
@@ -22,7 +22,7 @@ function getTickSpacingFromFeeBps(feeBps) {
     return spacing;
 }
 
-// --- NEW HELPER FUNCTION for Price Calculation ---
+// --- HELPER FUNCTION for Price Calculation (Corrected FixedNumber Usage) ---
 /**
  * Calculates the price of one token in terms of another using sqrtPriceX96.
  * Returns a FixedNumber for precision.
@@ -38,18 +38,23 @@ function getFixedPriceQuote(poolState, baseTokenSymbol) {
             logger.warn(`[getFixedPriceQuote] Invalid token data in poolState for ${poolState.address}`);
             return null;
         }
+        if (sqrtPriceX96 === 0n) { // Avoid division by zero if price is zero
+             logger.warn(`[getFixedPriceQuote] sqrtPriceX96 is zero for pool ${poolState.address}. Cannot calculate price.`);
+             return null;
+        }
 
-        // Convert sqrtPriceX96 (BigInt) to a FixedNumber
-        const sqrtPriceX96Fixed = FixedNumber.fromValue(sqrtPriceX96, 0, "fixed128x96"); // Special format for sqrtPrice
-        const Q96Fixed = FixedNumber.fromValue(Q96, 0, "fixed128x96"); // Q96 as FixedNumber
+        // Convert sqrtPriceX96 (BigInt) to a FixedNumber - fromValue is correct here
+        const sqrtPriceX96Fixed = FixedNumber.fromValue(sqrtPriceX96, 0, "fixed128x96");
+        const Q96Fixed = FixedNumber.fromValue(Q96, 0, "fixed128x96");
 
         // Calculate price squared: (sqrtPriceX96 / 2^96)^2
         const priceRatioFixed = sqrtPriceX96Fixed.divUnsafe(Q96Fixed).mulUnsafe(sqrtPriceX96Fixed.divUnsafe(Q96Fixed));
 
         // This priceRatioFixed represents Price(Token1 / Token0) without decimal adjustment
 
-        // Decimal adjustment factor: 10^(decimals0 - decimals1)
-        const decimalFactor = FixedNumber.from(10).powUnsafe(FixedNumber.from(token0.decimals - token1.decimals));
+        // Decimal adjustment factor: 10^(decimals0 - decimals1) - Use fromString for numbers
+        const decimalDiff = token0.decimals - token1.decimals;
+        const decimalFactor = FixedNumber.fromString("10").powUnsafe(FixedNumber.fromString(decimalDiff.toString()));
 
         // Price of Token1 in terms of Token0, adjusted for decimals
         const priceToken1InToken0 = priceRatioFixed.mulUnsafe(decimalFactor);
@@ -59,20 +64,22 @@ function getFixedPriceQuote(poolState, baseTokenSymbol) {
             return priceToken1InToken0;
         } else if (baseTokenSymbol === token1Symbol) {
             // We want the price of Token0 in terms of Token1
-            // Avoid division by zero or very small numbers if price is extreme
             if (priceToken1InToken0.isZero()) {
                 logger.warn(`[getFixedPriceQuote] Calculated price of ${token1Symbol}/${token0Symbol} is zero for pool ${poolState.address}. Cannot invert.`);
-                return null; // Or handle as appropriate (e.g., return a very large number?)
+                return null;
             }
-            // Price(Token0/Token1) = 1 / Price(Token1/Token0)
-            return FixedNumber.from(1.0).divUnsafe(priceToken1InToken0);
+            // Price(Token0/Token1) = 1 / Price(Token1/Token0) - Use fromString for "1.0"
+            return FixedNumber.fromString("1.0").divUnsafe(priceToken1InToken0);
         } else {
             logger.warn(`[getFixedPriceQuote] baseTokenSymbol ${baseTokenSymbol} not found in pool ${poolState.address} (${token0Symbol}/${token1Symbol})`);
-            return null; // Base token doesn't match either pool token
+            return null;
         }
     } catch (error) {
+        // Catch potential errors during FixedNumber operations (e.g., overflow if numbers are massive)
         logger.error(`[getFixedPriceQuote] Error calculating price for pool ${poolState?.address}: ${error.message}`);
-        // Don't log full state here, it could be large
+        if (error instanceof Error && error.message.includes('overflow')) {
+             logger.error(`[getFixedPriceQuote] Possible overflow during FixedNumber calculation. Pool: ${poolState?.address}, sqrtPrice: ${poolState?.sqrtPriceX96}`);
+        }
         return null;
     }
 }
@@ -196,14 +203,13 @@ class PoolScanner {
                     const sqrtPriceX96 = slot0.sqrtPriceX96;
                     const tickSpacing = getTickSpacingFromFeeBps(poolInfo.fee);
 
-                    // Store the fetched and processed state
                     livePoolStates[address] = {
                         address: address,
-                        fee: poolInfo.fee, // Keep original fee
+                        fee: poolInfo.fee,
                         tick: tickCurrent,
                         liquidity: liquidity,
                         sqrtPriceX96: sqrtPriceX96,
-                        tickSpacing: tickSpacing, // Store calculated tickSpacing
+                        tickSpacing: tickSpacing,
                         token0: token0,
                         token1: token1,
                         token0Symbol: poolInfo.token0Symbol,
@@ -215,7 +221,7 @@ class PoolScanner {
                      logger.error(`[Scanner fetchPoolStates] Pool ${address} SDK Pool Creation Error: ${sdkError.message}`);
                      if (handleError) handleError(sdkError, `PoolScanner.CreateSDKPool (${address})`);
                 }
-            } // End processing results loop
+            }
 
         } catch (error) {
             logger.error(`[Scanner fetchPoolStates] CRITICAL Error processing pool states: ${error.message}`);
@@ -231,7 +237,7 @@ class PoolScanner {
         return livePoolStates;
     }
 
-     // --- REFACTORED findOpportunities (Now with Price Calculation & Raw Profit Check) ---
+     // --- REFACTORED findOpportunities (Corrected FixedNumber Usage) ---
      findOpportunities(livePoolStatesMap) {
          logger.info(`[Scanner] Starting opportunity scan with ${Object.keys(livePoolStatesMap || {}).length} live pool states.`);
          const opportunities = [];
@@ -264,7 +270,8 @@ class PoolScanner {
          // --- Step 2 & 3: Triangle Detection, Price Calculation & Profit Check ---
          logger.debug('[Scanner] Starting triangle detection and price analysis...');
          const checkedTriangles = new Set();
-         const ONE = FixedNumber.from(1.0); // For comparison
+         // Use FixedNumber.fromString for number literals
+         const ONE = FixedNumber.fromString("1.0"); // CORRECTED
 
          for (const tokenASymbol in tokenGraph) {
              for (const tokenBSymbol in tokenGraph[tokenASymbol]) {
@@ -284,45 +291,46 @@ class PoolScanner {
                                      checkedTriangles.add(triangleId);
 
                                      // --- Calculate Theoretical Rate (Ignoring Fees First) ---
-                                     // Price for A -> B (How many B do you get for 1 A?)
                                      const priceB_in_A = getFixedPriceQuote(poolAB, tokenASymbol);
-                                     // Price for B -> C (How many C do you get for 1 B?)
                                      const priceC_in_B = getFixedPriceQuote(poolBC, tokenBSymbol);
-                                     // Price for C -> A (How many A do you get for 1 C?)
                                      const priceA_in_C = getFixedPriceQuote(poolCA, tokenCSymbol);
 
                                      if (!priceB_in_A || !priceC_in_B || !priceA_in_C) {
                                          // logger.debug(`[Scanner] Skipping triangle ${tokenASymbol}->${tokenBSymbol}->${tokenCSymbol} due to price calculation error.`);
-                                         continue; // Skip if any price calculation failed
+                                         continue;
                                      }
 
-                                     // Overall rate: If you start with 1 A, how many A do you get back?
-                                     const rate = priceB_in_A.mulUnsafe(priceC_in_B).mulUnsafe(priceA_in_C);
+                                     try {
+                                         // Overall rate: If you start with 1 A, how many A do you get back?
+                                         const rate = priceB_in_A.mulUnsafe(priceC_in_B).mulUnsafe(priceA_in_C);
 
-                                     // --- Raw Profitability Check (Rate > 1) ---
-                                     if (rate.gt(ONE)) {
-                                         const pathSymbols = [tokenASymbol, tokenBSymbol, tokenCSymbol, tokenASymbol];
-                                         logger.info(`[Scanner] POTENTIAL RAW PROFIT: ${pathSymbols.join('->')} | Pools: [${pools.map(p => `${p.address.slice(0, 6)}..(${p.fee})`).join(', ')}] | Raw Rate: ${rate.toString()}`);
+                                         // --- Raw Profitability Check (Rate > 1) ---
+                                         if (rate.gt(ONE)) {
+                                             const pathSymbols = [tokenASymbol, tokenBSymbol, tokenCSymbol, tokenASymbol];
+                                             logger.info(`[Scanner] POTENTIAL RAW PROFIT: ${pathSymbols.join('->')} | Pools: [${pools.map(p => `${p.address.slice(0, 6)}..(${p.fee})`).join(', ')}] | Raw Rate: ${rate.toString()}`);
 
-                                         // TODO: Calculate rate *with* fees
-                                         // TODO: Check against PROFIT_THRESHOLD
-                                         // TODO: If profitable, create opportunity object
+                                             // TODO: Calculate rate *with* fees
+                                             // TODO: Check against PROFIT_THRESHOLD
+                                             // TODO: If profitable, create opportunity object
 
-                                         // Placeholder: Add basic opportunity object for now (without fee check)
-                                         const opportunity = {
-                                             type: 'triangular',
-                                             pathSymbols: pathSymbols, // [A_Symbol, B_Symbol, C_Symbol, A_Symbol]
-                                             pathTokens: [TOKENS[tokenASymbol], TOKENS[tokenBSymbol], TOKENS[tokenCSymbol], TOKENS[tokenASymbol]], // SDK Token objects
-                                             pools: pools, // [poolAB_State, poolBC_State, poolCA_State]
-                                             estimatedRate: rate.toString() // Store raw rate for now
-                                         };
-                                         opportunities.push(opportunity);
+                                             const opportunity = {
+                                                 type: 'triangular',
+                                                 pathSymbols: pathSymbols,
+                                                 pathTokens: [TOKENS[tokenASymbol], TOKENS[tokenBSymbol], TOKENS[tokenCSymbol], TOKENS[tokenASymbol]],
+                                                 pools: pools,
+                                                 estimatedRate: rate.toString()
+                                             };
+                                             opportunities.push(opportunity);
 
-                                     } else {
-                                         // Optional: Log unprofitable triangles if needed for debugging
-                                         // logger.debug(`[Scanner] Unprofitable Raw Rate: ${tokenASymbol}->${tokenBSymbol}->${tokenCSymbol} | Rate: ${rate.toString()}`);
+                                         }
+                                         // --- End Profitability Check ---
+
+                                     } catch (mulError) {
+                                        // Catch potential errors during multiplication (e.g., overflow)
+                                        logger.warn(`[Scanner] Error multiplying prices for triangle ${tokenASymbol}->${tokenBSymbol}->${tokenCSymbol}: ${mulError.message}`);
+                                        // Optionally log the individual prices if helpful
+                                        // logger.warn(`Prices: A->B=${priceB_in_A?.toString()}, B->C=${priceC_in_B?.toString()}, C->A=${priceA_in_C?.toString()}`);
                                      }
-                                     // --- End Profitability Check ---
 
                                  } // End loop P_CA
                              } // End check C -> A
