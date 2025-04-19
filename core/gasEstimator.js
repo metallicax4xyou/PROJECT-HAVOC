@@ -1,129 +1,136 @@
 // /workspaces/arbitrum-flash/core/gasEstimator.js
+// --- VERSION UPDATED FOR PHASE 1 REFACTOR ---
 
 const { ethers } = require('ethers');
-const logger = require('../utils/logger');
-
-// Basic configuration (can be moved to config file later)
-const DEFAULT_GAS_LIMIT = 1_500_000n; // Fallback gas limit (adjust based on typical needs)
-const GAS_ESTIMATE_BUFFER_PERCENT = 20n; // Add 20% buffer to estimates
+const logger = require('../utils/logger'); // Assuming logger is universally available
 
 class GasEstimator {
-    constructor(provider) {
+    /**
+     * @param {ethers.providers.Provider} provider The Ethers provider instance.
+     * @param {object} config Configuration object.
+     * @param {number} config.GAS_ESTIMATE_BUFFER_PERCENT Percentage buffer to add to gas estimates.
+     * @param {string} config.FALLBACK_GAS_LIMIT Default gas limit (as string) if estimation fails.
+     */
+    constructor(provider, config) {
         if (!provider) {
             throw new Error("[GasEstimator] Provider instance is required.");
         }
+        if (!config || typeof config.GAS_ESTIMATE_BUFFER_PERCENT === 'undefined' || !config.FALLBACK_GAS_LIMIT) {
+            throw new Error("[GasEstimator] Configuration object with GAS_ESTIMATE_BUFFER_PERCENT and FALLBACK_GAS_LIMIT is required.");
+        }
         this.provider = provider;
-        logger.info("[GasEstimator] Initialized.");
+
+        try {
+             // Store buffer as a BigNumber percentage (e.g., 20)
+             this.gasEstimateBufferPercent = ethers.BigNumber.from(config.GAS_ESTIMATE_BUFFER_PERCENT);
+             // Store fallback limit as BigNumber
+             this.fallbackGasLimit = ethers.BigNumber.from(config.FALLBACK_GAS_LIMIT);
+
+             if (this.gasEstimateBufferPercent.lt(0)) {
+                 throw new Error("GAS_ESTIMATE_BUFFER_PERCENT cannot be negative.");
+             }
+             if (this.fallbackGasLimit.lte(0)) {
+                 throw new Error("FALLBACK_GAS_LIMIT must be positive.");
+             }
+
+        } catch (error) {
+             logger.error(`[GasEstimator] Invalid configuration value: ${error.message}`);
+             throw new Error(`[GasEstimator] Invalid configuration: ${error.message}`);
+        }
+
+
+        logger.info(`[GasEstimator] Initialized with Buffer: ${this.gasEstimateBufferPercent.toString()}%, Fallback Limit: ${this.fallbackGasLimit.toString()}`);
     }
 
     /**
-     * Estimates the gas cost for a transaction.
-     * @param {ethers.TransactionRequest} txRequest The transaction request object (to, data, value, etc.)
-     * @returns {Promise<bigint>} The estimated gas limit (including buffer).
+     * Estimates the gas limit for a specific transaction request, adding a buffer.
+     * @param {ethers.providers.TransactionRequest} txRequest The transaction request object (to, data, value, from etc.)
+     * @returns {Promise<ethers.BigNumber>} The estimated gas limit (including buffer), or fallback limit on error.
      */
-    async estimateGasLimit(txRequest) {
+    async estimateGasForTx(txRequest) {
         try {
+            // Basic validation of the request object
+            if (!txRequest || typeof txRequest !== 'object') {
+                throw new Error("txRequest object is required.");
+            }
+            if (!txRequest.to || !ethers.utils.isAddress(txRequest.to)) {
+                 throw new Error("txRequest must include a valid 'to' address.");
+            }
+            if (!txRequest.data) {
+                 // Allow data to be empty ('0x') but not undefined/null
+                 if (txRequest.data === undefined || txRequest.data === null) {
+                      throw new Error("txRequest must include a 'data' field.");
+                 }
+            }
+             // 'from' is often important for accurate estimation due to contract logic/permissions
+             if (!txRequest.from || !ethers.utils.isAddress(txRequest.from)) {
+                   logger.debug("[GasEstimator] 'from' address missing in txRequest for estimateGas. Estimation might be less accurate.");
+                   // Proceed without it, but log debug message
+             }
+
+            logger.debug(`[GasEstimator] Estimating gas for tx: To=${txRequest.to}, From=${txRequest.from || 'N/A'}, Data=${txRequest.data?.substring(0, 10)}...`);
+
+            // Perform the actual estimation using the provider
             const estimatedGas = await this.provider.estimateGas(txRequest);
-            // Add a buffer to the estimate
-            const bufferedGas = estimatedGas + (estimatedGas * GAS_ESTIMATE_BUFFER_PERCENT / 100n);
-            logger.debug(`[GasEstimator] Estimated gas: ${estimatedGas.toString()}, Buffered: ${bufferedGas.toString()}`);
+
+            // Add the configured buffer: bufferedGas = estimate * (100 + buffer) / 100
+            const bufferMultiplier = ethers.BigNumber.from(100).add(this.gasEstimateBufferPercent);
+            const bufferedGas = estimatedGas.mul(bufferMultiplier).div(100);
+
+            logger.debug(`[GasEstimator] Raw estimate: ${estimatedGas.toString()}, Buffered (${this.gasEstimateBufferPercent}%): ${bufferedGas.toString()}`);
             return bufferedGas;
+
         } catch (error) {
-            logger.warn(`[GasEstimator] Failed to estimate gas: ${error.message}. Falling back to default limit: ${DEFAULT_GAS_LIMIT.toString()}`);
-            // Log details if it's a revert
-            if (error.code === 'CALL_EXCEPTION') {
-                 logger.warn(`[GasEstimator] Gas estimation failed due to potential revert. Check transaction parameters.`, { txRequest: txRequest, errorData: error.data });
+            logger.warn(`[GasEstimator] Failed to estimate gas for tx: ${error.message}. Falling back to limit: ${this.fallbackGasLimit.toString()}`);
+
+            // Log more details for common failure modes
+            const errorCode = error.code || 'UNKNOWN';
+            const errorReason = error.reason || 'No reason provided';
+            const errorData = error.data || error.error?.data; // Sometimes nested
+
+            logger.warn(`[GasEstimator] Error Details: Code=${errorCode}, Reason=${errorReason}`, {
+                 txTo: txRequest?.to,
+                 txFrom: txRequest?.from,
+                 errorData: errorData // Often contains revert reason data
+            });
+
+            if (errorCode === ethers.errors.CALL_EXCEPTION || errorCode === 'CALL_EXCEPTION') {
+                 logger.warn(`[GasEstimator] Gas estimation CALL_EXCEPTION. Potential revert or insufficient balance/allowance. Check contract logic & parameters.`);
+            } else if (errorCode === ethers.errors.UNPREDICTABLE_GAS_LIMIT) {
+                 logger.warn(`[GasEstimator] Gas estimation UNPREDICTABLE_GAS_LIMIT. Transaction is likely to fail. Check parameters.`);
             }
-            // Return a default high limit if estimation fails
-            return DEFAULT_GAS_LIMIT;
+
+            // Return the configured fallback limit
+            return this.fallbackGasLimit;
         }
     }
 
     /**
-     * Gets the current recommended gas price (legacy) or fee data (EIP-1559).
-     * @returns {Promise<object>} Object containing gas price details (e.g., { gasPrice } or { maxFeePerGas, maxPriorityFeePerGas }).
+     * Gets the current recommended EIP-1559 fee data or legacy gas price.
+     * @returns {Promise<ethers.providers.FeeData | null>} Object containing fee data, or null on error.
      */
-    async getGasPriceData() {
+    async getFeeData() {
         try {
+            logger.debug("[GasEstimator] Fetching fee data from provider...");
             const feeData = await this.provider.getFeeData();
-            if (feeData.maxFeePerGas && feeData.maxPriorityFeePerGas) {
-                logger.debug(`[GasEstimator] Fetched EIP-1559 fee data: Max=${ethers.formatUnits(feeData.maxFeePerGas, 'gwei')} Gwei, Priority=${ethers.formatUnits(feeData.maxPriorityFeePerGas, 'gwei')} Gwei`);
-                return {
-                    maxFeePerGas: feeData.maxFeePerGas,
-                    maxPriorityFeePerGas: feeData.maxPriorityFeePerGas,
-                };
-            } else if (feeData.gasPrice) {
-                logger.debug(`[GasEstimator] Fetched legacy gas price: ${ethers.formatUnits(feeData.gasPrice, 'gwei')} Gwei`);
-                return { gasPrice: feeData.gasPrice };
+
+            // Basic validation: Ensure we get *something* usable
+            if (!feeData || (!feeData.maxFeePerGas && !feeData.gasPrice)) {
+                logger.warn("[GasEstimator] Provider returned incomplete or unusable fee data.", feeData);
+                return null; // Indicate failure to retrieve valid data
+            }
+
+            // Log fetched data clearly (prefer EIP-1559 if available)
+            if (feeData.maxFeePerGas) {
+                logger.debug(`[GasEstimator] Fetched EIP-1559 fee data (Gwei): MaxFee=${ethers.utils.formatUnits(feeData.maxFeePerGas, 'gwei')}, MaxPriority=${feeData.maxPriorityFeePerGas ? ethers.utils.formatUnits(feeData.maxPriorityFeePerGas, 'gwei') : 'N/A'}`);
             } else {
-                 throw new Error("Provider returned incomplete fee data.");
+                logger.debug(`[GasEstimator] Fetched Legacy fee data (Gwei): GasPrice=${ethers.utils.formatUnits(feeData.gasPrice, 'gwei')}`);
             }
+
+            return feeData;
         } catch (error) {
-            logger.error(`[GasEstimator] Failed to get gas price data: ${error.message}`);
-            // Return null or throw, depending on how critical this is upstream
-            return null;
-        }
-    }
-
-     /**
-     * Estimates the total transaction cost in ETH (or native currency).
-     * @param {ethers.TransactionRequest} txRequest The transaction request object.
-     * @returns {Promise<bigint|null>} Estimated cost in wei, or null if estimation fails.
-     */
-    async estimateExecutionCostWei(txRequest) {
-        const gasLimit = await this.estimateGasLimit(txRequest);
-        const gasPriceData = await this.getGasPriceData();
-
-        if (!gasPriceData) {
-            logger.error("[GasEstimator] Cannot estimate cost without gas price data.");
-            return null;
-        }
-
-        let costWei;
-        if (gasPriceData.maxFeePerGas) {
-            // EIP-1559: Cost uses maxFeePerGas as the upper bound
-            costWei = gasLimit * gasPriceData.maxFeePerGas;
-        } else if (gasPriceData.gasPrice) {
-            // Legacy: Cost uses gasPrice
-            costWei = gasLimit * gasPriceData.gasPrice;
-        } else {
-             logger.error("[GasEstimator] Invalid gas price data format.");
-             return null;
-        }
-
-        logger.info(`[GasEstimator] Estimated TX Cost: ${ethers.formatEther(costWei)} ETH (Limit: ${gasLimit.toString()})`);
-        return costWei;
-    }
-
-     /**
-     * Estimates the transaction cost in USD.
-     * Requires a function to get the current ETH price in USD.
-     * @param {ethers.TransactionRequest} txRequest The transaction request object.
-     * @param {Function} getNativePriceUsdAsync Function that returns Promise<number> (current ETH/native price in USD).
-     * @returns {Promise<number|null>} Estimated cost in USD, or null if estimation fails.
-     */
-    async estimateExecutionCostUsd(txRequest, getNativePriceUsdAsync) {
-         if (typeof getNativePriceUsdAsync !== 'function') {
-            logger.error("[GasEstimator] getNativePriceUsdAsync function is required to estimate cost in USD.");
-            return null;
-         }
-
-        const costWei = await this.estimateExecutionCostWei(txRequest);
-        if (costWei === null) {
-            return null;
-        }
-
-        try {
-            const nativePriceUsd = await getNativePriceUsdAsync();
-            if (typeof nativePriceUsd !== 'number' || nativePriceUsd <= 0) {
-                throw new Error("Invalid native price received.");
-            }
-            const costUsd = parseFloat(ethers.formatEther(costWei)) * nativePriceUsd;
-            logger.info(`[GasEstimator] Estimated TX Cost: $${costUsd.toFixed(2)} USD`);
-            return costUsd;
-        } catch (error) {
-             logger.error(`[GasEstimator] Failed to convert cost to USD: ${error.message}`);
-             return null;
+            logger.error(`[GasEstimator] Failed to get fee data: ${error.message}`, error);
+            return null; // Indicate failure
         }
     }
 }
