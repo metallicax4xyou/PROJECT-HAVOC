@@ -1,15 +1,15 @@
 // /workspaces/arbitrum-flash/core/arbitrageEngine.js
-// --- VERSION UPDATED FOR PHASE 1 REFACTOR ---
+// --- VERSION UPDATED FOR ETHERS V6 UTILS & PHASE 1 REFACTOR ---
 // Initializes parsed config, new GasEstimator, new ProfitCalculator
 
-const { ethers } = require('ethers');
+const { ethers } = require('ethers'); // Ethers v6+
 const { PoolScanner } = require('./poolScanner');
 const GasEstimator = require('./gasEstimator'); // Import new GasEstimator class
 const ProfitCalculator = require('./profitCalculator'); // Import new ProfitCalculator class
 const logger = require('../utils/logger');
 const ErrorHandler = require('../utils/errorHandler');
 const FlashSwapManager = require('./flashSwapManager');
-const { processOpportunity } = require('./opportunityProcessor');
+const { processOpportunity } = require('./opportunityProcessor'); // Ensure this uses v6 syntax if needed
 const { ArbitrageError } = require('../utils/errorHandler');
 const QuoteSimulator = require('./quoteSimulator'); // Keep QuoteSimulator import
 
@@ -44,9 +44,11 @@ class ArbitrageEngine {
         // --- Parse Config Values ---
         logger.debug('[Engine Constructor] Parsing configuration values...');
         try {
+            // --- Use ethers v6 top-level functions ---
             const parsed = {
-                minProfitWei: ethers.utils.parseUnits(config.MIN_PROFIT_THRESHOLD_ETH, 'ether'),
-                maxGasWei: ethers.utils.parseUnits(config.MAX_GAS_GWEI, 'gwei'),
+                minProfitWei: ethers.parseUnits(config.MIN_PROFIT_THRESHOLD_ETH, 'ether'),
+                maxGasWei: ethers.parseUnits(config.MAX_GAS_GWEI, 'gwei'),
+                // --- ---
                 // Keep buffer percentages as numbers for direct use
                 gasEstimateBufferPercent: parseInt(config.GAS_ESTIMATE_BUFFER_PERCENT, 10),
                 profitBufferPercent: parseInt(config.PROFIT_BUFFER_PERCENT, 10),
@@ -54,6 +56,7 @@ class ArbitrageEngine {
                 fallbackGasLimit: config.FALLBACK_GAS_LIMIT,
                 nativeDecimals: config.NATIVE_DECIMALS || 18, // Use default if not provided
                 nativeSymbol: config.NATIVE_SYMBOL || 'ETH',   // Use default if not provided
+                wrappedNativeSymbol: config.WRAPPED_NATIVE_SYMBOL || 'WETH' // Added for ProfitCalculator
             };
             // Attach parsed values to the config object for easy access
             this.config.parsed = parsed;
@@ -76,7 +79,8 @@ class ArbitrageEngine {
             );
 
             logger.debug('[Engine Constructor] Initializing PoolScanner...');
-            this.poolScanner = new PoolScanner(this.config, this.provider); // Assumes PoolScanner uses raw config
+            // Ensure PoolScanner uses ethers v6 compatible syntax if needed
+            this.poolScanner = new PoolScanner(this.config, this.provider);
 
             logger.debug('[Engine Constructor] Initializing GasEstimator...');
             // Instantiate NEW GasEstimator, passing provider and specific config values
@@ -88,12 +92,13 @@ class ArbitrageEngine {
             logger.debug('[Engine Constructor] Initializing ProfitCalculator...');
             // Instantiate ProfitCalculator, passing necessary parsed and raw config values
             this.profitCalculator = new ProfitCalculator({
-                minProfitWei: this.config.parsed.minProfitWei,
-                PROFIT_BUFFER_PERCENT: this.config.parsed.profitBufferPercent,
-                provider: this.provider, // Needed for price feeds
+                minProfitWei: this.config.parsed.minProfitWei, // Pass BigInt
+                PROFIT_BUFFER_PERCENT: this.config.parsed.profitBufferPercent, // Pass number
+                provider: this.provider,
                 chainlinkFeeds: this.config.CHAINLINK_FEEDS,
                 nativeDecimals: this.config.parsed.nativeDecimals,
-                nativeSymbol: this.config.parsed.nativeSymbol
+                nativeSymbol: this.config.parsed.nativeSymbol,
+                WRAPPED_NATIVE_SYMBOL: this.config.parsed.wrappedNativeSymbol // Pass wrapped symbol
             });
 
         } catch (initError) {
@@ -104,26 +109,26 @@ class ArbitrageEngine {
         // --- End Instance Initialization ---
 
         this.isRunning = false;
+        this.isCycleRunning = false; // Flag to prevent cycle overlap
         this.cycleCount = 0;
-        this.cycleInterval = this.config.CYCLE_INTERVAL_MS || 5000; // Default 5 seconds
+        this.cycleInterval = parseInt(this.config.CYCLE_INTERVAL_MS || '5000', 10); // Ensure integer, default 5 seconds
+        this.intervalId = null; // Store interval timer ID
 
         logger.info('[Engine Constructor] Arbitrage Engine Constructor Finished Successfully.');
     }
 
     async initialize() {
         logger.info('[Engine] Arbitrage Engine Initializing (post-constructor)...');
-        // Initialize NonceManager (important!)
         try {
-            // NonceManager instance is accessed via this.signer
             if (this.signer && typeof this.signer.initialize === 'function') {
                 await this.signer.initialize();
+                // Log initial nonce AFTER initialization
                 logger.info(`[Engine] Nonce Manager initialized via Engine. Initial Nonce: ${await this.signer.getNextNonce()}`);
             } else {
                 logger.warn('[Engine] Signer does not have an initialize method (expected for NonceManager).');
             }
         } catch (nonceError) {
             logger.error(`[Engine] Failed to initialize Nonce Manager during engine init: ${nonceError.message}`, nonceError);
-            // Depending on severity, you might want to throw here
             throw new ArbitrageError('EngineInit', `Nonce Manager initialization failed: ${nonceError.message}`, nonceError);
         }
          logger.info('[Engine] Arbitrage Engine Initialized Successfully.');
@@ -132,44 +137,50 @@ class ArbitrageEngine {
     async start() {
         if (this.isRunning) { logger.warn('[Engine] Engine already running.'); return; }
         this.isRunning = true;
-        logger.info(`[Engine] Starting arbitrage monitoring loop for Network: ${this.config.NETWORK}...`);
+        logger.info(`[Engine] Starting arbitrage monitoring loop for Network: ${this.config.NETWORK || this.config.NAME}...`); // Use loaded network name
         logger.info(`[Engine] Cycle Interval: ${this.cycleInterval / 1000} seconds.`);
-        // Use setImmediate to run the first cycle without waiting for the interval
-        setImmediate(() => this.runCycle());
-        // Set up the interval timer
+
+        // Use setImmediate for the first run, then setInterval
+        setImmediate(() => {
+            if (this.isRunning) this.runCycle(); // Check running status before first run
+        });
+
         this.intervalId = setInterval(() => {
-            if (this.isRunning) {
-                 // Prevent cycle overlap if a cycle takes longer than the interval
-                 // Basic check: could be enhanced with a more robust locking mechanism
-                 if (this.isCycleRunning) {
-                      logger.warn(`[Engine] Previous cycle still running. Skipping interval tick.`);
-                      return;
-                 }
-                 this.runCycle();
-            } else {
-                logger.info('[Engine] Stopping interval loop.');
+            if (!this.isRunning) { // Check if stopped
+                logger.info('[Engine] Engine stopped, clearing interval.');
                 if (this.intervalId) clearInterval(this.intervalId);
                 this.intervalId = null;
+                return;
             }
+             if (this.isCycleRunning) { // Prevent overlap
+                  logger.warn(`[Engine] Previous cycle still running. Skipping interval tick.`);
+                  return;
+             }
+             this.runCycle();
         }, this.cycleInterval);
+
         logger.info('>>> Engine started. Monitoring for opportunities... (Press Ctrl+C to stop) <<<');
     }
 
     stop() {
         if (!this.isRunning) { logger.warn('[Engine] Engine not running.'); return; }
         logger.info('[Engine] Stopping Arbitrage Engine...');
-        this.isRunning = false; // Signal runCycle to stop and prevent new cycles
+        this.isRunning = false; // Signal runCycle and interval to stop
         if (this.intervalId) {
             clearInterval(this.intervalId);
             this.intervalId = null;
             logger.info('[Engine] Cycle interval cleared.');
         }
-        // Add any other cleanup if needed
+        // Consider adding a short delay or mechanism to ensure the current cycle finishes if needed
+        logger.info('[Engine] Stop signal sent. Any running cycle will attempt to complete.');
     }
 
+    // --- Refactored runCycle ---
     async runCycle() {
+        // Double-check running status at the start of the cycle
         if (!this.isRunning) { logger.debug('[Engine] runCycle called but engine is stopped.'); return; }
-        if (this.isCycleRunning) { logger.warn('[Engine] Attempted to start runCycle while previous cycle running.'); return; } // Prevent overlap
+        // Prevent overlap
+        if (this.isCycleRunning) { logger.warn('[Engine] Attempted to start runCycle while previous cycle running.'); return; }
 
         this.isCycleRunning = true; // Mark cycle as running
         this.cycleCount++;
@@ -178,9 +189,10 @@ class ArbitrageEngine {
 
         try {
             // 1. Get Pool List from Config
-            const poolInfosToFetch = this.config.getAllPoolConfigs(); // Assumes this method exists and works
-            if (!poolInfosToFetch || poolInfosToFetch.length === 0) {
-                logger.warn('[Engine] No pool configurations loaded. Check config setup.');
+            // Ensure config.getAllPoolConfigs exists and returns the expected format
+            const poolInfosToFetch = typeof this.config.getAllPoolConfigs === 'function' ? this.config.getAllPoolConfigs() : [];
+            if (!Array.isArray(poolInfosToFetch) || poolInfosToFetch.length === 0) {
+                logger.warn('[Engine] No valid pool configurations loaded or getAllPoolConfigs method missing. Check config setup.');
                 this.logCycleEnd(cycleStartTime);
                 this.isCycleRunning = false; // Ensure flag is reset
                 return;
@@ -200,7 +212,7 @@ class ArbitrageEngine {
 
             // 3. Find Opportunities
             logger.debug('[Engine] Finding potential opportunities...');
-            const potentialOpportunities = this.poolScanner.findOpportunities(livePoolStatesMap); // Assumes this identifies potential paths
+            const potentialOpportunities = this.poolScanner.findOpportunities(livePoolStatesMap);
             if (potentialOpportunities.length === 0) {
                 logger.info('[Engine] No potential opportunities found in this cycle.');
                 this.logCycleEnd(cycleStartTime);
@@ -223,8 +235,10 @@ class ArbitrageEngine {
             };
 
             for (const opp of potentialOpportunities) {
-                if (!this.isRunning) break; // Check if engine stopped mid-cycle
-                if (executedThisCycle && this.config.STOP_ON_FIRST_EXECUTION) { // Make stopping optional via config
+                if (!this.isRunning) { logger.info(`[Engine Cycle ${this.cycleCount}] Engine stopped during opportunity processing.`); break; }
+                // Check stop condition based on config
+                const stopAfterFirst = this.config.STOP_ON_FIRST_EXECUTION === true || this.config.STOP_ON_FIRST_EXECUTION === 'true';
+                if (executedThisCycle && stopAfterFirst) {
                      logger.info(`[Engine Cycle ${this.cycleCount}] Skipping remaining opportunities as one was executed and STOP_ON_FIRST_EXECUTION is true.`);
                      break;
                  }
@@ -243,15 +257,13 @@ class ArbitrageEngine {
                 else if (processResult.executed && !processResult.success) {
                     logger.warn(`${logPrefix} Opportunity processed but execution FAILED. Tx: ${processResult.txHash || 'N/A'}, Error: ${processResult.error?.message}`);
                     // Optional: Decide if a failed *attempt* should also stop the cycle based on config
-                    // if (this.config.STOP_ON_FIRST_EXECUTION) executedThisCycle = true;
+                    // if (stopAfterFirst) executedThisCycle = true;
                 }
                 else if (processResult.error) {
                      logger.warn(`${logPrefix} Opportunity processing failed before execution attempt. Error: ${processResult.error.message} (Type: ${processResult.error.type})`);
-                     // Log details if available from error object
                      if (processResult.error.details) logger.debug(`${logPrefix} Error details:`, processResult.error.details);
                  }
                 else {
-                     // Not executed, likely due to filters like profitability (already logged by processor)
                      logger.info(`${logPrefix} Opportunity processing completed without execution (Reason: ${processResult.reason || 'N/A'}).`);
                  }
 
@@ -259,17 +271,15 @@ class ArbitrageEngine {
 
             this.logCycleEnd(cycleStartTime);
 
-        } catch (error) { // Catch errors in the main cycle logic (e.g., fetching pools, finding opps)
+        } catch (error) { // Catch errors in the main cycle logic
             logger.error(`[Engine] Critical error during cycle #${this.cycleCount}: ${error.message}`, error);
-            // Use global error handler
             if (typeof ErrorHandler.handleError === 'function') {
                  ErrorHandler.handleError(error, `Engine.runCycle (${this.cycleCount})`);
             }
-            // Log stack trace for critical errors
             if (error.stack) { logger.error(`Stack Trace: ${error.stack}`); }
             this.logCycleEnd(cycleStartTime, true); // Mark cycle as having an error
         } finally {
-             this.isCycleRunning = false; // Ensure flag is reset even if errors occur
+             this.isCycleRunning = false; // IMPORTANT: Ensure flag is reset even if errors occur
         }
     } // End runCycle
 
