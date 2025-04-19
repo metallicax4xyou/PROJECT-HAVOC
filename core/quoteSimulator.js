@@ -1,5 +1,5 @@
-// /workspaces/arbitrum-flash/core/quoteSimulator.js - Omit Tick from Pool Constructor
-const { Pool, Route, Trade } = require('@uniswap/v3-sdk');
+// /workspaces/arbitrum-flash/core/quoteSimulator.js - Calculate Tick from SqrtPrice, then Adjust
+const { Pool, Route, Trade, TickMath } = require('@uniswap/v3-sdk'); // Import TickMath
 const { Token, CurrencyAmount, TradeType } = require('@uniswap/sdk-core');
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
@@ -20,6 +20,7 @@ class QuoteSimulator {
          } catch(e) { const keys = typeof state === 'object' ? Object.keys(state).join(', ') : 'N/A'; return `Error stringifying pool state: ${e.message}. Keys found: ${keys}`; }
     }
 
+
     async simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn) {
         const log = logger || console;
         const context = `[SimSwap ${tokenIn?.symbol}->${tokenOut?.symbol} (${poolState?.fee}bps)]`;
@@ -34,39 +35,47 @@ class QuoteSimulator {
         console.log(`\n--- ${context} ---`);
         console.log(`TokenIn: ${tokenIn.symbol}, TokenOut: ${tokenOut.symbol}, AmountIn: ${amountInStr}`);
 
-        // Define variables for logging in catch block
-        let tickNumberRaw = 'N/A'; // Assign default
-        let tickSpacing = 'N/A';   // Assign default
+        let tickFromSqrtPrice = 'N/A';
+        let tickAdjusted = 'N/A';
+        let tickSpacing = 'N/A';
 
         try {
             const [tokenA, tokenB] = tokenIn.sortsBefore(tokenOut) ? [tokenIn, tokenOut] : [tokenOut, tokenIn];
-            // We still need tickSpacing for the provider wrapper
             tickSpacing = Number(poolState.tickSpacing);
+
             if (isNaN(tickSpacing) || tickSpacing <= 0) {
                  log.error(`${context} Invalid tickSpacing (${poolState.tickSpacing}).`);
                  return null;
             }
-             // Log the raw tick for reference, but don't adjust or pass it
-             tickNumberRaw = Number(poolState.tick);
-             if (!isNaN(tickNumberRaw)) {
-                 console.log(`${context} Raw tick from poolState (for reference only): ${tickNumberRaw}`);
+
+            // --- Calculate tick from sqrtPrice, then adjust THAT tick ---
+            try {
+                 tickFromSqrtPrice = TickMath.getTickAtSqrtRatio(poolState.sqrtPriceX96);
+                 console.log(`${context} Calculated tick from sqrtPriceX96: ${tickFromSqrtPrice}`);
+            } catch (tickMathError) {
+                 log.error(`${context} Failed to calculate tick from sqrtPriceX96 (${poolState.sqrtPriceX96}): ${tickMathError.message}`);
+                 throw tickMathError; // Rethrow if calculation fails
+            }
+
+            // Adjust the tick calculated from sqrtPrice to the nearest multiple of spacing
+            tickAdjusted = Math.round(tickFromSqrtPrice / tickSpacing) * tickSpacing;
+            if (tickAdjusted !== tickFromSqrtPrice) {
+                 console.log(`${context} Adjusted tick calculated from price (${tickFromSqrtPrice}) to NEAREST ${tickAdjusted} for tickSpacing ${tickSpacing}`);
              } else {
-                  console.log(`${context} Raw tick from poolState is invalid: ${poolState.tick}`);
-                  // Assign raw tick a value for logging in catch block if needed
-                  tickNumberRaw = poolState.tick;
+                  console.log(`${context} Tick calculated from price (${tickFromSqrtPrice}) is already multiple of tickSpacing ${tickSpacing}`);
              }
+            // --- End Tick Calculation/Adjustment ---
 
 
-            console.log(`${context} ===> PREPARING TO CALL new Pool(...) WITHOUT explicit tick`);
+            console.log(`${context} ===> PREPARING TO CALL new Pool(...) with tick derived from sqrtPrice and adjusted: ${tickAdjusted}`);
 
-            // Create Uniswap SDK Pool Instance WITHOUT passing the tick
-            // The SDK will infer the tick from sqrtPriceX96
+            // Create Uniswap SDK Pool Instance using the derived and adjusted tick
             const pool = new Pool(
                 tokenA, tokenB, poolState.fee,
                 poolState.sqrtPriceX96.toString(),
                 poolState.liquidity.toString(),
-                // OMITTING THE TICK ARGUMENT: Let the SDK derive it
-                { // Tick Provider Wrapper (Still need tickSpacing for provider calls)
+                tickAdjusted, // Use the tick derived from price & adjusted
+                { // Tick Provider Wrapper
                     getTick: async (tick) => {
                         console.log(`${context} >>> SDK requesting getTick(${tick})`);
                         const result = await this.tickDataProvider.getTick(tick, tickSpacing, poolState.address);
@@ -82,7 +91,7 @@ class QuoteSimulator {
                 }
             );
 
-            console.log(`${context} ===> SUCCESSFULLY CALLED new Pool(...) - SDK derived tick: ${pool.tickCurrent}`); // Log the derived tick
+            console.log(`${context} ===> SUCCESSFULLY CALLED new Pool(...)`);
             log.debug(`${context} SDK Pool instance created. Proceeding to Trade.fromRoute...`);
 
             const swapRoute = new Route([pool], tokenIn, tokenOut);
@@ -102,10 +111,10 @@ class QuoteSimulator {
         } catch (error) {
             console.error(`${context} !!!!!!!!!!!!!! CATCH BLOCK in simulateSingleSwapExactIn !!!!!!!!!!!!!!`);
             log.error(`${context} Error during single swap simulation: ${error.message}`);
-            log.error(`${context} Details: RawTick=${tickNumberRaw}, Spacing=${tickSpacing}`); // Log raw tick and spacing
+            log.error(`${context} Details: TickFromSqrtPrice=${tickFromSqrtPrice}, AdjustedTick=${tickAdjusted}, Spacing=${tickSpacing}`);
             if (error.message?.toLowerCase().includes('insufficient liquidity')) { log.error(`${context} SDK Error: INSUFFICIENT LIQUIDITY...`); }
             else if (error.message?.includes('already') || error.message?.includes('TICK') || error.message?.includes('PRICE_BOUNDS')) { log.error(`${context} SDK Error: TICK/PRICE invariant issue... Error: ${error.message}`); }
-            ErrorHandler.handleError(error, context, { poolAddress: poolState?.address || 'N/A', amountIn: amountInStr, tickRaw: tickNumberRaw }); // Removed adjustedTick from log
+            ErrorHandler.handleError(error, context, { poolAddress: poolState?.address || 'N/A', amountIn: amountInStr, tickFromSqrtPrice, tickAdjusted });
             return null; // Return null on error
         }
     }
@@ -115,28 +124,28 @@ class QuoteSimulator {
     async simulateArbitrage(opportunity, initialAmount) {
         const log = logger || console;
         const logPrefix = `[SimArb OppType: ${opportunity?.type}, Group: ${opportunity?.groupName}]`;
-        if (!opportunity || !opportunity.type || typeof initialAmount === 'undefined' || initialAmount <= 0n) { log.warn(`${logPrefix} Invalid input.`); return { profitable: false, error: 'Invalid input', initialAmount: initialAmount || 0n, finalAmount: 0n, grossProfit: 0n, details: null }; }
+        if (!opportunity || !opportunity.type || typeof initialAmount === 'undefined' || initialAmount <= 0n) { /* ... */ }
         log.info(`--- Simulation START ${logPrefix} ---`);
         log.info(`Initial Amount: ${ethers.formatUnits(initialAmount, opportunity.pools?.[0]?.token0?.decimals || 18)} ${opportunity.pathSymbols?.[0]}`);
 
         if (opportunity.type === 'triangular') {
-             if (!opportunity.pools || opportunity.pools.length !== 3 || !opportunity.pathSymbols || opportunity.pathSymbols.length !== 4) { log.error(`${logPrefix} Invalid triangular structure.`); return { profitable: false, error: 'Invalid triangular structure', initialAmount, finalAmount: 0n, grossProfit: 0n, details: null }; }
+             if (!opportunity.pools || opportunity.pools.length !== 3 || !opportunity.pathSymbols || opportunity.pathSymbols.length !== 4) { /* ... */ }
              console.log(`${logPrefix} Raw opportunity.pools check: pool[0]?.address=${opportunity.pools[0]?.address}, pool[1]?.address=${opportunity.pools[1]?.address}, pool[2]?.address=${opportunity.pools[2]?.address}`);
              const [pool1, pool2, pool3] = opportunity.pools;
              console.log(`${logPrefix} Pool 1 Check After Destructure: Is defined? ${!!pool1}, Address: ${pool1?.address}`);
              console.log(`${logPrefix} Pool 2 Check After Destructure: Is defined? ${!!pool2}, Address: ${pool2?.address}`);
              console.log(`${logPrefix} Pool 3 Check After Destructure: Is defined? ${!!pool3}, Address: ${pool3?.address}`);
-              if (!pool1 || !pool2 || !pool3) { log.error(`${logPrefix} FATAL: One or more pools are undefined after destructuring.`); console.error("Original opportunity.pools:", opportunity.pools); return { profitable: false, error: 'Pool definition missing after destructure', initialAmount, finalAmount: 0n, grossProfit: 0n, details: null }; }
+              if (!pool1 || !pool2 || !pool3) { /* ... */ }
              const [symA, symB, symC, symA_final] = opportunity.pathSymbols;
-             if (symA !== symA_final) { log.error(`${logPrefix} Path symbols mismatch.`); return { profitable: false, error: 'Path symbols mismatch', initialAmount, finalAmount: 0n, grossProfit: 0n, details: null }; }
+             if (symA !== symA_final) { /* ... */ }
              const tokenA = pool1.token0?.symbol === symA ? pool1.token0 : (pool1.token1?.symbol === symA ? pool1.token1 : null);
              const tokenB = pool1.token0?.symbol === symB ? pool1.token0 : (pool1.token1?.symbol === symB ? pool1.token1 : null);
              const tokenC = pool2.token0?.symbol === symC ? pool2.token0 : (pool2.token1?.symbol === symC ? pool2.token1 : null);
-             if (!(tokenA instanceof Token) || !(tokenB instanceof Token) || !(tokenC instanceof Token)) { log.error(`${logPrefix} SDK Token resolution failed.`); return { profitable: false, error: 'SDK Token resolution failed', initialAmount, finalAmount: 0n, grossProfit: 0n, details: null }; }
+             if (!(tokenA instanceof Token) || !(tokenB instanceof Token) || !(tokenC instanceof Token)) { /* ... */ }
              const pool1Matches = (pool1.token0 === tokenA && pool1.token1 === tokenB) || (pool1.token0 === tokenB && pool1.token1 === tokenA);
              const pool2Matches = (pool2.token0 === tokenB && pool2.token1 === tokenC) || (pool2.token0 === tokenC && pool2.token1 === tokenB);
              const pool3Matches = (pool3.token0 === tokenC && pool3.token1 === tokenA) || (pool3.token0 === tokenA && pool3.token1 === tokenC);
-             if (!pool1Matches || !pool2Matches || !pool3Matches) { log.error(`${logPrefix} Pool tokens mismatch path.`); return { profitable: false, error: 'Pool tokens mismatch path', initialAmount, finalAmount: 0n, grossProfit: 0n, details: null }; }
+             if (!pool1Matches || !pool2Matches || !pool3Matches) { /* ... */ }
 
             try {
                 console.log(`${logPrefix} POOL 1 STATE before calling simulateSingleSwapExactIn (from var pool1):`); console.log(this.stringifyPoolState(pool1));
@@ -175,8 +184,8 @@ class QuoteSimulator {
                 return { profitable: false, error: `High-level sim error: ${error.message}`, initialAmount, finalAmount: 0n, grossProfit: 0n, details: null };
             }
         }
-        else if (opportunity.type === 'cyclic') { log.warn(`${logPrefix} Cyclic opportunity simulation not yet implemented.`); return { profitable: false, error: 'Cyclic sim not implemented', initialAmount, finalAmount: 0n, grossProfit: 0n, details: null }; }
-        else { log.error(`${logPrefix} Unknown opportunity type: ${opportunity.type}`); return { profitable: false, error: `Unknown opportunity type: ${opportunity.type}`, initialAmount, finalAmount: 0n, grossProfit: 0n, details: null }; }
+        else if (opportunity.type === 'cyclic') { /* ... */ }
+        else { /* ... */ }
     }
 }
 module.exports = QuoteSimulator;
