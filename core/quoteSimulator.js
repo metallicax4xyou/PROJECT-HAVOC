@@ -1,4 +1,4 @@
-// /workspaces/arbitrum-flash/core/quoteSimulator.js - Use Math.round for Tick Adjustment
+// /workspaces/arbitrum-flash/core/quoteSimulator.js - Omit Tick from Pool Constructor
 const { Pool, Route, Trade } = require('@uniswap/v3-sdk');
 const { Token, CurrencyAmount, TradeType } = require('@uniswap/sdk-core');
 const { ethers } = require('ethers');
@@ -20,7 +20,6 @@ class QuoteSimulator {
          } catch(e) { const keys = typeof state === 'object' ? Object.keys(state).join(', ') : 'N/A'; return `Error stringifying pool state: ${e.message}. Keys found: ${keys}`; }
     }
 
-
     async simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn) {
         const log = logger || console;
         const context = `[SimSwap ${tokenIn?.symbol}->${tokenOut?.symbol} (${poolState?.fee}bps)]`;
@@ -35,35 +34,39 @@ class QuoteSimulator {
         console.log(`\n--- ${context} ---`);
         console.log(`TokenIn: ${tokenIn.symbol}, TokenOut: ${tokenOut.symbol}, AmountIn: ${amountInStr}`);
 
-        let tickNumberRaw;
-        let tickNumberAdjusted;
-        let tickSpacing;
+        // Define variables for logging in catch block
+        let tickNumberRaw = 'N/A'; // Assign default
+        let tickSpacing = 'N/A';   // Assign default
 
         try {
             const [tokenA, tokenB] = tokenIn.sortsBefore(tokenOut) ? [tokenIn, tokenOut] : [tokenOut, tokenIn];
-            tickNumberRaw = Number(poolState.tick);
+            // We still need tickSpacing for the provider wrapper
             tickSpacing = Number(poolState.tickSpacing);
-
-            if (isNaN(tickNumberRaw) || isNaN(tickSpacing) || tickSpacing <= 0) { log.error(`${context} Invalid raw tick number (${tickNumberRaw}) or tickSpacing (${tickSpacing}).`); return null; }
-
-            // --- Adjust tick to the NEAREST multiple of tickSpacing ---
-            tickNumberAdjusted = Math.round(tickNumberRaw / tickSpacing) * tickSpacing;
-            // --- End Adjustment ---
-
-            if (tickNumberAdjusted !== tickNumberRaw) {
-                console.log(`${context} Adjusted raw tick ${tickNumberRaw} to NEAREST ${tickNumberAdjusted} for tickSpacing ${tickSpacing}`);
-            } else {
-                 console.log(`${context} Raw tick ${tickNumberRaw} is already multiple of tickSpacing ${tickSpacing}`);
+            if (isNaN(tickSpacing) || tickSpacing <= 0) {
+                 log.error(`${context} Invalid tickSpacing (${poolState.tickSpacing}).`);
+                 return null;
             }
+             // Log the raw tick for reference, but don't adjust or pass it
+             tickNumberRaw = Number(poolState.tick);
+             if (!isNaN(tickNumberRaw)) {
+                 console.log(`${context} Raw tick from poolState (for reference only): ${tickNumberRaw}`);
+             } else {
+                  console.log(`${context} Raw tick from poolState is invalid: ${poolState.tick}`);
+                  // Assign raw tick a value for logging in catch block if needed
+                  tickNumberRaw = poolState.tick;
+             }
 
-            console.log(`${context} ===> PREPARING TO CALL new Pool(...) with adjusted tick ${tickNumberAdjusted}`);
 
+            console.log(`${context} ===> PREPARING TO CALL new Pool(...) WITHOUT explicit tick`);
+
+            // Create Uniswap SDK Pool Instance WITHOUT passing the tick
+            // The SDK will infer the tick from sqrtPriceX96
             const pool = new Pool(
                 tokenA, tokenB, poolState.fee,
                 poolState.sqrtPriceX96.toString(),
                 poolState.liquidity.toString(),
-                tickNumberAdjusted, // Use the adjusted tick
-                { // Tick Provider Wrapper (Same)
+                // OMITTING THE TICK ARGUMENT: Let the SDK derive it
+                { // Tick Provider Wrapper (Still need tickSpacing for provider calls)
                     getTick: async (tick) => {
                         console.log(`${context} >>> SDK requesting getTick(${tick})`);
                         const result = await this.tickDataProvider.getTick(tick, tickSpacing, poolState.address);
@@ -79,7 +82,7 @@ class QuoteSimulator {
                 }
             );
 
-            console.log(`${context} ===> SUCCESSFULLY CALLED new Pool(...)`);
+            console.log(`${context} ===> SUCCESSFULLY CALLED new Pool(...) - SDK derived tick: ${pool.tickCurrent}`); // Log the derived tick
             log.debug(`${context} SDK Pool instance created. Proceeding to Trade.fromRoute...`);
 
             const swapRoute = new Route([pool], tokenIn, tokenOut);
@@ -99,13 +102,14 @@ class QuoteSimulator {
         } catch (error) {
             console.error(`${context} !!!!!!!!!!!!!! CATCH BLOCK in simulateSingleSwapExactIn !!!!!!!!!!!!!!`);
             log.error(`${context} Error during single swap simulation: ${error.message}`);
-            log.error(`${context} Details: RawTick=${typeof tickNumberRaw !== 'undefined' ? tickNumberRaw : 'N/A'}, AdjustedTick=${typeof tickNumberAdjusted !== 'undefined' ? tickNumberAdjusted : 'N/A'}, Spacing=${typeof tickSpacing !== 'undefined' ? tickSpacing : 'N/A'}`);
+            log.error(`${context} Details: RawTick=${tickNumberRaw}, Spacing=${tickSpacing}`); // Log raw tick and spacing
             if (error.message?.toLowerCase().includes('insufficient liquidity')) { log.error(`${context} SDK Error: INSUFFICIENT LIQUIDITY...`); }
             else if (error.message?.includes('already') || error.message?.includes('TICK') || error.message?.includes('PRICE_BOUNDS')) { log.error(`${context} SDK Error: TICK/PRICE invariant issue... Error: ${error.message}`); }
-            ErrorHandler.handleError(error, context, { poolAddress: poolState?.address || 'N/A', amountIn: amountInStr, tickRaw: tickNumberRaw, tickAdjusted: tickNumberAdjusted });
-            return null;
+            ErrorHandler.handleError(error, context, { poolAddress: poolState?.address || 'N/A', amountIn: amountInStr, tickRaw: tickNumberRaw }); // Removed adjustedTick from log
+            return null; // Return null on error
         }
     }
+
 
     // simulateArbitrage remains the same
     async simulateArbitrage(opportunity, initialAmount) {
@@ -171,8 +175,8 @@ class QuoteSimulator {
                 return { profitable: false, error: `High-level sim error: ${error.message}`, initialAmount, finalAmount: 0n, grossProfit: 0n, details: null };
             }
         }
-        else if (opportunity.type === 'cyclic') { /* ... */ }
-        else { /* ... */ }
+        else if (opportunity.type === 'cyclic') { log.warn(`${logPrefix} Cyclic opportunity simulation not yet implemented.`); return { profitable: false, error: 'Cyclic sim not implemented', initialAmount, finalAmount: 0n, grossProfit: 0n, details: null }; }
+        else { log.error(`${logPrefix} Unknown opportunity type: ${opportunity.type}`); return { profitable: false, error: `Unknown opportunity type: ${opportunity.type}`, initialAmount, finalAmount: 0n, grossProfit: 0n, details: null }; }
     }
 }
 module.exports = QuoteSimulator;
