@@ -17,6 +17,7 @@ const {
 
 class QuoteSimulator {
     constructor(tickDataProvider) {
+        // We still accept it in the constructor for potential future use or other methods
         if (!tickDataProvider || typeof tickDataProvider.getPopulatedTicksInRange !== 'function') {
             console.error("[QuoteSimulator Constructor] FATAL: Invalid TickDataProvider instance provided.");
             throw new Error("Valid TickDataProvider instance required for QuoteSimulator.");
@@ -38,7 +39,8 @@ class QuoteSimulator {
         const context = `[SimSwap ${tokenIn?.symbol}->${tokenOut?.symbol} (${poolState?.fee}bps)]`;
 
         // --- Basic Input Validation ---
-        if (!this.tickDataProvider) { log.error(`${context} Fatal: TickDataProvider not initialized.`); return null; }
+        // Removed check for this.tickDataProvider as we are removing it from Pool constructor for now
+        // if (!this.tickDataProvider) { log.error(`${context} Fatal: TickDataProvider not initialized.`); return null; }
         if (!poolState) { log.error(`${context} Invalid poolState (null or undefined).`); return null; }
         if (!tokenIn || !tokenOut) { log.error(`${context} Invalid tokenIn or tokenOut.`); return null; }
         if (!(tokenIn instanceof Token) || !(tokenOut instanceof Token)) { log.error(`${context} tokenIn or tokenOut is not a valid SDK Token instance.`); return null; }
@@ -56,25 +58,19 @@ class QuoteSimulator {
         console.log(`\n--- ${context} ---`);
         console.log(`TokenIn: ${tokenIn.symbol}, TokenOut: ${tokenOut.symbol}, AmountIn: ${amountInStr}`);
 
-        // --- Removed tick calculation from sqrtPrice ---
-        // let tickFromSqrtPrice = 'N/A';
-        // let adjustedTick = 'N/A';
-        // ---
-
         let tickSpacing = 'N/A';
         let sqrtPriceJSBI;
 
         try {
             const [tokenA, tokenB] = tokenIn.sortsBefore(tokenOut) ? [tokenIn, tokenOut] : [tokenOut, tokenIn];
 
-            tickSpacing = Number(poolState.tickSpacing); // Still need tickSpacing
+            tickSpacing = Number(poolState.tickSpacing);
             if (isNaN(tickSpacing) || tickSpacing <= 0) {
                 log.error(`${context} Invalid tickSpacing (${poolState.tickSpacing}).`);
                 return null;
             }
 
-            // --- Use the tick directly from poolState ---
-            const currentTickFromState = poolState.tick; // This is now a number
+            const currentTickFromState = poolState.tick;
             console.log(`${context} Using tick directly from poolState: ${currentTickFromState}`);
 
             // --- Validate sqrtPriceX96 range ---
@@ -102,32 +98,32 @@ class QuoteSimulator {
             console.log(`${context}      Fee (Enum Value): ${feeAmountEnum}, Type: ${typeof feeAmountEnum}`);
             console.log(`${context}      sqrtPriceX96 (JSBI): ${sqrtPriceJSBI.toString()}`);
             console.log(`${context}      liquidity (JSBI): ${liquidityJSBI.toString()}`);
-            console.log(`${context}      tickCurrent (from state): ${currentTickFromState}`); // Log the tick being passed
-            console.log(`${context}      tickDataProvider present: ${!!this.tickDataProvider}`);
+            console.log(`${context}      tickCurrent (from state): ${currentTickFromState}`);
+            console.log(`${context}      tickDataProvider present: NO (Passing null)`); // Updated log
             // --- End Debug Logging ---
 
             console.log(`${context} ===> PREPARING TO CALL new Pool(...) with tick from state: ${currentTickFromState} and fee enum: ${feeAmountEnum}`);
 
             // --- Instantiate SDK Pool ---
-            // *** Pass currentTickFromState (the original tick) instead of adjustedTick ***
+            // *** Pass null for the tickDataProvider argument ***
             const pool = new Pool(
                 tokenA,
                 tokenB,
                 feeAmountEnum,
                 sqrtPriceJSBI,
                 liquidityJSBI,
-                currentTickFromState, // Use the tick directly from slot0
-                this.tickDataProvider // Keep provider for now
+                currentTickFromState,
+                null // Set tickDataProvider to null
             );
             // --- End Pool Instantiation ---
 
-            console.log(`${context} ===> SUCCESSFULLY CALLED new Pool(...) - SDK derived tickCurrent: ${pool.tickCurrent}`); // Log the tick the SDK settled on
+            console.log(`${context} ===> SUCCESSFULLY CALLED new Pool(...) - SDK derived tickCurrent: ${pool.tickCurrent}`);
             log.debug(`${context} SDK Pool instance created. Proceeding to Trade.fromRoute...`);
 
             // --- Simulate Trade ---
             const swapRoute = new Route([pool], tokenIn, tokenOut);
             const currencyAmountIn = CurrencyAmount.fromRawAmount(tokenIn, amountInStr);
-            // *** This is where the tick data provider error likely occurs ***
+            // *** Now the SDK should attempt trade without external tick data ***
             const trade = await Trade.fromRoute( swapRoute, currencyAmountIn, TradeType.EXACT_INPUT );
             // --- End Trade Simulation ---
 
@@ -151,7 +147,6 @@ class QuoteSimulator {
         } catch (error) {
             console.error(`${context} !!!!!!!!!!!!!! CATCH BLOCK in simulateSingleSwapExactIn !!!!!!!!!!!!!!`);
             log.error(`${context} Error during single swap simulation: ${error.message}`);
-             // Log details available before the Pool constructor potentially failed
             log.error(`${context} Details: SqrtPriceX96=${poolState?.sqrtPriceX96?.toString() || 'N/A'}, TickFromState=${poolState?.tick}, Spacing=${tickSpacing}`);
 
             if (error.message?.toLowerCase().includes('insufficient liquidity')) {
@@ -163,16 +158,12 @@ class QuoteSimulator {
                 poolAddress: poolState?.address || 'N/A',
                 amountIn: amountInStr,
                 sqrtPriceX96: poolState?.sqrtPriceX96?.toString(),
-                tickFromState: poolState?.tick, // Log the tick from state
-                // tickFromSqrtPrice, // Removed
-                // adjustedTick, // Removed
+                tickFromState: poolState?.tick,
                 feeBps: poolState?.fee
             });
             return null; // Return null on any simulation error
         }
     }
-
-    // simulateArbitrage method removed
 }
 
 module.exports = QuoteSimulator;
