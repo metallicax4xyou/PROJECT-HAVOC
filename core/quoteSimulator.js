@@ -1,5 +1,5 @@
 // /workspaces/arbitrum-flash/core/quoteSimulator.js
-// *** Now ONLY simulates a SINGLE swap ***
+// *** Simulates SINGLE swap, creates pool-specific TickProvider ***
 const { Pool, Route, Trade, TickMath } = require('@uniswap/v3-sdk');
 const { Token, CurrencyAmount, TradeType } = require('@uniswap/sdk-core');
 const JSBI = require('jsbi');
@@ -10,25 +10,29 @@ const ErrorHandler = require('../utils/errorHandler');
 const {
     MIN_SQRT_RATIO,
     MAX_SQRT_RATIO,
-    getFeeAmountEnum, // Still need this helper
+    getFeeAmountEnum,
     stringifyPoolState,
-} = require('./simulationHelpers'); // Import from the helper file
+} = require('./simulationHelpers');
+// --- Import the Tick Data Provider class ---
+const { LensTickDataProvider } = require('../utils/tickDataProvider');
 // ---
 
 class QuoteSimulator {
-    constructor(tickDataProvider) {
-        // We still accept it in the constructor for potential future use or other methods
-        if (!tickDataProvider || typeof tickDataProvider.getPopulatedTicksInRange !== 'function') {
-            console.error("[QuoteSimulator Constructor] FATAL: Invalid TickDataProvider instance provided.");
-            throw new Error("Valid TickDataProvider instance required for QuoteSimulator.");
+    // Constructor no longer needs tickDataProvider, but needs TickLens address, provider, chainId to pass down
+    constructor(tickLensAddress, provider, chainId) {
+        if (!tickLensAddress || !provider || !chainId) {
+             throw new Error("QuoteSimulator requires tickLensAddress, provider, and chainId for creating TickDataProviders.");
         }
-        this.tickDataProvider = tickDataProvider;
-        console.log("[QuoteSimulator] Instance created with TickDataProvider.");
+        this.tickLensAddress = tickLensAddress;
+        this.provider = provider;
+        this.chainId = chainId;
+        // Removed this.tickDataProvider
+        console.log("[QuoteSimulator] Instance created (will create TickDataProviders per simulation).");
     }
 
     /**
      * Simulates a single swap (one leg of an arbitrage).
-     * @param {object} poolState - Live state of the Uniswap V3 pool. Requires { sqrtPriceX96, liquidity, tick, fee, tickSpacing, address? }
+     * @param {object} poolState - Live state of the Uniswap V3 pool. Requires { address, sqrtPriceX96, liquidity, tick, fee, tickSpacing }
      * @param {Token} tokenIn - SDK Token instance for input.
      * @param {Token} tokenOut - SDK Token instance for output.
      * @param {bigint} amountIn - Raw amount of tokenIn to swap.
@@ -39,9 +43,7 @@ class QuoteSimulator {
         const context = `[SimSwap ${tokenIn?.symbol}->${tokenOut?.symbol} (${poolState?.fee}bps)]`;
 
         // --- Basic Input Validation ---
-        // Removed check for this.tickDataProvider as we are removing it from Pool constructor for now
-        // if (!this.tickDataProvider) { log.error(`${context} Fatal: TickDataProvider not initialized.`); return null; }
-        if (!poolState) { log.error(`${context} Invalid poolState (null or undefined).`); return null; }
+        if (!poolState || !poolState.address) { log.error(`${context} Invalid poolState (null or missing address).`); return null; } // Need address now
         if (!tokenIn || !tokenOut) { log.error(`${context} Invalid tokenIn or tokenOut.`); return null; }
         if (!(tokenIn instanceof Token) || !(tokenOut instanceof Token)) { log.error(`${context} tokenIn or tokenOut is not a valid SDK Token instance.`); return null; }
         if (amountIn <= 0n) { log.error(`${context} Invalid amountIn (${amountIn}). Must be positive.`); return null; }
@@ -49,7 +51,7 @@ class QuoteSimulator {
 
         // Check required poolState fields
         if (typeof poolState.sqrtPriceX96 !== 'bigint' || typeof poolState.liquidity !== 'bigint' || typeof poolState.tick !== 'number' || !poolState.fee || typeof poolState.tickSpacing !== 'number') {
-            log.error(`${context} Invalid poolState fields (missing/wrong type): sqrtPriceX96 (bigint), liquidity (bigint), tick (number), fee, or tickSpacing (number).`);
+            log.error(`${context} Invalid poolState fields (missing/wrong type): address, sqrtPriceX96 (bigint), liquidity (bigint), tick (number), fee, or tickSpacing (number).`);
             console.error("Problematic PoolState:", stringifyPoolState(poolState));
             return null;
         }
@@ -60,6 +62,7 @@ class QuoteSimulator {
 
         let tickSpacing = 'N/A';
         let sqrtPriceJSBI;
+        let tickDataProviderForPool = null; // Define here for catch block access
 
         try {
             const [tokenA, tokenB] = tokenIn.sortsBefore(tokenOut) ? [tokenIn, tokenOut] : [tokenOut, tokenIn];
@@ -90,6 +93,23 @@ class QuoteSimulator {
             }
             // --- End Fee Mapping ---
 
+            // --- *** Create Pool-Specific Tick Data Provider *** ---
+            try {
+                 log.debug(`${context} Creating new LensTickDataProvider instance for pool ${poolState.address}`);
+                 tickDataProviderForPool = new LensTickDataProvider(
+                     this.tickLensAddress,
+                     this.provider,
+                     this.chainId,
+                     poolState.address // Pass the specific pool address
+                 );
+                 log.debug(`${context} Successfully created TickDataProvider instance.`);
+             } catch (providerError) {
+                  log.error(`${context} Failed to instantiate LensTickDataProvider: ${providerError.message}`);
+                  throw providerError; // Propagate error
+             }
+            // --- *** End Tick Data Provider Creation *** ---
+
+
             // --- Add Debug Logging ---
             const liquidityJSBI = JSBI.BigInt(poolState.liquidity.toString());
             console.log(`${context} ---> DEBUG: Attempting Pool constructor with:`);
@@ -99,13 +119,13 @@ class QuoteSimulator {
             console.log(`${context}      sqrtPriceX96 (JSBI): ${sqrtPriceJSBI.toString()}`);
             console.log(`${context}      liquidity (JSBI): ${liquidityJSBI.toString()}`);
             console.log(`${context}      tickCurrent (from state): ${currentTickFromState}`);
-            console.log(`${context}      tickDataProvider present: NO (Passing null)`); // Updated log
+            console.log(`${context}      tickDataProvider present: YES (Pool-specific instance)`); // Updated log
             // --- End Debug Logging ---
 
             console.log(`${context} ===> PREPARING TO CALL new Pool(...) with tick from state: ${currentTickFromState} and fee enum: ${feeAmountEnum}`);
 
             // --- Instantiate SDK Pool ---
-            // *** Pass null for the tickDataProvider argument ***
+            // *** Pass the newly created pool-specific tickDataProviderForPool ***
             const pool = new Pool(
                 tokenA,
                 tokenB,
@@ -113,7 +133,7 @@ class QuoteSimulator {
                 sqrtPriceJSBI,
                 liquidityJSBI,
                 currentTickFromState,
-                null // Set tickDataProvider to null
+                tickDataProviderForPool // Use the instance created above
             );
             // --- End Pool Instantiation ---
 
@@ -123,14 +143,15 @@ class QuoteSimulator {
             // --- Simulate Trade ---
             const swapRoute = new Route([pool], tokenIn, tokenOut);
             const currencyAmountIn = CurrencyAmount.fromRawAmount(tokenIn, amountInStr);
-            // *** Now the SDK should attempt trade without external tick data ***
+            // *** SDK should now call methods on the correct tickDataProviderForPool instance ***
+            log.debug(`${context} Calling Trade.fromRoute...`);
             const trade = await Trade.fromRoute( swapRoute, currencyAmountIn, TradeType.EXACT_INPUT );
+            log.debug(`${context} Trade.fromRoute finished successfully.`);
             // --- End Trade Simulation ---
 
-            log.debug(`${context} Trade.fromRoute finished.`);
 
             if (!trade || !trade.outputAmount || !trade.outputAmount.quotient) {
-                log.error(`${context} Trade simulation failed or returned invalid output.`);
+                log.error(`${context} Trade simulation failed or returned invalid output AFTER successful Trade.fromRoute call.`);
                 console.error("Trade object:", stringifyPoolState(trade));
                 return null;
             }
@@ -148,12 +169,19 @@ class QuoteSimulator {
             console.error(`${context} !!!!!!!!!!!!!! CATCH BLOCK in simulateSingleSwapExactIn !!!!!!!!!!!!!!`);
             log.error(`${context} Error during single swap simulation: ${error.message}`);
             log.error(`${context} Details: SqrtPriceX96=${poolState?.sqrtPriceX96?.toString() || 'N/A'}, TickFromState=${poolState?.tick}, Spacing=${tickSpacing}`);
+            // Log stack trace for easier debugging within SDK
+            if (error.stack) {
+                console.error(error.stack);
+            }
 
             if (error.message?.toLowerCase().includes('insufficient liquidity')) {
                 log.warn(`${context} SDK Error: INSUFFICIENT LIQUIDITY for this trade amount.`);
             } else if (error.message?.includes('already') || error.message?.includes('TICK') || error.message?.includes('PRICE_BOUNDS') || error.message?.includes('SQRT_RATIO') || error.message?.includes('FEE')) {
                 log.error(`${context} SDK Invariant Error: ${error.message}`);
+            } else if (error.message?.includes('nextInitializedTickWithinOneWord') || error.message?.includes('getTick')) {
+                 log.error(`${context} SDK Error likely related to TickDataProvider interaction: ${error.message}`);
             }
+
             ErrorHandler.handleError(error, context, {
                 poolAddress: poolState?.address || 'N/A',
                 amountIn: amountInStr,
