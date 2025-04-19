@@ -4,11 +4,14 @@ const { ethers } = require('ethers');
 const { PoolScanner } = require('./poolScanner');
 const QuoteSimulator = require('./quoteSimulator'); // Now includes simulateArbitrage
 const GasEstimator = require('./gasEstimator');
-const ProfitCalculator = require('./profitCalculator'); // Import ProfitCalculator
+// --- Import ProfitCalculator ---
+const ProfitCalculator = require('./profitCalculator');
 const logger = require('../utils/logger');
 const ErrorHandler = require('../utils/errorHandler');
 const FlashSwapManager = require('./flashSwapManager');
-// const { TOKENS } = require('../constants/tokens'); // Might not be needed directly here
+// --- Import executeTransaction ---
+const { executeTransaction } = require('./txExecutor');
+const { ArbitrageError } = require('../utils/errorHandler'); // Import error type
 
 // Load FlashSwap ABI (Ensure this path is correct)
 let flashSwapAbi;
@@ -24,9 +27,6 @@ try {
     process.nextTick(() => process.exit(1));
     throw new Error("Failed to load FlashSwap ABI.");
 }
-
-// Import the executor function
-const { executeTransaction } = require('./txExecutor');
 
 // Helper for safe stringify
 function safeStringify(obj, indent = null) {
@@ -61,7 +61,7 @@ class ArbitrageEngine {
              throw scannerError;
         }
 
-        this.gasEstimator = new GasEstimator(this.provider); // Keep for future profit calc
+        this.gasEstimator = new GasEstimator(this.provider); // Keep for profit calc
         this.isRunning = false;
         this.cycleCount = 0;
         this.cycleInterval = this.config.CYCLE_INTERVAL_MS || 5000;
@@ -71,7 +71,7 @@ class ArbitrageEngine {
 
     async initialize() {
         logger.info('[Engine] Arbitrage Engine Initialized Successfully.');
-        // Attempt to initialize NonceManager early (optional, depends on NonceManager design)
+        // Attempt to initialize NonceManager early
         try {
             if (this.signer && typeof this.signer.initialize === 'function') {
                  await this.signer.initialize();
@@ -79,8 +79,7 @@ class ArbitrageEngine {
             }
         } catch (nonceError) {
              logger.error(`[Engine] Failed to initialize Nonce Manager during engine init: ${nonceError.message}`);
-             // Decide if this is fatal or can be recovered later
-             throw nonceError; // Rethrow as it's critical for execution
+             throw nonceError;
         }
     }
 
@@ -106,13 +105,13 @@ class ArbitrageEngine {
         if (!this.isRunning) { logger.warn('[Engine] Engine not running.'); return; }
         logger.info('[Engine] Stopping Arbitrage Engine...');
         this.isRunning = false; // Signal runCycle to stop
-        // Clear interval if exists
         if (this.intervalId) {
             clearInterval(this.intervalId);
             this.intervalId = null;
         }
     }
 
+    // Updated runCycle with Profit Calculator integration
     async runCycle() {
         if (!this.isRunning) { logger.info('[Engine] runCycle called but engine is stopped.'); return; }
         this.cycleCount++;
@@ -137,7 +136,7 @@ class ArbitrageEngine {
             }
             logger.info(`[Engine] Fetched ${fetchedCount} live pool states.`);
 
-            // 3. Find Opportunities (Scanner does the heavy lifting)
+            // 3. Find Opportunities
             const potentialOpportunities = this.poolScanner.findOpportunities(livePoolStatesMap);
             if (potentialOpportunities.length === 0) {
                 logger.info('[Engine] No potential opportunities found this cycle.');
@@ -146,16 +145,15 @@ class ArbitrageEngine {
             logger.info(`[Engine] Found ${potentialOpportunities.length} potential opportunities.`);
 
             // --- 4. Process Opportunities (Simulation, Profit Check, Execution) ---
-            let executedThisCycle = false; // Flag to execute only one opp per cycle
+            let executedThisCycle = false;
 
             for (const opp of potentialOpportunities) {
-                if (executedThisCycle) break; // Only execute the first profitable opp found
+                if (executedThisCycle) break;
 
                 const logPrefix = `[Engine OppProc Type: ${opp.type}, Group: ${opp.groupName}]`;
                 logger.info(`${logPrefix} Processing potential opportunity...`);
                 logger.debug(`${logPrefix} Details: ${safeStringify(opp)}`);
 
-                // We only handle triangular for now
                 if (opp.type !== 'triangular') {
                     logger.warn(`${logPrefix} Skipping opportunity type '${opp.type}' (only 'triangular' supported).`);
                     continue;
@@ -163,89 +161,78 @@ class ArbitrageEngine {
 
                 try {
                     // a. Find Group Config
-                    // Assumes opp.groupName matches a group name in config.POOL_GROUPS
                     const groupConfig = this.config.POOL_GROUPS.find(g => g.name === opp.groupName);
-                    if (!groupConfig) {
-                        logger.error(`${logPrefix} Could not find group config for group name '${opp.groupName}'. Skipping.`);
-                        continue;
-                    }
+                    if (!groupConfig) { logger.error(`${logPrefix} Could not find group config. Skipping.`); continue; }
                     if (!groupConfig.sdkBorrowToken || !groupConfig.borrowAmount || typeof groupConfig.minNetProfit === 'undefined') {
-                        logger.error(`${logPrefix} Incomplete group config found for '${opp.groupName}'. Skipping.`);
-                        continue;
+                        logger.error(`${logPrefix} Incomplete group config. Skipping.`); continue;
                     }
 
                     // b. Verify Borrow Token Matches Path Start
-                    // Assumes the triangular path always starts with the group's borrow token
                     const borrowTokenSymbol = groupConfig.borrowTokenSymbol;
                     if (opp.pathSymbols[0] !== borrowTokenSymbol) {
-                        logger.error(`${logPrefix} Opportunity path start token (${opp.pathSymbols[0]}) does not match group borrow token (${borrowTokenSymbol}). Skipping. (Logic assumes borrowing start token).`);
-                        continue;
+                        logger.error(`${logPrefix} Path start token (${opp.pathSymbols[0]}) != group borrow token (${borrowTokenSymbol}). Skipping.`); continue;
                     }
-                    const initialAmount = groupConfig.borrowAmount; // Amount to borrow (BigInt)
+                    const initialAmount = groupConfig.borrowAmount;
 
                     // c. Simulate
                     logger.info(`${logPrefix} Simulating path: ${opp.pathSymbols.join(' -> ')} with ${ethers.formatUnits(initialAmount, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}`);
                     const simulationResult = await QuoteSimulator.simulateArbitrage(opp, initialAmount);
 
-                    if (!simulationResult) {
-                        logger.warn(`${logPrefix} Simulation returned null. Skipping.`);
-                        continue;
-                    }
-                    if (simulationResult.error) {
-                        logger.warn(`${logPrefix} Simulation failed: ${simulationResult.error}. Skipping.`);
-                        continue;
-                    }
-                    if (!simulationResult.profitable) {
+                    if (!simulationResult) { logger.warn(`${logPrefix} Simulation returned null. Skipping.`); continue; }
+                    if (simulationResult.error) { logger.warn(`${logPrefix} Simulation failed: ${simulationResult.error}. Skipping.`); continue; }
+                    if (!simulationResult.profitable) { // Checks gross profit > 0
                         logger.info(`${logPrefix} Simulation shows NO gross profit (${ethers.formatUnits(simulationResult.grossProfit, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}). Skipping.`);
                         continue;
                     }
-
                     logger.info(`${logPrefix} ✅ Simulation shows POSITIVE gross profit: ${ethers.formatUnits(simulationResult.grossProfit, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}`);
 
-                    // d. (Deferred) Net Profit Check & Gas Estimation
-                    // TODO: Implement full profit check using ProfitCalculator
-                    // Requires:
-                    // 1. Prepare tx data using TxExecutor logic (or a helper) to get gas estimate input
-                    // 2. Call gasEstimator.estimateGasLimit(txRequestForGas)
-                    // 3. Call ProfitCalculator.checkProfitability(simulationResult, this.provider, groupConfig, estimatedGasLimit)
-                    // 4. Check result.isProfitable before proceeding
+                    // --- d. Net Profit Check & Gas Estimation ---
+                    logger.info(`${logPrefix} Performing Net Profit Check...`);
+                    // Call checkProfitability, passing the simulation result, gas estimator instance, and group config.
+                    // We pass null for txRequest for now, so it uses fallback GAS_LIMIT_ESTIMATE.
+                    const profitabilityResult = await ProfitCalculator.checkProfitability(
+                         simulationResult,
+                         this.gasEstimator, // Pass the engine's gas estimator instance
+                         groupConfig,
+                         null // txRequest - using fallback gas limit estimate for now
+                    );
 
-                    logger.warn(`${logPrefix} Net profit check deferred. Proceeding based on positive gross profit.`);
-                    const isProfitableNet = true; // TEMPORARY ASSUMPTION FOR TESTING FLOW
+                    // Check the result from the Profit Calculator
+                    if (!profitabilityResult || !profitabilityResult.isProfitable) {
+                        logger.info(`${logPrefix} ❌ Not profitable after estimated gas cost. Skipping execution.`);
+                        // Log details if available
+                         if(profitabilityResult) {
+                              logger.debug(`${logPrefix} Profit Check Details: NetProfitWei=${profitabilityResult.netProfitWei}, EstGasCostWei=${profitabilityResult.estimatedGasCostWei}, GrossProfitWei=${profitabilityResult.grossProfitWei}`);
+                         }
+                        continue; // Skip to the next opportunity
+                    }
+                    // If we reach here, profitabilityResult.isProfitable is true
+                    logger.info(`${logPrefix} ✅✅ Opportunity IS Profitable after estimated gas! (Net Profit: ${ethers.formatUnits(profitabilityResult.netProfitWei, 18)} ${this.config.NATIVE_SYMBOL})`);
+
 
                     // e. Execute if profitable
-                    if (isProfitableNet) {
-                        logger.info(`${logPrefix} >>> PROFITABLE OPPORTUNITY CONFIRMED (Gross Profit). Attempting Execution... <<<`);
+                    logger.info(`${logPrefix} >>> Attempting Execution... <<<`);
+                    const executionResult = await executeTransaction(
+                        opp,
+                        simulationResult,
+                        this.manager,
+                        this.gasEstimator // Pass estimator (though executor might re-estimate gas)
+                    );
 
-                        // Call the refactored executor
-                        const executionResult = await executeTransaction(
-                            opp,
-                            simulationResult, // Pass the full simulation result
-                            this.manager,      // Pass the FlashSwapManager
-                            this.gasEstimator  // Pass the GasEstimator
-                        );
-
-                        if (executionResult.success) {
-                            logger.info(`${logPrefix} ✅✅✅ EXECUTION SUCCEEDED! TxHash: ${executionResult.txHash}`);
-                            executedThisCycle = true; // Stop processing after first successful execution
-                        } else {
-                            logger.error(`${logPrefix} ❌ Execution FAILED: ${executionResult.error?.message || 'Unknown execution error'}`);
-                            // Log details if available in ArbitrageError
-                            if (executionResult.error instanceof ArbitrageError && executionResult.error.details) {
-                                logger.error(`${logPrefix} Execution Details: ${safeStringify(executionResult.error.details)}`);
-                            }
-                        }
+                    if (executionResult.success) {
+                        logger.info(`${logPrefix} ✅✅✅ EXECUTION SUCCEEDED! TxHash: ${executionResult.txHash}`);
+                        executedThisCycle = true; // Stop processing after first successful execution
                     } else {
-                         // This block will be reached when net profit check is implemented
-                         logger.info(`${logPrefix} Opportunity not profitable after estimated gas costs. Skipping execution.`);
+                        logger.error(`${logPrefix} ❌ Execution FAILED: ${executionResult.error?.message || 'Unknown execution error'}`);
+                        if (executionResult.error instanceof ArbitrageError && executionResult.error.details) {
+                            logger.error(`${logPrefix} Execution Details: ${safeStringify(executionResult.error.details)}`);
+                        }
                     }
-
                 } catch (oppError) {
                     logger.error(`${logPrefix} Error processing opportunity: ${oppError.message}`);
                     ErrorHandler.handleError(oppError, `Engine Opportunity Processing (${opp.groupName})`);
-                    // Continue to the next opportunity
                 }
-            } // End for loop iterating opportunities
+            } // End for loop
 
             this.logCycleEnd(cycleStartTime);
 
