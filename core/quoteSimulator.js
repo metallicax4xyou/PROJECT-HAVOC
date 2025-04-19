@@ -1,4 +1,4 @@
-// /workspaces/arbitrum-flash/core/quoteSimulator.js - Refactored + More Console Logging
+// /workspaces/arbitrum-flash/core/quoteSimulator.js - Added Tick Adjustment
 const { Pool, Route, Trade } = require('@uniswap/v3-sdk');
 const { Token, CurrencyAmount, TradeType } = require('@uniswap/sdk-core');
 const { ethers } = require('ethers');
@@ -12,95 +12,94 @@ class QuoteSimulator {
         console.log("[QuoteSimulator] Instance created with TickDataProvider."); // Use console
     }
 
-    // Helper to stringify BigInts for console.log
-    stringifyPoolState(state) {
-         try {
-             return JSON.stringify(state, (key, value) =>
-                 typeof value === 'bigint' ? value.toString() : value, 2);
-         } catch(e) { return "Error stringifying pool state"; }
-    }
-
+    stringifyPoolState(state) { /* ... (keep helper) ... */ }
 
     async simulateSingleSwapExactIn(poolState, tokenIn, tokenOut, amountIn) {
-        const log = logger || console; // Use logger for general, console for specific debug
+        const log = logger || console;
         const context = `[SimSwap ${tokenIn?.symbol}->${tokenOut?.symbol} (${poolState?.fee}bps)]`;
         if (!this.tickDataProvider) { console.error(`${context} FATAL: TickDataProvider is missing on simulator instance.`); return null; }
 
-        // Input Validation
-        if (!poolState || !tokenIn || !tokenOut || !poolState.sqrtPriceX96 || !poolState.liquidity || typeof poolState.tick === 'undefined' || !poolState.fee) { log.warn(`${context} Invalid poolState/tokens.`); return null; }
+        // Input Validation (Same)
+        if (!poolState || !tokenIn || !tokenOut || !poolState.sqrtPriceX96 || !poolState.liquidity || typeof poolState.tick === 'undefined' || !poolState.fee || !poolState.tickSpacing) { log.warn(`${context} Invalid poolState/tokens (missing fields).`); return null; } // Added tickSpacing check
         if (!(tokenIn instanceof Token) || !(tokenOut instanceof Token)) { log.warn(`${context} Invalid SDK Token instances.`); return null; }
         if (amountIn <= 0n) { log.warn(`${context} Non-positive amountIn.`); return { amountOut: 0n, sdkTokenIn: tokenIn, sdkTokenOut: tokenOut, trade: null }; }
         const amountInStr = amountIn.toString(); if (!/^\d+$/.test(amountInStr)) { log.warn(`${context} Invalid amountIn format.`); return null; }
 
-        // --- Direct Console Log of Pool State ---
         console.log(`\n--- ${context} ---`);
         console.log(`Pool State Received by simulateSingleSwapExactIn:`);
-        console.log(this.stringifyPoolState(poolState)); // Log the whole state object
+        console.log(this.stringifyPoolState(poolState));
         console.log(`TokenIn: ${tokenIn.symbol}, TokenOut: ${tokenOut.symbol}, AmountIn: ${amountInStr}`);
-        // ---
 
         try {
             const [tokenA, tokenB] = tokenIn.sortsBefore(tokenOut) ? [tokenIn, tokenOut] : [tokenOut, tokenIn];
-            const tickNumber = Number(poolState.tick);
-            if (isNaN(tickNumber)) { log.warn(`${context} Invalid tick number ${poolState.tick}.`); return null; }
+            const tickNumberRaw = Number(poolState.tick);
+            const tickSpacing = Number(poolState.tickSpacing); // Ensure tickSpacing is a number
 
+            if (isNaN(tickNumberRaw) || isNaN(tickSpacing) || tickSpacing <= 0) {
+                log.warn(`${context} Invalid raw tick number (${tickNumberRaw}) or tickSpacing (${tickSpacing}).`);
+                return null;
+            }
 
-             // --- Log immediately before Pool constructor ---
-             console.log(`${context} ===> PREPARING TO CALL new Pool(...)`);
-             // ---
+            // --- Adjust tick down to the nearest multiple of tickSpacing ---
+            const tickNumberAdjusted = Math.floor(tickNumberRaw / tickSpacing) * tickSpacing;
+            // --- End Adjustment ---
 
-            // Create Uniswap SDK Pool Instance
+            if (tickNumberAdjusted !== tickNumberRaw) {
+                console.log(`${context} Adjusted raw tick ${tickNumberRaw} to ${tickNumberAdjusted} for tickSpacing ${tickSpacing}`);
+            }
+
+            console.log(`${context} ===> PREPARING TO CALL new Pool(...) with adjusted tick ${tickNumberAdjusted}`);
+
+            // Create Uniswap SDK Pool Instance using ADJUSTED tick
             const pool = new Pool(
                 tokenA, tokenB, poolState.fee,
                 poolState.sqrtPriceX96.toString(),
                 poolState.liquidity.toString(),
-                tickNumber,
-                { // --- Tick Provider Wrapper with CONSOLE Logging ---
+                tickNumberAdjusted, // Use the adjusted tick here
+                { // Tick Provider Wrapper (Same)
                     getTick: async (tick) => {
-                        // Use console.log for this critical path
                         console.log(`${context} >>> SDK requesting getTick(${tick})`);
-                        const result = await this.tickDataProvider.getTick(tick, poolState.tickSpacing, poolState.address);
+                        const result = await this.tickDataProvider.getTick(tick, tickSpacing, poolState.address); // Pass original spacing
                         console.log(`${context} <<< Provider returned for getTick(${tick}): ${result ? `{ liquidityNet: ${result.liquidityNet} }` : 'null'}`);
                         return result;
                     },
                     nextInitializedTickWithinOneWord: async (tick, lte) => {
-                         // Use console.log for this critical path
                         console.log(`${context} >>> SDK requesting nextInitializedTickWithinOneWord(tick=${tick}, lte=${lte})`);
-                        const result = await this.tickDataProvider.nextInitializedTickWithinOneWord(tick, lte, poolState.tickSpacing, poolState.address);
+                        const result = await this.tickDataProvider.nextInitializedTickWithinOneWord(tick, lte, tickSpacing, poolState.address); // Pass original spacing
                         console.log(`${context} <<< Provider returned for nextInitializedTickWithinOneWord(tick=${tick}, lte=${lte}): ${result}`);
                         return result;
                     }
-                } // --- End Wrapper ---
+                }
             );
 
-            // --- Log immediately after Pool constructor ---
             console.log(`${context} ===> SUCCESSFULLY CALLED new Pool(...)`);
-            // ---
-
-            log.debug(`${context} SDK Pool instance created. Proceeding to Trade.fromRoute...`); // Regular logger ok here
+            log.debug(`${context} SDK Pool instance created. Proceeding to Trade.fromRoute...`);
 
             const swapRoute = new Route([pool], tokenIn, tokenOut);
             const trade = await Trade.fromRoute( swapRoute, CurrencyAmount.fromRawAmount(tokenIn, amountInStr), TradeType.EXACT_INPUT );
 
             log.debug(`${context} Trade.fromRoute finished.`);
 
-            if (!trade || !trade.outputAmount || !trade.outputAmount.quotient) { /* ... */ }
+            if (!trade || !trade.outputAmount || !trade.outputAmount.quotient) {
+                 log.warn(`${context} SDK Trade creation failed or returned no output.`);
+                 if (trade) log.debug(`${context} Trade details: ${JSON.stringify(trade)}`);
+                 return { amountOut: 0n, sdkTokenIn: tokenIn, sdkTokenOut: tokenOut, trade: trade };
+            }
             const amountOutBI = BigInt(trade.outputAmount.quotient.toString());
-            log.debug(`${context} Simulation successful. Output Amount: ${amountOutBI}`);
+             log.debug(`${context} Simulation successful. Output Amount: ${amountOutBI}`);
             return { amountOut: amountOutBI, sdkTokenIn: tokenIn, sdkTokenOut: tokenOut, trade: trade };
 
         } catch (error) {
-            // --- Log Error Location ---
             console.error(`${context} !!!!!!!!!!!!!! CATCH BLOCK in simulateSingleSwapExactIn !!!!!!!!!!!!!!`);
-            // ---
             log.error(`${context} Error during single swap simulation: ${error.message}`);
+            // Add more context to the error log, including the ticks used
+            log.error(`${context} Details: RawTick=${tickNumberRaw}, AdjustedTick=${tickNumberAdjusted}, Spacing=${tickSpacing}`);
             if (error.message?.toLowerCase().includes('insufficient liquidity')) { log.error(`${context} SDK Error: INSUFFICIENT LIQUIDITY...`); }
             else if (error.message?.includes('already') || error.message?.includes('TICK')) { log.error(`${context} SDK Error: TICK SPACING or RANGE issue or Invariant Failed... Error: ${error.message}`); }
-            ErrorHandler.handleError(error, context, { poolAddress: poolState.address, amountIn: amountInStr }); // Log full error object too
+            ErrorHandler.handleError(error, context, { poolAddress: poolState.address, amountIn: amountInStr, tickRaw: tickNumberRaw, tickAdjusted: tickNumberAdjusted });
             return null;
         }
     }
-
 
     // simulateArbitrage remains the same
     async simulateArbitrage(opportunity, initialAmount) {
@@ -125,30 +124,24 @@ class QuoteSimulator {
              if (!pool1Matches || !pool2Matches || !pool3Matches) { /* ... */ }
 
             try {
-                // --- Log Pool 1 State before calling sim ---
-                 console.log(`${logPrefix} POOL 1 STATE before calling simulateSingleSwapExactIn:`);
-                 console.log(this.stringifyPoolState(pool1));
-                 // ---
+                 // Log pool states before calling sim (Same as before)
+                 console.log(`${logPrefix} POOL 1 STATE before calling simulateSingleSwapExactIn:`); console.log(this.stringifyPoolState(pool1));
                 const hop1Result = await this.simulateSingleSwapExactIn(pool1, tokenA, tokenB, initialAmount);
-                if (!hop1Result || hop1Result.amountOut == null) { /* ... */ }
+                if (!hop1Result || hop1Result.amountOut == null) { log.warn(`${logPrefix} Hop 1 simulation failed.`); return { profitable: false, error: 'Hop 1 sim failed', initialAmount, finalAmount: 0n, grossProfit: 0n, details: { hop1Result } }; }
                 const amountB_Received = hop1Result.amountOut;
                 log.info(`[SIM Hop 1 ${tokenA.symbol}->${tokenB.symbol}] Output: ${ethers.formatUnits(amountB_Received, tokenB.decimals)} ${tokenB.symbol}`);
-                if (amountB_Received <= 0n) { /* ... */ }
+                if (amountB_Received <= 0n) { log.warn(`${logPrefix} Hop 1 output is zero or less.`); return { profitable: false, error: 'Hop 1 zero output', initialAmount, finalAmount: 0n, grossProfit: 0n, details: { hop1Result } }; }
 
-                // Log Pool 2 State before calling sim
-                 console.log(`${logPrefix} POOL 2 STATE before calling simulateSingleSwapExactIn:`);
-                 console.log(this.stringifyPoolState(pool2));
+                 console.log(`${logPrefix} POOL 2 STATE before calling simulateSingleSwapExactIn:`); console.log(this.stringifyPoolState(pool2));
                 const hop2Result = await this.simulateSingleSwapExactIn(pool2, tokenB, tokenC, amountB_Received);
-                 if (!hop2Result || hop2Result.amountOut == null) { /* ... */ }
+                 if (!hop2Result || hop2Result.amountOut == null) { log.warn(`${logPrefix} Hop 2 simulation failed.`); return { profitable: false, error: 'Hop 2 sim failed', initialAmount, finalAmount: 0n, grossProfit: 0n, details: { hop1Result, hop2Result } }; }
                 const amountC_Received = hop2Result.amountOut;
                 log.info(`[SIM Hop 2 ${tokenB.symbol}->${tokenC.symbol}] Output: ${ethers.formatUnits(amountC_Received, tokenC.decimals)} ${tokenC.symbol}`);
-                if (amountC_Received <= 0n) { /* ... */ }
+                if (amountC_Received <= 0n) { log.warn(`${logPrefix} Hop 2 output is zero or less.`); return { profitable: false, error: 'Hop 2 zero output', initialAmount, finalAmount: 0n, grossProfit: 0n, details: { hop1Result, hop2Result } }; }
 
-                // Log Pool 3 State before calling sim
-                console.log(`${logPrefix} POOL 3 STATE before calling simulateSingleSwapExactIn:`);
-                console.log(this.stringifyPoolState(pool3));
+                 console.log(`${logPrefix} POOL 3 STATE before calling simulateSingleSwapExactIn:`); console.log(this.stringifyPoolState(pool3));
                 const hop3Result = await this.simulateSingleSwapExactIn(pool3, tokenC, tokenA, amountC_Received);
-                if (!hop3Result || hop3Result.amountOut == null) { /* ... */ }
+                if (!hop3Result || hop3Result.amountOut == null) { log.warn(`${logPrefix} Hop 3 simulation failed.`); return { profitable: false, error: 'Hop 3 sim failed', initialAmount, finalAmount: 0n, grossProfit: 0n, details: { hop1Result, hop2Result, hop3Result } }; }
                 const finalAmount = hop3Result.amountOut;
                 log.info(`[SIM Hop 3 ${tokenC.symbol}->${tokenA.symbol}] Output: ${ethers.formatUnits(finalAmount, tokenA.decimals)} ${tokenA.symbol}`);
 
@@ -159,7 +152,7 @@ class QuoteSimulator {
                 log.info(`--- Simulation END ${logPrefix} ---`);
                 return { profitable, error: null, initialAmount, finalAmount, grossProfit, details: { hop1Result, hop2Result, hop3Result } };
             } catch (error) {
-                 console.error(`${logPrefix} !!!!!!!!!!!!!! CATCH BLOCK in simulateArbitrage !!!!!!!!!!!!!!`); // Added console log
+                 console.error(`${logPrefix} !!!!!!!!!!!!!! CATCH BLOCK in simulateArbitrage !!!!!!!!!!!!!!`);
                  log.error(`${logPrefix} UNEXPECTED High-Level Error during hop simulation: ${error.message}`);
                 ErrorHandler.handleError(error, logPrefix);
                 return { /* ... */ };
