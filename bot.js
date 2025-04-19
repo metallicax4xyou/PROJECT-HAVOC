@@ -24,10 +24,10 @@ const { ethers } = require('ethers');
 const logger = require('./utils/logger');
 const ErrorHandler = require('./utils/errorHandler');
 const { getProvider } = require('./utils/provider'); // Only need getProvider
-// --- CHANGE HERE: Require the consolidated config ---
 const config = require('./config'); // Loads from config/index.js
-// --- END CHANGE ---
-const { ArbitrageEngine } = require('./core/arbitrageEngine'); // Keep engine import
+const { ArbitrageEngine } = require('./core/arbitrageEngine');
+// --- Import FlashSwapManager ---
+const FlashSwapManager = require('./core/flashSwapManager');
 
 
 // --- Main Application Logic ---
@@ -36,35 +36,30 @@ async function main() {
     logger.info('>>> PROJECT HAVOC ARBITRAGE BOT STARTING (inside main) <<<');
     logger.info('==============================================');
 
-    let signer; // Define signer scope
-
     try {
         // 1. Config is loaded directly via require('./config') above
-        //    The config object is already validated by config/index.js
         logger.info('[Main] Configuration loaded and validated.');
 
         // 2. Get Provider
         logger.info('[Main] Getting Provider instance...');
-        // Ensure provider uses the potentially multiple URLs from the config
-        const provider = getProvider(); // provider.js reads env directly, uses config.RPC_URLS
+        const provider = getProvider();
         logger.info('[Main] Provider instance obtained.');
 
-        // 3. Initialize Signer
-        logger.info('[Main] Initializing Signer...');
-        // Use the validated private key from the config object
-        const privateKeyWithPrefix = "0x" + config.PRIVATE_KEY; // Add 0x prefix for Wallet constructor
-        signer = new ethers.Wallet(privateKeyWithPrefix, provider); // Create signer
-        logger.info(`[Main] Signer ready for address: ${signer.address}`);
+        // 3. Initialize FlashSwapManager (Handles Signer, NonceManager, Contract)
+        logger.info('[Main] Initializing Flash Swap Manager...');
+        // FlashSwapManager constructor uses config and provider internally
+        const flashSwapManager = new FlashSwapManager();
+        logger.info(`[Main] Flash Swap Manager initialized. Signer Address: ${flashSwapManager.getSigner().address}`); // Log signer address from manager
 
-        // 4. Initialize Engine - Pass signer and the main config object
+        // 4. Initialize Engine - Pass the MANAGER instance and config object
         logger.info('[Main] Initializing Arbitrage Engine...');
-        // Pass the signer (Wallet instance) and the loaded config object
-        const engine = new ArbitrageEngine(signer, config); // Pass config object
-        await engine.initialize(); // Initialize should handle internal setup using config
+        // Pass the manager instance and the loaded config object
+        const engine = new ArbitrageEngine(flashSwapManager, config); // Pass manager, config
+        await engine.initialize();
         logger.info('[Main] Arbitrage Engine initialized.');
 
         // 5. Start Engine Loop
-        await engine.start(); // Start should use internal config
+        await engine.start();
 
         logger.info('[MainLoop] Main thread waiting indefinitely (engine loop running)...');
         await new Promise(() => {}); // Keep alive
