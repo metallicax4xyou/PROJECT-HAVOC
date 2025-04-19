@@ -1,68 +1,160 @@
 // config/index.js
-// Main configuration loader - Includes MIN_LIQUIDITY_REQUIREMENTS
+// Main configuration loader
 
 require('dotenv').config(); // Load .env file first
 const { ethers } = require('ethers');
 const { Token } = require('@uniswap/sdk-core'); // For creating Token objects
 
-const { getNetworkMetadata } = require('./networks');
+// --- Load Network Metadata Helper (Can be simple for now) ---
+// This part is simplified compared to the original as we primarily focus on Arbitrum
+function getNetworkMetadata(networkName) {
+    const lowerName = networkName?.toLowerCase();
+    if (lowerName === 'arbitrum') {
+        return {
+            CHAIN_ID: 42161,
+            NAME: 'arbitrum',
+            NATIVE_SYMBOL: 'ETH', // Native token symbol
+            NATIVE_DECIMALS: 18, // Native token decimals
+        };
+    }
+    // Add other networks here if needed later
+    return null;
+}
+// --- End Network Metadata Helper ---
+
+// --- Load Shared Protocol Addresses ---
+// Assuming PROTOCOL_ADDRESSES contains UNISWAP_V3_FACTORY, QUOTER_V2
 const { PROTOCOL_ADDRESSES } = require('../constants/addresses');
-
-// --- Global Settings & Defaults ---
-// NOTE: MIN_NET_PROFIT_WEI defined here might be superseded by the per-group config in arbitrum.js for the new profit calc logic
-const MIN_NET_PROFIT_WEI = {
-    WETH: ethers.parseUnits(process.env.MIN_PROFIT_WETH || '0.0005', 18),
-    USDC: ethers.parseUnits(process.env.MIN_PROFIT_USDC || '1', 6),
-    USDT: ethers.parseUnits(process.env.MIN_PROFIT_USDT || '1', 6),
-};
-const FLASH_LOAN_FEE_BPS = parseInt(process.env.FLASH_LOAN_FEE_BPS || '9', 10);
-const GAS_LIMIT_ESTIMATE = BigInt(process.env.GAS_LIMIT_ESTIMATE || '1000000'); // Used as fallback if specific estimate fails
-const BORROW_AMOUNTS_WEI = {
-    WETH: ethers.parseUnits(process.env.BORROW_AMOUNT_WETH || '0.1', 18), // Renamed env var for clarity? Ensure this matches .env
-    USDC: ethers.parseUnits(process.env.BORROW_AMOUNT_USDC || '100', 6),  // Renamed env var for clarity? Ensure this matches .env
-    USDT: ethers.parseUnits(process.env.BORROW_AMOUNT_USDT || '100', 6),  // Renamed env var for clarity? Ensure this matches .env
-};
-const SLIPPAGE_TOLERANCE_BPS = parseInt(process.env.SLIPPAGE_TOLERANCE_BPS || '10', 10); // 0.1%
-const MIN_LIQUIDITY_REQUIREMENTS = {
-    WETH_USDC: { MIN_RAW_LIQUIDITY: BigInt(process.env.MIN_LIQ_WETH_USDC_RAW || '10000000000000000') },
-    USDC_USDT: { MIN_RAW_LIQUIDITY: BigInt(process.env.MIN_LIQ_USDC_USDT_RAW || '1000000000000000') }
-};
-const CYCLE_INTERVAL_MS = parseInt(process.env.CYCLE_INTERVAL_MS || '5000', 10); // Default 5 seconds
+// --- End Shared Protocol Addresses ---
 
 
-// --- Address Validation Function ---
-function validateAndNormalizeAddress(rawAddress, envVarName) {
+// --- Validation Functions (Migrated from utils/config.js) ---
+
+/**
+ * Validates and normalizes an Ethereum address string.
+ * @param {string} rawAddress The raw address string from env or config.
+ * @param {string} contextName Name of the variable/context for logging.
+ * @returns {string|null} Checksummed address or null if invalid.
+ */
+function validateAndNormalizeAddress(rawAddress, contextName) {
     const addressString = String(rawAddress || '').trim();
     if (!addressString) {
-        return null; // Allow empty/null if optional
+        console.warn(`[Config Validate] ${contextName}: Address is empty or null.`);
+        return null;
     }
     try {
-        // Basic cleaning: remove potential quotes and non-hex characters (except x)
-        const cleanAddress = addressString.replace(/^['"]+|['"]+$/g, '').replace(/[^a-zA-Z0-9x]/g, '');
+        const cleanAddress = addressString.replace(/^['"]+|['"]+$/g, ''); // Remove potential quotes
 
-        // Basic checks before passing to ethers
-        if (!cleanAddress.startsWith('0x')) {
-            console.warn(`[Config] Validation FAILED for ${envVarName} ("${cleanAddress}"): Missing 0x prefix.`);
-            return null;
-        }
-        if (cleanAddress.length !== 42) {
-            console.warn(`[Config] Validation FAILED for ${envVarName} ("${cleanAddress}"): Invalid length (${cleanAddress.length} chars).`);
-            return null;
-        }
-        // Final check using ethers
         if (!ethers.isAddress(cleanAddress)) {
-            // This check is robust and handles checksums
-            console.warn(`[Config] Validation FAILED for ${envVarName} ("${cleanAddress}"): Failed ethers.isAddress() check (likely invalid hex or checksum).`);
+            console.warn(`[Config Validate] ${contextName}: Invalid address format "${cleanAddress}" (Failed ethers.isAddress()).`);
             return null;
         }
         // Return the checksummed address
         return ethers.getAddress(cleanAddress);
     } catch (error) {
-        // Catch any unexpected errors during validation
-        console.warn(`[Config] ${envVarName}: Unexpected validation error for raw value "${rawAddress}" - ${error.message}`);
+        console.warn(`[Config Validate] ${contextName}: Unexpected validation error for raw value "${rawAddress}" - ${error.message}`);
         return null;
     }
 }
+
+/**
+ * Validates a private key string.
+ * @param {string} rawKey Raw private key string.
+ * @param {string} contextName Name for logging.
+ * @returns {string|null} Validated private key (without 0x) or null if invalid.
+ */
+function validatePrivateKey(rawKey, contextName) {
+    const keyString = String(rawKey || '').trim().replace(/^0x/, ''); // Remove 0x prefix if present
+    if (!keyString) {
+        console.error(`[Config Validate] ${contextName}: Private key is empty.`);
+        return null;
+    }
+    // Basic check: 64 hex characters
+    if (!/^[a-fA-F0-9]{64}$/.test(keyString)) {
+        console.error(`[Config Validate] ${contextName}: Invalid format. Must be 64 hexadecimal characters (without '0x' prefix). Length found: ${keyString.length}`);
+        return null;
+    }
+    return keyString;
+}
+
+/**
+ * Validates RPC URL(s) string.
+ * @param {string} rawUrls Raw RPC URL string (potentially comma-separated).
+ * @param {string} contextName Name for logging.
+ * @returns {string[]|null} Array of valid, trimmed URLs or null if none are valid.
+ */
+function validateRpcUrls(rawUrls, contextName) {
+    const urlsString = String(rawUrls || '').trim();
+    if (!urlsString) {
+        console.error(`[Config Validate] ${contextName}: RPC URL(s) string is empty.`);
+        return null;
+    }
+    const urls = urlsString.split(',')
+        .map(url => url.trim())
+        .filter(url => {
+            if (!url) return false;
+            // Basic URL format check
+            if (!/^(https?|wss?):\/\/.+/i.test(url)) {
+                 console.warn(`[Config Validate] ${contextName}: Invalid URL format skipped: "${url}"`);
+                 return false;
+            }
+            return true;
+        });
+
+    if (urls.length === 0) {
+        console.error(`[Config Validate] ${contextName}: No valid RPC URLs found after parsing "${urlsString}".`);
+        return null;
+    }
+    return urls;
+}
+
+/**
+ * Parses a string into a BigInt, handling potential errors.
+ * @param {string} valueStr String to parse.
+ * @param {string} contextName Name for logging.
+ * @param {bigint} defaultValue Default value if parsing fails or input is invalid.
+ * @returns {bigint} Parsed BigInt or default value.
+ */
+function safeParseBigInt(valueStr, contextName, defaultValue = 0n) {
+    const str = String(valueStr || '').trim();
+    if (!str) return defaultValue;
+    try {
+        return BigInt(str);
+    } catch (e) {
+        console.warn(`[Config Parse] ${contextName}: Failed to parse "${str}" as BigInt. Using default ${defaultValue}. Error: ${e.message}`);
+        return defaultValue;
+    }
+}
+
+/**
+ * Parses a string into an integer, handling potential errors.
+ * @param {string} valueStr String to parse.
+ * @param {string} contextName Name for logging.
+ * @param {number} defaultValue Default value if parsing fails or input is invalid.
+ * @returns {number} Parsed integer or default value.
+ */
+function safeParseInt(valueStr, contextName, defaultValue = 0) {
+     const str = String(valueStr || '').trim();
+     if (!str) return defaultValue;
+     const num = parseInt(str, 10);
+     if (isNaN(num)) {
+          console.warn(`[Config Parse] ${contextName}: Failed to parse "${str}" as integer. Using default ${defaultValue}.`);
+          return defaultValue;
+     }
+     return num;
+}
+
+/**
+ * Parses a string into a boolean. Treats 'false' (case-insensitive) as false, everything else as true if present.
+ * @param {string} valueStr String to parse.
+ * @returns {boolean} Parsed boolean. Defaults to true if value exists and is not 'false'.
+ */
+function parseBoolean(valueStr) {
+    const str = String(valueStr || '').trim().toLowerCase();
+    // Default to TRUE unless explicitly 'false'
+    return (str !== 'false');
+}
+// --- End Validation Functions ---
 
 
 // --- Config Loading Function ---
@@ -78,7 +170,7 @@ function loadConfig() {
         throw new Error(`[Config] CRITICAL: No network metadata found for network: ${networkName}`);
     }
 
-    // 2. Load network-specific config file
+    // 2. Load network-specific config file (e.g., config/arbitrum.js)
     let networkSpecificConfig;
     try {
         networkSpecificConfig = require(`./${networkName}.js`);
@@ -87,90 +179,168 @@ function loadConfig() {
         throw new Error(`[Config] CRITICAL: Failed to load configuration file for network "${networkName}": ${e.message}`);
     }
 
-    // 3. Combine config elements
+    // 3. Validate Required Environment Variables
+    const rpcUrlsEnvKey = `${networkName.toUpperCase()}_RPC_URLS`;
+    const rawRpcUrls = process.env[rpcUrlsEnvKey];
+    const validatedRpcUrls = validateRpcUrls(rawRpcUrls, rpcUrlsEnvKey);
+    if (!validatedRpcUrls) {
+         throw new Error(`[Config] CRITICAL: Missing or invalid RPC URL(s) in environment variable ${rpcUrlsEnvKey}.`);
+    }
+
+    const rawPrivateKey = process.env.PRIVATE_KEY;
+    const validatedPrivateKey = validatePrivateKey(rawPrivateKey, 'PRIVATE_KEY');
+    if (!validatedPrivateKey) {
+         throw new Error(`[Config] CRITICAL: Missing or invalid PRIVATE_KEY in environment variable.`);
+    }
+
+    const flashSwapEnvKey = `${networkName.toUpperCase()}_FLASH_SWAP_ADDRESS`; // Expect network-prefixed name
+    const rawFlashSwapAddress = process.env[flashSwapEnvKey];
+    const validatedFlashSwapAddress = validateAndNormalizeAddress(rawFlashSwapAddress, flashSwapEnvKey);
+    // Allow FlashSwap address to be missing initially (will default to ZeroAddress), but log warning.
+    if (!validatedFlashSwapAddress) {
+        console.warn(`[Config] WARNING: ${flashSwapEnvKey} not set or invalid in environment variables. FlashSwap interactions will fail unless deployed and configured. Defaulting to ZeroAddress.`);
+    }
+
+
+    // 4. Load Global Settings from .env or Defaults
+    const cycleIntervalMs = safeParseInt(process.env.CYCLE_INTERVAL_MS, 'CYCLE_INTERVAL_MS', 5000); // Default 5 seconds
+    const gasLimitEstimate = safeParseBigInt(process.env.GAS_LIMIT_ESTIMATE, 'GAS_LIMIT_ESTIMATE', 1500000n); // Default 1.5M
+    const slippageToleranceBps = safeParseInt(process.env.SLIPPAGE_TOLERANCE_BPS, 'SLIPPAGE_TOLERANCE_BPS', 10); // Default 0.1%
+    const isDryRun = parseBoolean(process.env.DRY_RUN); // Defaults to true if not 'false'
+
+    // 5. Combine config elements
     const combinedConfig = {
-        ...networkMetadata, // Includes CHAIN_ID, NAME, NATIVE_SYMBOL, NATIVE_DECIMALS etc.
-        ...networkSpecificConfig, // Includes TOKENS, POOL_GROUPS, CHAINLINK_FEEDS etc.
-        // Add global constants/addresses
+        ...networkMetadata,           // CHAIN_ID, NAME, NATIVE_SYMBOL, etc.
+        ...networkSpecificConfig,     // TOKENS, POOL_GROUPS, CHAINLINK_FEEDS from arbitrum.js etc.
+
+        // Validated critical env vars
+        RPC_URLS: validatedRpcUrls, // Array of URLs
+        PRIMARY_RPC_URL: validatedRpcUrls[0], // First URL for single provider use if needed
+        PRIVATE_KEY: validatedPrivateKey, // Key without 0x prefix
+        FLASH_SWAP_CONTRACT_ADDRESS: validatedFlashSwapAddress || ethers.ZeroAddress, // Use validated or ZeroAddress
+
+        // Global settings
+        CYCLE_INTERVAL_MS: cycleIntervalMs,
+        GAS_LIMIT_ESTIMATE: gasLimitEstimate, // Fallback gas limit used by ProfitCalculator
+        SLIPPAGE_TOLERANCE_BPS: slippageToleranceBps,
+        DRY_RUN: isDryRun,
+
+        // Protocol Addresses
         FACTORY_ADDRESS: PROTOCOL_ADDRESSES.UNISWAP_V3_FACTORY,
-        QUOTER_ADDRESS: PROTOCOL_ADDRESSES.QUOTER_V2, // Assuming V2 Quoter usage elsewhere
-        // Add global settings from .env or defaults
-        FLASH_LOAN_FEE_BPS: FLASH_LOAN_FEE_BPS,
-        GAS_LIMIT_ESTIMATE: GAS_LIMIT_ESTIMATE, // Fallback gas limit
-        SLIPPAGE_TOLERANCE_BPS: SLIPPAGE_TOLERANCE_BPS,
-        // Note: MIN_NET_PROFIT_WEI and BORROW_AMOUNTS_WEI are handled per-group below
-        MIN_LIQUIDITY_REQUIREMENTS: MIN_LIQUIDITY_REQUIREMENTS, // Global liquidity settings
-        CYCLE_INTERVAL_MS: CYCLE_INTERVAL_MS, // Bot loop interval
+        QUOTER_ADDRESS: PROTOCOL_ADDRESSES.QUOTER_V2,
+
+        // Note: BORROW_AMOUNTS and MIN_NET_PROFIT are handled per group below
     };
 
-    // 4. Process POOL_GROUPS (enrich with data)
+    // 6. Process POOL_GROUPS (enrich with data, validate pools from env)
     let totalPoolsLoaded = 0;
+    const loadedPoolAddresses = new Set(); // Track unique addresses loaded
+
     if (!combinedConfig.POOL_GROUPS || !Array.isArray(combinedConfig.POOL_GROUPS)) {
         console.warn('[Config] POOL_GROUPS array is missing or invalid in network config. Bot may not find pools.');
-        combinedConfig.POOL_GROUPS = []; // Ensure it's an array to prevent downstream errors
+        combinedConfig.POOL_GROUPS = [];
     } else {
-        combinedConfig.POOL_GROUPS.forEach(group => {
-            // Validate required group fields
-            if (!group.name || !group.token0Symbol || !group.token1Symbol || !group.borrowTokenSymbol) {
-                console.error(`[Config] Skipping invalid POOL_GROUP entry: Missing required fields (name, token0Symbol, token1Symbol, borrowTokenSymbol). Entry:`, group);
-                return; // Skip this invalid group
+        combinedConfig.POOL_GROUPS.forEach((group, groupIndex) => {
+            // Basic group structure validation
+            if (!group.name || !group.token0Symbol || !group.token1Symbol || !group.borrowTokenSymbol || typeof group.minNetProfit === 'undefined') {
+                console.error(`[Config] Skipping invalid POOL_GROUP entry #${groupIndex}: Missing required fields (name, token0Symbol, token1Symbol, borrowTokenSymbol, minNetProfit). Entry:`, group);
+                // Invalidate the group to prevent downstream errors if critical info missing
+                 combinedConfig.POOL_GROUPS[groupIndex] = null; // Mark as invalid
+                return;
             }
 
-            // Look up tokens from the TOKENS list
+            // Look up tokens from the TOKENS list (defined in networkSpecificConfig)
             group.token0 = combinedConfig.TOKENS[group.token0Symbol];
             group.token1 = combinedConfig.TOKENS[group.token1Symbol];
             group.borrowToken = combinedConfig.TOKENS[group.borrowTokenSymbol];
-            // group.quoteToken = combinedConfig.TOKENS[group.quoteTokenSymbol]; // quoteTokenSymbol might be removed
 
-            if (!group.token0 || !group.token1 || !group.borrowToken /*|| !group.quoteToken*/) {
+            if (!group.token0 || !group.token1 || !group.borrowToken) {
                  console.error(`[Config] Skipping POOL_GROUP "${group.name}": Contains invalid token symbols not found in TOKENS config.`);
-                 return; // Skip group if tokens are invalid
+                 combinedConfig.POOL_GROUPS[groupIndex] = null; return;
             }
 
-            // Create Uniswap SDK Token objects
+            // Create Uniswap SDK Token objects - Use validated token data from TOKENS constant
+             try {
+                // The constants/tokens.js should already export SDK Token objects
+                group.sdkToken0 = group.token0;
+                group.sdkToken1 = group.token1;
+                group.sdkBorrowToken = group.borrowToken;
+
+                if (!(group.sdkToken0 instanceof Token) || !(group.sdkToken1 instanceof Token) || !(group.sdkBorrowToken instanceof Token)){
+                     throw new Error("Token lookup did not return SDK Token instances.");
+                }
+             } catch (sdkError) {
+                 console.error(`[Config] Error assigning SDK Token for group "${group.name}": ${sdkError.message}. Skipping group.`);
+                 combinedConfig.POOL_GROUPS[groupIndex] = null; return;
+             }
+
+
+            // Assign borrow amount (requires BORROW_AMOUNT_{SYMBOL} in .env)
+            const borrowAmountEnvKey = `BORROW_AMOUNT_${group.borrowTokenSymbol}`;
+            const rawBorrowAmount = process.env[borrowAmountEnvKey];
+            if (!rawBorrowAmount) {
+                 console.error(`[Config] Skipping POOL_GROUP "${group.name}": Missing required environment variable ${borrowAmountEnvKey} for borrow amount.`);
+                 combinedConfig.POOL_GROUPS[groupIndex] = null; return;
+            }
             try {
-                group.sdkToken0 = new Token(combinedConfig.CHAIN_ID, group.token0.address, group.token0.decimals, group.token0.symbol);
-                group.sdkToken1 = new Token(combinedConfig.CHAIN_ID, group.token1.address, group.token1.decimals, group.token1.symbol);
-                group.sdkBorrowToken = new Token(combinedConfig.CHAIN_ID, group.borrowToken.address, group.borrowToken.decimals, group.borrowToken.symbol);
-                // group.sdkQuoteToken = new Token(combinedConfig.CHAIN_ID, group.quoteToken.address, group.quoteToken.decimals, group.quoteToken.symbol);
-            } catch (sdkError) {
-                console.error(`[Config] Error creating SDK Token for group "${group.name}": ${sdkError.message}. Skipping group.`);
-                return; // Skip group if SDK token creation fails
+                 // Use parseUnits based on the borrow token's decimals
+                 group.borrowAmount = ethers.parseUnits(rawBorrowAmount, group.borrowToken.decimals);
+                 if (group.borrowAmount <= 0n) {
+                      throw new Error("Borrow amount must be positive.");
+                 }
+                 console.log(`[Config] Group ${group.name}: Borrow Amount set to ${rawBorrowAmount} ${group.borrowTokenSymbol}`);
+            } catch (e) {
+                 console.error(`[Config] Skipping POOL_GROUP "${group.name}": Invalid borrow amount format in ${borrowAmountEnvKey}="${rawBorrowAmount}". Error: ${e.message}`);
+                 combinedConfig.POOL_GROUPS[groupIndex] = null; return;
             }
 
-            // Assign borrow amount (from global BORROW_AMOUNTS_WEI)
-            group.borrowAmount = BORROW_AMOUNTS_WEI[group.borrowTokenSymbol];
-            if (!group.borrowAmount || group.borrowAmount <= 0n) {
-                 console.error(`[Config] Skipping POOL_GROUP "${group.name}": Missing or invalid borrow amount config (BORROW_AMOUNT_${group.borrowTokenSymbol}) in .env or defaults.`);
-                 return; // Skip group if borrow amount is invalid
-            }
 
-            // Assign minNetProfit (now read directly from group config in arbitrum.js)
-            // Ensure it's a BigInt, default to 0 if missing (though ProfitCalc also checks)
-            group.minNetProfit = BigInt(group.minNetProfit || '0');
+            // Assign minNetProfit (convert string from config to BigInt, expect Wei)
+            group.minNetProfit = safeParseBigInt(group.minNetProfit, `Group ${group.name} minNetProfit`, 0n);
+             console.log(`[Config] Group ${group.name}: Min Net Profit set to ${ethers.formatUnits(group.minNetProfit, 18)} ${combinedConfig.NATIVE_SYMBOL} (Wei: ${group.minNetProfit})`);
 
-            // Validate and load pool addresses for this group
+
+            // Validate and load pool addresses for this group using feeTierToEnvMap
             group.pools = []; // Initialize pools array for the group
             if (group.feeTierToEnvMap && typeof group.feeTierToEnvMap === 'object') {
-                for (const feeTier in group.feeTierToEnvMap) {
-                    const envVarKey = group.feeTierToEnvMap[feeTier];
+                for (const feeTierStr in group.feeTierToEnvMap) {
+                    const feeTier = parseInt(feeTierStr, 10);
+                    if (isNaN(feeTier)) {
+                         console.warn(`[Config] Invalid fee tier key "${feeTierStr}" in feeTierToEnvMap for group ${group.name}. Skipping.`);
+                         continue;
+                    }
+
+                    const envVarKey = group.feeTierToEnvMap[feeTierStr];
                     const rawAddress = process.env[envVarKey];
+
                     if (rawAddress) {
                         const validatedAddress = validateAndNormalizeAddress(rawAddress, envVarKey);
                         if (validatedAddress) {
+                            // Prevent adding duplicate pool addresses across all groups
+                            if (loadedPoolAddresses.has(validatedAddress.toLowerCase())) {
+                                 console.warn(`[Config] Skipping duplicate pool address ${validatedAddress} (defined in ${envVarKey} for group ${group.name}) as it was loaded previously.`);
+                                 continue;
+                            }
+
                             const poolConfig = {
                                 address: validatedAddress,
-                                feeBps: parseInt(feeTier, 10), // Store fee tier (e.g., 500, 3000)
-                                groupName: group.name // Link back to the group
+                                fee: feeTier, // Store fee tier (e.g., 500, 3000)
+                                groupName: group.name, // Link back to the group
+                                token0Symbol: group.token0Symbol, // Add symbols for scanner
+                                token1Symbol: group.token1Symbol, // Add symbols for scanner
+                                // Add SDK tokens for convenience?
+                                // sdkToken0: group.sdkToken0,
+                                // sdkToken1: group.sdkToken1,
                             };
                             group.pools.push(poolConfig); // Add validated pool config
                             totalPoolsLoaded++;
+                            loadedPoolAddresses.add(validatedAddress.toLowerCase());
                         } else {
                             console.warn(`[Config] Invalid address format for pool ${envVarKey} in group ${group.name}. Skipping pool.`);
                         }
                     } else {
                          // Optional: Log if an expected env var is missing
-                         // console.debug(`[Config] Env variable ${envVarKey} for group ${group.name} not found.`);
+                         // console.debug(`[Config] Optional: Env variable ${envVarKey} for group ${group.name} not found.`);
                     }
                 }
             } else {
@@ -178,78 +348,30 @@ function loadConfig() {
             }
             console.log(`[Config] Group ${group.name} initialized with ${group.pools.length} pools.`);
         }); // End forEach POOL_GROUP
+
+        // Filter out any groups that were marked as invalid
+        combinedConfig.POOL_GROUPS = combinedConfig.POOL_GROUPS.filter(group => group !== null);
     } // End else (POOL_GROUPS exists)
 
-    console.log(`[Config] Total unique pools loaded from .env: ${totalPoolsLoaded}`);
-    if (totalPoolsLoaded === 0) {
+
+    console.log(`[Config] Total unique pools loaded from .env: ${loadedPoolAddresses.size}`);
+    if (loadedPoolAddresses.size === 0) {
         console.warn("[Config] WARNING: No pool addresses were successfully loaded from .env variables. Bot cannot scan pools.");
     }
 
-    // 5. Add Provider/Signer Info & Flash Swap Address
-    // --- MODIFIED TO USE PLURAL URLS ---
-    const rpcUrlsEnvKey = `${networkName.toUpperCase()}_RPC_URLS`; // Look for plural key, e.g., ARBITRUM_RPC_URLS
-    const rpcUrlsString = process.env[rpcUrlsEnvKey];
+    // 7. Add Helper Function to Extract All Pool Configs
+    combinedConfig.getAllPoolConfigs = () => {
+        if (!combinedConfig.POOL_GROUPS || !Array.isArray(combinedConfig.POOL_GROUPS)) { return []; }
+        // Use flatMap to get all 'pools' arrays from each valid group and concatenate them
+        return combinedConfig.POOL_GROUPS.flatMap(group => group.pools || []);
+    };
 
-    if (!rpcUrlsString) {
-        // Throw error if the plural variable itself is missing
-        throw new Error(`[Config] CRITICAL: RPC URL environment variable (${rpcUrlsEnvKey}) not set.`);
-    }
-
-    // Take the first URL from the potentially comma-separated list for combinedConfig.RPC_URL
-    // Use optional chaining and nullish coalescing for safety
-    const firstRpcUrl = rpcUrlsString?.split(',')[0]?.trim() ?? '';
-    if (!firstRpcUrl) {
-        // Throw error if the variable exists but contains no valid URL after splitting/trimming
-        throw new Error(`[Config] CRITICAL: No valid RPC URL found in ${rpcUrlsEnvKey}.`);
-    }
-    combinedConfig.RPC_URL = firstRpcUrl; // Assign the first URL
-    // --- END MODIFICATION ---
-
-    combinedConfig.PRIVATE_KEY = process.env.PRIVATE_KEY;
-    const flashSwapEnvKey = `${networkName.toUpperCase()}_FLASH_SWAP_ADDRESS`;
-    const rawFlashSwapAddress = process.env[flashSwapEnvKey];
-
-    // Note: The check for `combinedConfig.RPC_URL` existence is implicitly handled by the logic above.
-    // The original `if (!combinedConfig.RPC_URL)` check would now always pass if the variable exists and has content.
-
-    if (!combinedConfig.PRIVATE_KEY || !combinedConfig.PRIVATE_KEY.startsWith('0x') || combinedConfig.PRIVATE_KEY.length !== 66) { // Basic validation
-        throw new Error(`[Config] CRITICAL: PRIVATE_KEY environment variable not set, missing '0x' prefix, or not 66 chars long.`);
-    }
-
-    if (rawFlashSwapAddress) {
-        const validatedFlashSwapAddress = validateAndNormalizeAddress(rawFlashSwapAddress, flashSwapEnvKey);
-        if (validatedFlashSwapAddress) {
-            combinedConfig.FLASH_SWAP_CONTRACT_ADDRESS = validatedFlashSwapAddress;
-            console.log(`[Config] Loaded Flash Swap Address: ${combinedConfig.FLASH_SWAP_CONTRACT_ADDRESS}`);
-        } else {
-            throw new Error(`[Config] CRITICAL: Invalid address format provided for ${flashSwapEnvKey}: "${rawFlashSwapAddress}"`);
-        }
-    } else {
-        console.warn(`[Config] WARNING: ${flashSwapEnvKey} not set in environment variables. FlashSwap interactions will fail unless deployed.`);
-        combinedConfig.FLASH_SWAP_CONTRACT_ADDRESS = ethers.ZeroAddress; // Set to ZeroAddress if not provided
-    }
-
-    // --->>> ADDED: Read and parse DRY_RUN environment variable <<<---
-    const dryRunEnv = process.env.DRY_RUN?.toLowerCase();
-    // Default to TRUE if not explicitly set to 'false' for safety
-    combinedConfig.DRY_RUN = (dryRunEnv !== 'false');
+    // 8. Log Dry Run Status
     if (combinedConfig.DRY_RUN) {
         console.warn("[Config] --- DRY RUN MODE ENABLED --- Transactions will NOT be sent.");
     } else {
         console.log("[Config] --- LIVE TRADING MODE --- Transactions WILL be sent.");
     }
-    // --->>> --- <<<---
-
-    // --->>> ADDED HELPER FUNCTION TO EXTRACT POOL CONFIGS <<<---
-    // This helper makes it easier for PoolScanner to get a flat list of pools to check
-    combinedConfig.getPoolConfigs = () => {
-        if (!combinedConfig.POOL_GROUPS || !Array.isArray(combinedConfig.POOL_GROUPS)) {
-            return []; // Return empty array if groups don't exist or are invalid
-        }
-        // Use flatMap to get all 'pools' arrays from each valid group and concatenate them
-        return combinedConfig.POOL_GROUPS.flatMap(group => group.pools || []);
-    };
-    // --->>> --- <<<---
 
     return combinedConfig;
 } // End loadConfig function
@@ -269,4 +391,5 @@ try {
     process.exit(1); // Exit the process if config loading fails
 }
 
-module.exports = config; // Export the loaded config object
+// Export the loaded config object directly
+module.exports = config;
