@@ -9,7 +9,7 @@ const { processOpportunity } = require('./opportunityProcessor');
 const { ArbitrageError } = require('../utils/errorHandler');
 
 // --- Import classes needed for instances ---
-const { LensTickDataProvider } = require('../utils/tickDataProvider');
+// Removed LensTickDataProvider import here, as simulator handles it
 const QuoteSimulator = require('./quoteSimulator');
 // --- ---
 
@@ -24,6 +24,15 @@ class ArbitrageEngine {
             logger.fatal('[Engine Constructor] Config object is required.');
             throw new Error('Config object required for ArbitrageEngine.');
         }
+        if (!config.TICKLENS_ADDRESS) {
+            logger.fatal('[Engine Constructor] Config object is missing TICKLENS_ADDRESS.');
+            throw new Error('Config object missing TICKLENS_ADDRESS.');
+        }
+        if (!config.CHAIN_ID) {
+            logger.fatal('[Engine Constructor] Config object is missing CHAIN_ID.');
+            throw new Error('Config object missing CHAIN_ID.');
+        }
+
 
         this.manager = manager;
         this.config = config;
@@ -31,22 +40,16 @@ class ArbitrageEngine {
         this.signer = manager.getSigner();
 
         // --- Initialize Instances ---
-        try {
-            logger.debug('[Engine Constructor] Initializing LensTickDataProvider...');
-            this.tickDataProvider = new LensTickDataProvider(
-                 this.config.TICKLENS_ADDRESS,
-                 this.provider,
-                 this.config.CHAIN_ID
-            );
-        } catch (error) {
-             logger.fatal(`[Engine Constructor] Failed to initialize LensTickDataProvider: ${error.message}`);
-             // This IS fatal, throw error to prevent startup
-             throw error;
-        }
+        // Removed LensTickDataProvider instantiation here
 
-         try {
+        try {
             logger.debug('[Engine Constructor] Initializing QuoteSimulator...');
-            this.quoteSimulator = new QuoteSimulator(this.tickDataProvider);
+            // *** Updated QuoteSimulator Instantiation ***
+            this.quoteSimulator = new QuoteSimulator(
+                this.config.TICKLENS_ADDRESS, // Pass TickLens address from config
+                this.provider,               // Pass provider
+                this.config.CHAIN_ID         // Pass chainId from config
+            );
         } catch (error) {
              logger.fatal(`[Engine Constructor] Failed to initialize QuoteSimulator: ${error.message}`);
              // This IS fatal
@@ -71,7 +74,7 @@ class ArbitrageEngine {
     }
 
     async initialize() {
-        logger.info('[Engine] Arbitrage Engine Initializing...'); // Changed log slightly
+        logger.info('[Engine] Arbitrage Engine Initializing...');
         // NonceManager init remains the same
         try {
             if (this.signer && typeof this.signer.initialize === 'function') {
@@ -82,7 +85,7 @@ class ArbitrageEngine {
             logger.error(`[Engine] Failed to initialize Nonce Manager during engine init: ${nonceError.message}`);
             throw nonceError;
         }
-         logger.info('[Engine] Arbitrage Engine Initialized Successfully.'); // Moved success log here
+         logger.info('[Engine] Arbitrage Engine Initialized Successfully.');
     }
 
     async start() {
@@ -124,44 +127,72 @@ class ArbitrageEngine {
         try {
             // 1. Get Pool List (Same)
             const poolInfosToFetch = this.config.getAllPoolConfigs();
-            if (!poolInfosToFetch || poolInfosToFetch.length === 0) { /* ... */ }
+            if (!poolInfosToFetch || poolInfosToFetch.length === 0) {
+                logger.warn('[Engine] No pool configurations found in config.');
+                this.logCycleEnd(cycleStartTime);
+                return;
+            }
 
             // 2. Fetch Live Pool States (Same)
             const livePoolStatesMap = await this.poolScanner.fetchPoolStates(poolInfosToFetch);
             const fetchedCount = livePoolStatesMap ? Object.keys(livePoolStatesMap).length : 0;
-            if (fetchedCount === 0) { /* ... */ }
+            if (fetchedCount === 0) {
+                logger.warn('[Engine] Failed to fetch any live pool states.');
+                this.logCycleEnd(cycleStartTime, true);
+                return;
+             }
             logger.info(`[Engine] Fetched ${fetchedCount} live pool states.`);
 
             // 3. Find Opportunities (Same)
             const potentialOpportunities = this.poolScanner.findOpportunities(livePoolStatesMap);
-            if (potentialOpportunities.length === 0) { /* ... */ }
+            if (potentialOpportunities.length === 0) {
+                logger.info('[Engine] No potential opportunities found in this cycle.');
+                this.logCycleEnd(cycleStartTime);
+                return;
+            }
             logger.info(`[Engine] Found ${potentialOpportunities.length} potential opportunities.`);
 
             // --- 4. Process Opportunities using OpportunityProcessor ---
             let executedThisCycle = false;
 
-            // Create the context object - now pass the simulator instance
+            // Create the context object
             const engineContext = {
                 config: this.config,
                 manager: this.manager,
                 gasEstimator: this.gasEstimator,
-                quoteSimulator: this.quoteSimulator, // Pass simulator instance
+                quoteSimulator: this.quoteSimulator, // Pass the simulator instance
                 logger: logger
             };
 
             for (const opp of potentialOpportunities) {
-                if (executedThisCycle) { /* ... */ break; }
+                if (executedThisCycle) {
+                     logger.info(`[Engine Cycle ${this.cycleCount}] Skipping remaining opportunities as one was executed.`);
+                     break;
+                 }
 
                 const logPrefix = `[Engine Cycle ${this.cycleCount}]`;
 
                 // Call the Opportunity Processor with updated context
                 const processResult = await processOpportunity(opp, engineContext);
 
-                // Check result logic remains the same
-                if (processResult.executed && processResult.success) { /* ... */ executedThisCycle = true; }
-                else if (processResult.executed && !processResult.success) { /* ... */ }
-                else if (processResult.error) { /* ... */ }
-                else { /* ... */ }
+                // Check result logic
+                if (processResult.executed && processResult.success) {
+                    logger.info(`${logPrefix} Opportunity processed and SUCCESSFULLY executed. Tx: ${processResult.txHash}`);
+                    executedThisCycle = true;
+                }
+                else if (processResult.executed && !processResult.success) {
+                    logger.warn(`${logPrefix} Opportunity processed but execution FAILED. Tx: ${processResult.txHash}, Error: ${processResult.error?.message}`);
+                    // Decide if you want to stop processing other opportunities after a failed execution attempt
+                    // executedThisCycle = true; // Optional: stop after failed attempt too
+                }
+                else if (processResult.error) {
+                     logger.warn(`${logPrefix} Opportunity processing failed before execution attempt. Error: ${processResult.error.message}`);
+                     // Continue to next opportunity
+                 }
+                else {
+                     // Not executed, likely due to simulation/profitability check failure (already logged by processor)
+                     logger.debug(`${logPrefix} Opportunity processing finished without execution.`);
+                 }
 
             } // End for loop
 
@@ -170,13 +201,15 @@ class ArbitrageEngine {
         } catch (error) { // Catch errors in the main cycle logic
             logger.error(`[Engine] Critical error during cycle execution: ${error.message}`);
             ErrorHandler.handleError(error, `Engine.runCycle (${this.cycleCount})`);
+            // Log stack trace for better debugging
+            if (error.stack) { console.error(error.stack); }
             this.logCycleEnd(cycleStartTime, true);
         }
     } // End runCycle
 
     logCycleEnd(startTime, hadError = false) {
         const duration = Date.now() - startTime;
-        logger.info(`===== [Engine] Cycle #${this.cycleCount} Finished (${duration}ms) ${hadError ? '[ERROR]' : ''} =====`);
+        logger.info(`===== [Engine] Cycle #${this.cycleCount} Finished (${duration}ms) ${hadError ? '[WITH ERROR]' : ''} =====`);
     }
 }
 
