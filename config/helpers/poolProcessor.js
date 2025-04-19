@@ -1,4 +1,7 @@
 // config/helpers/poolProcessor.js
+// --- VERSION UPDATED FOR PHASE 1 REFACTOR ---
+// Removed per-group minNetProfit check
+
 const { ethers } = require('ethers');
 const { Token } = require('@uniswap/sdk-core');
 let logger; try { logger = require('../../utils/logger'); } catch(e) { console.error("No logger for poolProcessor"); logger = console; } // Adjusted path
@@ -22,10 +25,13 @@ function processPoolGroups(baseConfig, rawPoolGroups) {
         const errorMessages = [];
 
         try {
-            // Validate Group Structure
-            if (!group || !group.name || !group.token0Symbol || !group.token1Symbol || !group.borrowTokenSymbol || typeof group.minNetProfit === 'undefined') {
-                errorMessages.push(`Group #${groupIndex}: Missing required fields.`); currentGroupIsValid = false;
+            // --- Validate Group Structure ---
+            // REMOVED: typeof group.minNetProfit === 'undefined' check
+            if (!group || !group.name || !group.token0Symbol || !group.token1Symbol || !group.borrowTokenSymbol) {
+                errorMessages.push(`Group #${groupIndex}: Missing required fields (name, token0Symbol, token1Symbol, borrowTokenSymbol).`);
+                currentGroupIsValid = false;
             }
+            // --- End Validation ---
 
             // Enrich with SDK Tokens
             if (currentGroupIsValid) {
@@ -33,9 +39,13 @@ function processPoolGroups(baseConfig, rawPoolGroups) {
                 group.token1 = baseConfig.TOKENS[group.token1Symbol];
                 group.borrowToken = baseConfig.TOKENS[group.borrowTokenSymbol];
                 if (!(group.token0 instanceof Token) || !(group.token1 instanceof Token) || !(group.borrowToken instanceof Token)) {
-                    errorMessages.push(`Group "${group.name}": Failed SDK Token lookup.`); currentGroupIsValid = false;
+                    errorMessages.push(`Group "${group.name}": Failed SDK Token lookup for symbols ${group.token0Symbol}/${group.token1Symbol}/${group.borrowTokenSymbol}. Ensure they exist in constants/tokens.js.`);
+                    currentGroupIsValid = false;
                 } else {
-                    group.sdkToken0 = group.token0; group.sdkToken1 = group.token1; group.sdkBorrowToken = group.borrowToken;
+                    // Assign standard names for clarity, matching what opportunityProcessor expects
+                    group.sdkToken0 = group.token0;
+                    group.sdkToken1 = group.token1;
+                    group.sdkBorrowToken = group.borrowToken;
                     logger.debug(`[Pool Processor] Assigned SDK tokens for group ${group.name}`);
                 }
             }
@@ -45,22 +55,27 @@ function processPoolGroups(baseConfig, rawPoolGroups) {
                 const borrowAmountEnvKey = `BORROW_AMOUNT_${group.borrowTokenSymbol}`;
                 const rawBorrowAmount = process.env[borrowAmountEnvKey];
                 if (!rawBorrowAmount) {
-                    errorMessages.push(`Group "${group.name}": Missing env var ${borrowAmountEnvKey}.`); currentGroupIsValid = false;
+                    errorMessages.push(`Group "${group.name}": Missing borrow amount env var ${borrowAmountEnvKey}.`);
+                    currentGroupIsValid = false;
                 } else {
                     try {
-                        group.borrowAmount = ethers.parseUnits(rawBorrowAmount, group.borrowToken.decimals);
-                        if (group.borrowAmount <= 0n) { throw new Error("must be positive"); }
+                        // Ensure borrowToken has decimals before parsing
+                        if (!group.borrowToken || typeof group.borrowToken.decimals !== 'number') {
+                             throw new Error("borrowToken or its decimals are missing.");
+                        }
+                        group.borrowAmount = ethers.utils.parseUnits(rawBorrowAmount, group.borrowToken.decimals);
+                        if (group.borrowAmount.lte(0)) { // Use lte for BigNumber comparison
+                            throw new Error("parsed borrow amount must be positive.");
+                        }
                         logger.log(`[Pool Processor] Group ${group.name}: Borrow Amount set to ${rawBorrowAmount} ${group.borrowTokenSymbol}`);
-                    } catch (e) { errorMessages.push(`Group "${group.name}": Invalid borrow amt "${rawBorrowAmount}": ${e.message}`); currentGroupIsValid = false; }
+                    } catch (e) {
+                        errorMessages.push(`Group "${group.name}": Invalid borrow amount "${rawBorrowAmount}" for token ${group.borrowTokenSymbol} (decimals: ${group.borrowToken?.decimals}): ${e.message}`);
+                        currentGroupIsValid = false;
+                    }
                 }
             }
 
-            // Enrich with Min Net Profit
-            if (currentGroupIsValid) {
-                // Use the imported safeParseBigInt from Validators
-                group.minNetProfit = Validators.safeParseBigInt(group.minNetProfit, `Group ${group.name} minNetProfit`, 0n);
-                logger.log(`[Pool Processor] Group ${group.name}: Min Net Profit set to ${ethers.formatUnits(group.minNetProfit, 18)} ${baseConfig.NATIVE_SYMBOL}`);
-            }
+            // REMOVED: Enrich with Min Net Profit - Handled globally now
 
             // Load Pools for Group
             if (currentGroupIsValid) {
@@ -69,52 +84,88 @@ function processPoolGroups(baseConfig, rawPoolGroups) {
                 if (group.feeTierToEnvMap && typeof group.feeTierToEnvMap === 'object') {
                     for (const feeTierStr in group.feeTierToEnvMap) {
                         const feeTier = parseInt(feeTierStr, 10);
-                        if (isNaN(feeTier)) { logger.warn(`[Pool Processor] Invalid fee tier key "${feeTierStr}" for group ${group.name}.`); continue; }
+                        if (isNaN(feeTier) || feeTier < 0) { // Add check for valid fee tier number
+                            logger.warn(`[Pool Processor] Invalid fee tier key "${feeTierStr}" for group ${group.name}. Skipping.`); continue;
+                        }
+
                         const envVarKey = group.feeTierToEnvMap[feeTierStr];
+                        if (!envVarKey || typeof envVarKey !== 'string') {
+                             logger.warn(`[Pool Processor] Invalid env var key mapping for fee tier ${feeTier} in group ${group.name}. Skipping.`); continue;
+                        }
+
                         const rawAddress = process.env[envVarKey];
                         if (rawAddress) {
-                            // Use the imported validator
                             const validatedAddress = Validators.validateAndNormalizeAddress(rawAddress, envVarKey);
                             if (validatedAddress) {
+                                // Check for duplicates across all groups
                                 if (loadedPoolAddresses.has(validatedAddress.toLowerCase())) {
-                                    logger.warn(`[Pool Processor] Skipping duplicate pool address ${validatedAddress} from ${envVarKey}.`);
+                                    logger.warn(`[Pool Processor] Skipping duplicate pool address ${validatedAddress} from env var ${envVarKey} (already loaded).`);
                                     continue;
                                 }
+                                // Add pool details needed by scanner/processor
                                 const poolConfig = {
                                     address: validatedAddress,
                                     fee: feeTier,
-                                    groupName: group.name,
-                                    token0Symbol: group.token0Symbol,
-                                    token1Symbol: group.token1Symbol
+                                    groupName: group.name, // Link back to group
+                                    token0Symbol: group.token0Symbol, // Store symbols for potential later use
+                                    token1Symbol: group.token1Symbol,
+                                    // Store SDK tokens directly on pool config? Might be useful.
+                                    // token0: group.sdkToken0,
+                                    // token1: group.sdkToken1,
                                 };
                                 group.pools.push(poolConfig);
                                 totalPoolsLoaded++;
                                 poolsFoundForGroup++;
-                                loadedPoolAddresses.add(validatedAddress.toLowerCase());
-                            } else { logger.warn(`[Pool Processor] Invalid address format for ${envVarKey}. Skipping pool.`); }
-                        } // else { logger.debug(`[Pool Processor] Optional: Env var ${envVarKey} not found.`); }
+                                loadedPoolAddresses.add(validatedAddress.toLowerCase()); // Add validated, lowercased address
+                                logger.debug(`[Pool Processor] Loaded pool ${validatedAddress} (Fee: ${feeTier}) for group ${group.name} from ${envVarKey}.`);
+                            } else {
+                                logger.warn(`[Pool Processor] Invalid address format for env var ${envVarKey}: "${rawAddress}". Skipping pool.`);
+                            }
+                        } // else { logger.debug(`[Pool Processor] Optional: Env var ${envVarKey} not found for group ${group.name}.`); }
                     } // end for feeTierStr
-                    logger.log(`[Pool Processor] Group ${group.name} processed with ${poolsFoundForGroup} pools found in .env.`);
-                } else { logger.warn(`[Pool Processor] No feeTierToEnvMap for group ${group.name}.`); }
 
-                // Only add group if it has at least one valid pool loaded
-                if (group.pools.length > 0) {
-                    validProcessedPoolGroups.push(group);
+                    logger.log(`[Pool Processor] Group ${group.name} processed: Found ${poolsFoundForGroup} pools in .env.`);
                 } else {
-                    logger.warn(`[Pool Processor] Group ${group.name} skipped: No valid pools loaded from .env based on feeTierToEnvMap.`);
+                    logger.warn(`[Pool Processor] No feeTierToEnvMap provided for group ${group.name}. Cannot load pools.`);
+                }
+
+                // Add group to the final list ONLY if it has valid base info AND at least one pool loaded
+                if (currentGroupIsValid && group.pools.length > 0) {
+                    // Add only the necessary processed info, not the temporary validation stuff
+                    validProcessedPoolGroups.push({
+                        name: group.name,
+                        token0Symbol: group.token0Symbol,
+                        token1Symbol: group.token1Symbol,
+                        borrowTokenSymbol: group.borrowTokenSymbol,
+                        sdkToken0: group.sdkToken0,
+                        sdkToken1: group.sdkToken1,
+                        sdkBorrowToken: group.sdkBorrowToken,
+                        borrowAmount: group.borrowAmount, // Parsed BigNumber amount
+                        pools: group.pools, // Array of loaded pool configs
+                        // feeTierToEnvMap: group.feeTierToEnvMap // Keep original map if needed elsewhere? Optional.
+                    });
+                } else if (currentGroupIsValid && group.pools.length === 0) {
+                    logger.warn(`[Pool Processor] Group ${group.name} skipped: Valid base config but no valid pools were loaded from .env based on feeTierToEnvMap.`);
+                } else {
+                    // Errors already logged if !currentGroupIsValid
                 }
             } else {
-                logger.error(`[Pool Processor] Skipping POOL_GROUP ${group?.name || `#${groupIndex}`} due to errors: ${errorMessages.join('; ')}`);
+                // Log errors accumulated during validation checks
+                logger.error(`[Pool Processor] Skipping POOL_GROUP ${group?.name || `Index #${groupIndex}`} due to errors: ${errorMessages.join('; ')}`);
             }
 
         } catch (groupError) {
-            logger.error(`[Pool Processor] Unexpected error processing POOL_GROUP ${groupInput?.name || `#${groupIndex}`}: ${groupError.message}. Skipping.`);
+            // Catch unexpected errors during the processing of a single group
+            logger.error(`[Pool Processor] Unexpected error processing POOL_GROUP ${groupInput?.name || `Index #${groupIndex}`}: ${groupError.message}. Skipping.`, groupError);
         }
     }); // End forEach groupInput
 
     logger.log(`[Pool Processor] Finished processing pool groups. Valid groups loaded: ${validProcessedPoolGroups.length}`);
     logger.log(`[Pool Processor] Total unique pools loaded across all valid groups: ${loadedPoolAddresses.size}`);
-    if (loadedPoolAddresses.size === 0) { console.warn("[Pool Processor] WARNING: No pool addresses were loaded from .env variables."); }
+    if (loadedPoolAddresses.size === 0) {
+        // Make this a more prominent warning or even an error depending on expectations
+        logger.error("[Pool Processor] CRITICAL WARNING: No pool addresses were loaded from .env variables. Bot cannot function without pools.");
+    }
 
     return { validProcessedPoolGroups, loadedPoolAddresses };
 }
