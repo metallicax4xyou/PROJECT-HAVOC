@@ -1,5 +1,5 @@
 // config/arbitrum.js
-// --- VERSION UPDATED FOR PHASE 1 REFACTOR ---
+// --- VERSION UPDATED FOR TESTING (Lowered Min Profit) ---
 
 // --- Add Chainlink Feed Addresses ---
 const CHAINLINK_FEEDS = {
@@ -14,15 +14,13 @@ const CHAINLINK_FEEDS = {
 };
 
 // --- Define Pool Groups to monitor ---
-// NOTE: Ensure 'name' matches the prefix used in .env variable names (e.g., name: 'WETH_USDC' corresponds to ARBITRUM_WETH_USDC_xxx_ADDRESS)
-// NOTE: minNetProfit has been removed from individual groups and is now a global setting.
 const POOL_GROUPS = [
     {
         name: 'WETH_USDC',
         token0Symbol: 'WETH',
         token1Symbol: 'USDC',
-        borrowTokenSymbol: 'WETH', // Default token to borrow for this pair
-        feeTierToEnvMap: { // Maps fee tier (as string key) to env var name suffix
+        borrowTokenSymbol: 'WETH',
+        feeTierToEnvMap: {
             '100':   'ARBITRUM_WETH_USDC_100_ADDRESS',
             '500':   'ARBITRUM_WETH_USDC_500_ADDRESS',
             '3000':  'ARBITRUM_WETH_USDC_3000_ADDRESS',
@@ -33,7 +31,7 @@ const POOL_GROUPS = [
         name: 'USDC_USDT',
         token0Symbol: 'USDC',
         token1Symbol: 'USDT',
-        borrowTokenSymbol: 'USDC', // Borrowing USDC
+        borrowTokenSymbol: 'USDC',
         feeTierToEnvMap: {
             '100':   'ARBITRUM_USDC_USDT_100_ADDRESS',
             '500':   'ARBITRUM_USDC_USDT_500_ADDRESS',
@@ -93,7 +91,6 @@ const POOL_GROUPS = [
             '500': 'ARBITRUM_WETH_USDT_500_ADDRESS',
         }
     },
-    // Add more groups here if needed for other pairs/strategies
 ];
 
 // --- Combine and Export ---
@@ -102,21 +99,24 @@ const ARBITRUM_CONFIG = {
     POOL_GROUPS: POOL_GROUPS,
 
     // --- Global Settings ---
-    // These values will be parsed into BigNumber/Wei where needed (e.g., in config/index.js or bot.js)
-    MIN_PROFIT_THRESHOLD_ETH: '0.0005', // Minimum net profit required (in ETH string format) - adjust as needed
-    MAX_GAS_GWEI: '0.5',               // Maximum gas price (maxFeePerGas) in GWEI to attempt execution - adjust as needed
+    // *** TEMPORARILY LOWERED FOR TESTING ***
+    MIN_PROFIT_THRESHOLD_ETH: '0.000000000000000001', // Set to 1 Wei (near zero)
+    // *** RESTORE THIS VALUE AFTER TESTING ***
+    // MIN_PROFIT_THRESHOLD_ETH: '0.0005', // Original Value
+
+    MAX_GAS_GWEI: '0.5',               // Maximum gas price (maxFeePerGas) in GWEI
 
     // Gas Estimation Settings
-    GAS_ESTIMATE_BUFFER_PERCENT: 20,   // Percentage buffer added to gas estimates (e.g., 20 for 20%)
-    FALLBACK_GAS_LIMIT: '3000000',     // Fallback gas limit (as string) if specific estimation fails
+    GAS_ESTIMATE_BUFFER_PERCENT: 20,
+    FALLBACK_GAS_LIMIT: '3000000',
 
     // Profit Calculation Settings
-    PROFIT_BUFFER_PERCENT: 10,         // Safety buffer subtracted from calculated net profit before comparing to threshold (e.g. 10 for 10%)
+    PROFIT_BUFFER_PERCENT: 10,
 
-    // --- Optional: Network-specific overrides / other settings ---
-    // NATIVE_DECIMALS: 18, // Default assumed if not set elsewhere
-    // NATIVE_SYMBOL: 'ETH', // Default assumed if not set elsewhere
-    // BLOCK_TIME_MS: 1000,
+    // --- Optional Settings ---
+    // NATIVE_DECIMALS: 18,
+    // NATIVE_SYMBOL: 'ETH',
+    // WRAPPED_NATIVE_SYMBOL: 'WETH',
 };
 
 module.exports = ARBITRUM_CONFIG;
