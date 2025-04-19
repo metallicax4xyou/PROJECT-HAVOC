@@ -1,4 +1,5 @@
 // /workspaces/arbitrum-flash/bot.js
+// --- VERSION CORRECTED TO PASS CONFIG/PROVIDER TO FlashSwapManager ---
 
 // --- Force .env loading FIRST ---
 console.log('[Bot Start] Attempting to load .env...');
@@ -47,8 +48,9 @@ async function main() {
 
         // 3. Initialize FlashSwapManager (Handles Signer, NonceManager, Contract)
         logger.info('[Main] Initializing Flash Swap Manager...');
-        // FlashSwapManager constructor uses config and provider internally
-        const flashSwapManager = new FlashSwapManager();
+        // --- *** CORRECTED LINE: Pass config and provider *** ---
+        const flashSwapManager = new FlashSwapManager(config, provider);
+        // --- *** END CORRECTION *** ---
         logger.info(`[Main] Flash Swap Manager initialized. Signer Address: ${flashSwapManager.getSigner().address}`); // Log signer address from manager
 
         // 4. Initialize Engine - Pass the MANAGER instance and config object
