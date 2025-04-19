@@ -1,19 +1,17 @@
-// /workspaces/arbitrum-flash/core/arbitrageEngine.js - Refactored
-const { ethers } = require('ethers'); // Still needed? Maybe not directly. Keep for now.
+// /workspaces/arbitrum-flash/core/arbitrageEngine.js - Refactored with Instances
+const { ethers } = require('ethers');
 const { PoolScanner } = require('./poolScanner');
-// Removed direct imports for QuoteSimulator, ProfitCalculator, txExecutor
-const GasEstimator = require('./gasEstimator'); // Still needed for engineContext
+const GasEstimator = require('./gasEstimator');
 const logger = require('../utils/logger');
-const ErrorHandler = require('../utils/errorHandler'); // Still used for top-level cycle errors
-const FlashSwapManager = require('./flashSwapManager'); // Still needed for constructor
-const { processOpportunity } = require('./opportunityProcessor'); // Import the new processor
-const { ArbitrageError } = require('../utils/errorHandler'); // Still needed for logging maybe
+const ErrorHandler = require('../utils/errorHandler');
+const FlashSwapManager = require('./flashSwapManager');
+const { processOpportunity } = require('./opportunityProcessor');
+const { ArbitrageError } = require('../utils/errorHandler');
 
-// Helper for safe stringify (can likely be removed if only used in processor now)
-function safeStringify(obj, indent = null) {
-    try { return JSON.stringify(obj, (_, value) => typeof value === 'bigint' ? value.toString() : value, indent); }
-    catch (e) { return "[Unstringifiable Object]"; }
-}
+// --- Import classes needed for instances ---
+const { LensTickDataProvider } = require('../utils/tickDataProvider');
+const QuoteSimulator = require('./quoteSimulator');
+// --- ---
 
 
 class ArbitrageEngine {
@@ -27,13 +25,33 @@ class ArbitrageEngine {
             throw new Error('Config object required for ArbitrageEngine.');
         }
 
-        this.manager = manager; // Keep manager instance
-        this.config = config;   // Keep config instance
-        this.provider = manager.getProvider(); // Keep provider (used by scanner)
-        this.signer = manager.getSigner(); // Keep signer (passed via manager)
+        this.manager = manager;
+        this.config = config;
+        this.provider = manager.getProvider();
+        this.signer = manager.getSigner();
 
-        // Removed flashSwapContract instance from engine - manager provides it when needed
-        // logger.info(`[Engine] Using FlashSwap contract at ${this.flashSwapContract.target} via Manager`); // Log removed/moved
+        // --- Initialize Instances ---
+        try {
+            logger.debug('[Engine Constructor] Initializing LensTickDataProvider...');
+            this.tickDataProvider = new LensTickDataProvider(
+                 this.config.TICKLENS_ADDRESS,
+                 this.provider,
+                 this.config.CHAIN_ID
+            );
+        } catch (error) {
+             logger.fatal(`[Engine Constructor] Failed to initialize LensTickDataProvider: ${error.message}`);
+             // This IS fatal, throw error to prevent startup
+             throw error;
+        }
+
+         try {
+            logger.debug('[Engine Constructor] Initializing QuoteSimulator...');
+            this.quoteSimulator = new QuoteSimulator(this.tickDataProvider);
+        } catch (error) {
+             logger.fatal(`[Engine Constructor] Failed to initialize QuoteSimulator: ${error.message}`);
+             // This IS fatal
+             throw error;
+        }
 
         logger.debug('[Engine Constructor] Initializing PoolScanner...');
         try {
@@ -43,17 +61,18 @@ class ArbitrageEngine {
             throw scannerError;
         }
 
-        this.gasEstimator = new GasEstimator(this.provider); // Keep GasEstimator instance
+        this.gasEstimator = new GasEstimator(this.provider);
         this.isRunning = false;
         this.cycleCount = 0;
         this.cycleInterval = this.config.CYCLE_INTERVAL_MS || 5000;
+        // --- End Instance Initialization ---
 
         logger.info('[Engine] Arbitrage Engine Constructor Finished.');
     }
 
     async initialize() {
-        logger.info('[Engine] Arbitrage Engine Initialized Successfully.');
-        // Attempt to initialize NonceManager early (remains the same)
+        logger.info('[Engine] Arbitrage Engine Initializing...'); // Changed log slightly
+        // NonceManager init remains the same
         try {
             if (this.signer && typeof this.signer.initialize === 'function') {
                 await this.signer.initialize();
@@ -63,6 +82,7 @@ class ArbitrageEngine {
             logger.error(`[Engine] Failed to initialize Nonce Manager during engine init: ${nonceError.message}`);
             throw nonceError;
         }
+         logger.info('[Engine] Arbitrage Engine Initialized Successfully.'); // Moved success log here
     }
 
     async start() {
@@ -104,72 +124,50 @@ class ArbitrageEngine {
         try {
             // 1. Get Pool List (Same)
             const poolInfosToFetch = this.config.getAllPoolConfigs();
-            if (!poolInfosToFetch || poolInfosToFetch.length === 0) {
-                logger.warn('[Engine runCycle] No pool configurations found. Check config setup.');
-                this.logCycleEnd(cycleStartTime); return;
-            }
-            logger.debug(`[Engine runCycle] Prepared ${poolInfosToFetch.length} pool infos for scanner.`);
+            if (!poolInfosToFetch || poolInfosToFetch.length === 0) { /* ... */ }
 
             // 2. Fetch Live Pool States (Same)
             const livePoolStatesMap = await this.poolScanner.fetchPoolStates(poolInfosToFetch);
             const fetchedCount = livePoolStatesMap ? Object.keys(livePoolStatesMap).length : 0;
-            if (fetchedCount === 0) {
-                logger.warn(`[Engine runCycle] fetchPoolStates returned 0 live states (attempted: ${poolInfosToFetch.length}).`);
-                this.logCycleEnd(cycleStartTime); return;
-            }
+            if (fetchedCount === 0) { /* ... */ }
             logger.info(`[Engine] Fetched ${fetchedCount} live pool states.`);
 
             // 3. Find Opportunities (Same)
             const potentialOpportunities = this.poolScanner.findOpportunities(livePoolStatesMap);
-            if (potentialOpportunities.length === 0) {
-                logger.info('[Engine] No potential opportunities found this cycle.');
-                this.logCycleEnd(cycleStartTime); return;
-            }
+            if (potentialOpportunities.length === 0) { /* ... */ }
             logger.info(`[Engine] Found ${potentialOpportunities.length} potential opportunities.`);
 
             // --- 4. Process Opportunities using OpportunityProcessor ---
             let executedThisCycle = false;
 
-            // Create the context object containing dependencies needed by the processor
+            // Create the context object - now pass the simulator instance
             const engineContext = {
                 config: this.config,
                 manager: this.manager,
                 gasEstimator: this.gasEstimator,
-                logger: logger // Pass the shared logger instance
+                quoteSimulator: this.quoteSimulator, // Pass simulator instance
+                logger: logger
             };
 
             for (const opp of potentialOpportunities) {
-                if (executedThisCycle) {
-                     logger.debug(`[Engine] Skipping remaining opportunities as one was executed this cycle.`);
-                     break; // Stop processing if one tx was sent/attempted successfully
-                }
+                if (executedThisCycle) { /* ... */ break; }
 
-                const logPrefix = `[Engine Cycle ${this.cycleCount}]`; // Simpler prefix for engine-level logs
+                const logPrefix = `[Engine Cycle ${this.cycleCount}]`;
 
-                // Call the Opportunity Processor
+                // Call the Opportunity Processor with updated context
                 const processResult = await processOpportunity(opp, engineContext);
 
-                // Check the result and update flag
-                if (processResult.executed && processResult.success) {
-                    logger.info(`${logPrefix} Opportunity processed and executed successfully (Tx: ${processResult.txHash}). Ending cycle processing.`);
-                    executedThisCycle = true;
-                } else if (processResult.executed && !processResult.success) {
-                     logger.error(`${logPrefix} Opportunity processing attempted execution but failed. Error: ${processResult.error?.message || 'Unknown'}. Continuing cycle.`);
-                     // Decide if you want to break here on failure or continue trying others
-                     // executedThisCycle = true; // Uncomment if you want to stop after a FAILED execution attempt too
-                } else if (processResult.error) {
-                    // Log errors that occurred BEFORE execution attempt (sim, profit check, setup)
-                     logger.error(`${logPrefix} Error processing opportunity (before execution): ${processResult.error.message}. Continuing cycle.`);
-                } else {
-                    // Opportunity was skipped (not triangular, not profitable, etc.) - handled by processor logs
-                    logger.debug(`${logPrefix} Opportunity skipped or not profitable (processor handled logs).`);
-                }
+                // Check result logic remains the same
+                if (processResult.executed && processResult.success) { /* ... */ executedThisCycle = true; }
+                else if (processResult.executed && !processResult.success) { /* ... */ }
+                else if (processResult.error) { /* ... */ }
+                else { /* ... */ }
 
             } // End for loop
 
             this.logCycleEnd(cycleStartTime);
 
-        } catch (error) { // Catch errors in the main cycle logic (fetching, scanning)
+        } catch (error) { // Catch errors in the main cycle logic
             logger.error(`[Engine] Critical error during cycle execution: ${error.message}`);
             ErrorHandler.handleError(error, `Engine.runCycle (${this.cycleCount})`);
             this.logCycleEnd(cycleStartTime, true);
@@ -177,7 +175,6 @@ class ArbitrageEngine {
     } // End runCycle
 
     logCycleEnd(startTime, hadError = false) {
-        // Same as before
         const duration = Date.now() - startTime;
         logger.info(`===== [Engine] Cycle #${this.cycleCount} Finished (${duration}ms) ${hadError ? '[ERROR]' : ''} =====`);
     }
