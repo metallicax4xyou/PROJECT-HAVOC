@@ -1,4 +1,5 @@
 // config/arbitrum.js
+// --- VERSION UPDATED FOR PHASE 1 REFACTOR ---
 
 // --- Add Chainlink Feed Addresses ---
 const CHAINLINK_FEEDS = {
@@ -14,13 +15,13 @@ const CHAINLINK_FEEDS = {
 
 // --- Define Pool Groups to monitor ---
 // NOTE: Ensure 'name' matches the prefix used in .env variable names (e.g., name: 'WETH_USDC' corresponds to ARBITRUM_WETH_USDC_xxx_ADDRESS)
+// NOTE: minNetProfit has been removed from individual groups and is now a global setting.
 const POOL_GROUPS = [
     {
         name: 'WETH_USDC',
         token0Symbol: 'WETH',
         token1Symbol: 'USDC',
         borrowTokenSymbol: 'WETH', // Default token to borrow for this pair
-        minNetProfit: '1000000000000000', // Example: 0.001 ETH in Wei (string)
         feeTierToEnvMap: { // Maps fee tier (as string key) to env var name suffix
             '100':   'ARBITRUM_WETH_USDC_100_ADDRESS',
             '500':   'ARBITRUM_WETH_USDC_500_ADDRESS',
@@ -33,40 +34,34 @@ const POOL_GROUPS = [
         token0Symbol: 'USDC',
         token1Symbol: 'USDT',
         borrowTokenSymbol: 'USDC', // Borrowing USDC
-        minNetProfit: '1000000000000000', // Example: 0.001 ETH in Wei (string)
         feeTierToEnvMap: {
             '100':   'ARBITRUM_USDC_USDT_100_ADDRESS',
-            '500':   'ARBITRUM_USDC_USDT_500_ADDRESS', // Add if monitoring 500bps pool for this pair
+            '500':   'ARBITRUM_USDC_USDT_500_ADDRESS',
         }
     },
-    // --- ADDED GROUPS BASED ON .ENV POOLS ---
     {
         name: 'ARB_USDC',
-        token0Symbol: 'ARB', // Ensure ARB is defined in constants/tokens.js
+        token0Symbol: 'ARB',
         token1Symbol: 'USDC',
-        borrowTokenSymbol: 'USDC', // <<< DECIDE/VERIFY which token to borrow
-        minNetProfit: '1000000000000000', // <<< SET desired profit in Wei
+        borrowTokenSymbol: 'USDC',
         feeTierToEnvMap: {
             '500': 'ARBITRUM_ARB_USDC_500_ADDRESS',
-            // Add other fee tiers if needed (e.g., '3000': 'ARBITRUM_ARB_USDC_3000_ADDRESS')
         }
     },
     {
         name: 'USDC_DAI',
         token0Symbol: 'USDC',
-        token1Symbol: 'DAI', // Ensure DAI is defined in constants/tokens.js
-        borrowTokenSymbol: 'USDC', // <<< DECIDE/VERIFY which token to borrow
-        minNetProfit: '1000000000000000', // <<< SET desired profit in Wei
+        token1Symbol: 'DAI',
+        borrowTokenSymbol: 'USDC',
         feeTierToEnvMap: {
             '100': 'ARBITRUM_USDC_DAI_100_ADDRESS',
         }
     },
     {
         name: 'WBTC_WETH',
-        token0Symbol: 'WBTC', // Ensure WBTC is defined in constants/tokens.js
+        token0Symbol: 'WBTC',
         token1Symbol: 'WETH',
-        borrowTokenSymbol: 'WETH', // <<< DECIDE/VERIFY which token to borrow
-        minNetProfit: '1000000000000000', // <<< SET desired profit in Wei
+        borrowTokenSymbol: 'WETH',
         feeTierToEnvMap: {
             '500': 'ARBITRUM_WBTC_WETH_500_ADDRESS',
         }
@@ -75,8 +70,7 @@ const POOL_GROUPS = [
         name: 'WBTC_USDT',
         token0Symbol: 'WBTC',
         token1Symbol: 'USDT',
-        borrowTokenSymbol: 'USDT', // <<< DECIDE/VERIFY which token to borrow
-        minNetProfit: '1000000000000000', // <<< SET desired profit in Wei
+        borrowTokenSymbol: 'USDT',
         feeTierToEnvMap: {
             '500': 'ARBITRUM_WBTC_USDT_500_ADDRESS',
         }
@@ -85,8 +79,7 @@ const POOL_GROUPS = [
         name: 'ARB_WETH',
         token0Symbol: 'ARB',
         token1Symbol: 'WETH',
-        borrowTokenSymbol: 'WETH', // <<< DECIDE/VERIFY which token to borrow
-        minNetProfit: '1000000000000000', // <<< SET desired profit in Wei
+        borrowTokenSymbol: 'WETH',
         feeTierToEnvMap: {
             '500': 'ARBITRUM_ARB_WETH_500_ADDRESS',
         }
@@ -95,8 +88,7 @@ const POOL_GROUPS = [
         name: 'WETH_USDT',
         token0Symbol: 'WETH',
         token1Symbol: 'USDT',
-        borrowTokenSymbol: 'WETH', // <<< DECIDE/VERIFY which token to borrow
-        minNetProfit: '1000000000000000', // <<< SET desired profit in Wei
+        borrowTokenSymbol: 'WETH',
         feeTierToEnvMap: {
             '500': 'ARBITRUM_WETH_USDT_500_ADDRESS',
         }
@@ -108,8 +100,22 @@ const POOL_GROUPS = [
 const ARBITRUM_CONFIG = {
     CHAINLINK_FEEDS: CHAINLINK_FEEDS,
     POOL_GROUPS: POOL_GROUPS,
-    // Optional: Network-specific overrides for global settings
-    // GAS_PRICE_MULTIPLIER: 1.2,
+
+    // --- Global Settings ---
+    // These values will be parsed into BigNumber/Wei where needed (e.g., in config/index.js or bot.js)
+    MIN_PROFIT_THRESHOLD_ETH: '0.0005', // Minimum net profit required (in ETH string format) - adjust as needed
+    MAX_GAS_GWEI: '0.5',               // Maximum gas price (maxFeePerGas) in GWEI to attempt execution - adjust as needed
+
+    // Gas Estimation Settings
+    GAS_ESTIMATE_BUFFER_PERCENT: 20,   // Percentage buffer added to gas estimates (e.g., 20 for 20%)
+    FALLBACK_GAS_LIMIT: '3000000',     // Fallback gas limit (as string) if specific estimation fails
+
+    // Profit Calculation Settings
+    PROFIT_BUFFER_PERCENT: 10,         // Safety buffer subtracted from calculated net profit before comparing to threshold (e.g. 10 for 10%)
+
+    // --- Optional: Network-specific overrides / other settings ---
+    // NATIVE_DECIMALS: 18, // Default assumed if not set elsewhere
+    // NATIVE_SYMBOL: 'ETH', // Default assumed if not set elsewhere
     // BLOCK_TIME_MS: 1000,
 };
 
