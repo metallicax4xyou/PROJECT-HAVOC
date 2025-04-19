@@ -1,4 +1,3 @@
-cat << 'EOF' > core/quoteSimulator.js
 // /workspaces/arbitrum-flash/core/quoteSimulator.js - Use Math.round for Tick Adjustment
 const { Pool, Route, Trade } = require('@uniswap/v3-sdk');
 const { Token, CurrencyAmount, TradeType } = require('@uniswap/sdk-core');
