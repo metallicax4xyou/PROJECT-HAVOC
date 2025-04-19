@@ -1,22 +1,20 @@
 // config/arbitrum.js
-// --- VERSION UPDATED FOR TESTING (Lowered Min Profit) ---
+// --- VERSION UPDATED TO ADD SUSHISWAP POOLS ---
 
 // --- Add Chainlink Feed Addresses ---
 const CHAINLINK_FEEDS = {
-    // Format: SYMBOL/ETH
-    // Find addresses at: https://docs.chain.link/data-feeds/price-feeds/addresses?network=arbitrum
-    'USDC/ETH': '0x50834F3163758fcC1Df9973b6e91f0F0F0434AD3', // Arbitrum USDC/ETH feed
-    'USDT/ETH': '0x0A599A8555303467150f2aA046764Fa435551F76', // Arbitrum USDT/ETH feed
-    'ARB/ETH': '0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6',   // Arbitrum ARB/ETH feed
-    'DAI/ETH': '0xcAE0036F347a9459510A411DA0937A21f5571D35',   // Arbitrum DAI/ETH feed
-    'WBTC/ETH': '0x11A839134e1A4039F852F63D46475F1D5c049394', // Arbitrum WBTC/ETH feed
-    // Add feeds for other tokens vs ETH if needed by ProfitCalculator
+    // ... (keep existing feeds) ...
+    'USDC/ETH': '0x50834F3163758fcC1Df9973b6e91f0F0F0434AD3',
+    'USDT/ETH': '0x0A599A8555303467150f2aA046764Fa435551F76',
+    'ARB/ETH': '0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6',
+    'DAI/ETH': '0xcAE0036F347a9459510A411DA0937A21f5571D35',
+    'WBTC/ETH': '0x11A839134e1A4039F852F63D46475F1D5c049394',
 };
 
-// --- Define Pool Groups to monitor ---
-const POOL_GROUPS = [
+// --- Define Uniswap V3 Pool Groups to monitor ---
+const UNISWAP_V3_POOLS = [
     {
-        name: 'WETH_USDC',
+        name: 'WETH_USDC_V3', // Added V3 suffix for clarity
         token0Symbol: 'WETH',
         token1Symbol: 'USDC',
         borrowTokenSymbol: 'WETH',
@@ -27,36 +25,9 @@ const POOL_GROUPS = [
             '10000': 'ARBITRUM_WETH_USDC_10000_ADDRESS',
         }
     },
+    // ... (keep other V3 pools, maybe add _V3 suffix to names) ...
     {
-        name: 'USDC_USDT',
-        token0Symbol: 'USDC',
-        token1Symbol: 'USDT',
-        borrowTokenSymbol: 'USDC',
-        feeTierToEnvMap: {
-            '100':   'ARBITRUM_USDC_USDT_100_ADDRESS',
-            '500':   'ARBITRUM_USDC_USDT_500_ADDRESS',
-        }
-    },
-    {
-        name: 'ARB_USDC',
-        token0Symbol: 'ARB',
-        token1Symbol: 'USDC',
-        borrowTokenSymbol: 'USDC',
-        feeTierToEnvMap: {
-            '500': 'ARBITRUM_ARB_USDC_500_ADDRESS',
-        }
-    },
-    {
-        name: 'USDC_DAI',
-        token0Symbol: 'USDC',
-        token1Symbol: 'DAI',
-        borrowTokenSymbol: 'USDC',
-        feeTierToEnvMap: {
-            '100': 'ARBITRUM_USDC_DAI_100_ADDRESS',
-        }
-    },
-    {
-        name: 'WBTC_WETH',
+        name: 'WBTC_WETH_V3',
         token0Symbol: 'WBTC',
         token1Symbol: 'WETH',
         borrowTokenSymbol: 'WETH',
@@ -64,59 +35,53 @@ const POOL_GROUPS = [
             '500': 'ARBITRUM_WBTC_WETH_500_ADDRESS',
         }
     },
-    {
-        name: 'WBTC_USDT',
-        token0Symbol: 'WBTC',
-        token1Symbol: 'USDT',
-        borrowTokenSymbol: 'USDT',
-        feeTierToEnvMap: {
-            '500': 'ARBITRUM_WBTC_USDT_500_ADDRESS',
-        }
-    },
-    {
-        name: 'ARB_WETH',
-        token0Symbol: 'ARB',
-        token1Symbol: 'WETH',
-        borrowTokenSymbol: 'WETH',
-        feeTierToEnvMap: {
-            '500': 'ARBITRUM_ARB_WETH_500_ADDRESS',
-        }
-    },
-    {
-        name: 'WETH_USDT',
-        token0Symbol: 'WETH',
-        token1Symbol: 'USDT',
-        borrowTokenSymbol: 'WETH',
-        feeTierToEnvMap: {
-            '500': 'ARBITRUM_WETH_USDT_500_ADDRESS',
-        }
-    },
 ];
+
+// --- Define SushiSwap (V2 Style) Pools ---
+// Get addresses from SushiSwap Analytics or directly from the Factory/Router contracts
+const SUSHISWAP_POOLS = [
+    {
+        name: 'WETH_USDC_SUSHI',
+        token0Symbol: 'WETH',
+        token1Symbol: 'USDC',
+        // Find the actual SushiSwap WETH/USDC pool address on Arbitrum
+        // Example: Look it up on Arbiscan or Sushi interface
+        poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDC_ADDRESS' // Use an ENV variable
+    },
+    {
+        name: 'WBTC_WETH_SUSHI',
+        token0Symbol: 'WBTC',
+        token1Symbol: 'WETH',
+        poolAddressEnv: 'ARBITRUM_SUSHI_WBTC_WETH_ADDRESS'
+    },
+    // Add other SushiSwap pools you want to monitor here
+    // {
+    //     name: 'ARB_WETH_SUSHI',
+    //     token0Symbol: 'ARB',
+    //     token1Symbol: 'WETH',
+    //     poolAddressEnv: 'ARBITRUM_SUSHI_ARB_WETH_ADDRESS'
+    // },
+];
+
 
 // --- Combine and Export ---
 const ARBITRUM_CONFIG = {
     CHAINLINK_FEEDS: CHAINLINK_FEEDS,
-    POOL_GROUPS: POOL_GROUPS,
+    // Rename V3 pool group key for clarity
+    UNISWAP_V3_POOLS: UNISWAP_V3_POOLS,
+    // Add the new SushiSwap pool list
+    SUSHISWAP_POOLS: SUSHISWAP_POOLS,
 
     // --- Global Settings ---
-    // *** TEMPORARILY LOWERED FOR TESTING ***
-    MIN_PROFIT_THRESHOLD_ETH: '0.000000000000000001', // Set to 1 Wei (near zero)
-    // *** RESTORE THIS VALUE AFTER TESTING ***
-    // MIN_PROFIT_THRESHOLD_ETH: '0.0005', // Original Value
-
-    MAX_GAS_GWEI: '0.5',               // Maximum gas price (maxFeePerGas) in GWEI
-
-    // Gas Estimation Settings
+    MIN_PROFIT_THRESHOLD_ETH: '0.000000000000000001', // Keep 1 Wei for testing
+    MAX_GAS_GWEI: '0.5',
     GAS_ESTIMATE_BUFFER_PERCENT: 20,
     FALLBACK_GAS_LIMIT: '3000000',
-
-    // Profit Calculation Settings
     PROFIT_BUFFER_PERCENT: 10,
 
-    // --- Optional Settings ---
-    // NATIVE_DECIMALS: 18,
-    // NATIVE_SYMBOL: 'ETH',
-    // WRAPPED_NATIVE_SYMBOL: 'WETH',
+    // Optional SushiSwap specific constants if needed later (like Router address)
+    // SUSHISWAP_ROUTER_ADDRESS: '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506', // SushiSwap Arbitrum Router
+
 };
 
 module.exports = ARBITRUM_CONFIG;
