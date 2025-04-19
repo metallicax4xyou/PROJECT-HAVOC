@@ -1,5 +1,5 @@
 // config/index.js
-// Main configuration loader - Attempt 3: Restore Pool Groups Carefully
+// Main configuration loader - Attempt 5: Isolate Validation Failures
 
 require('dotenv').config();
 const { ethers } = require('ethers');
@@ -14,7 +14,7 @@ const { PROTOCOL_ADDRESSES } = require('../constants/addresses');
 // --- Load SDK Token Instances ---
 const { TOKENS } = require('../constants/tokens');
 
-// --- Validation Functions --- (Assume these are correct)
+// --- Validation Functions --- (Assume correct implementations from before)
 function validateAndNormalizeAddress(rawAddress, contextName) { /* ... */ }
 function validatePrivateKey(rawKey, contextName) { /* ... */ }
 function validateRpcUrls(rawUrls, contextName) { /* ... */ }
@@ -27,160 +27,105 @@ function parseBoolean(valueStr) { /* ... */ }
 // --- loadConfig Function ---
 function loadConfig() {
     logger.debug('[loadConfig] Starting loadConfig function...');
+    let validatedRpcUrls, validatedPrivateKey, validatedFlashSwapAddress; // Define vars outside try blocks
+
+    // --- STEP 1: Validate Network Name ---
     const networkName = process.env.NETWORK?.toLowerCase();
-    if (!networkName) { throw new Error(`[Config] CRITICAL: Missing NETWORK.`); }
+    if (!networkName) { throw new Error(`[Config] CRITICAL: Missing NETWORK environment variable.`); }
+    logger.debug(`[loadConfig] Network name: ${networkName}`);
 
-    // --- Validate Core Env Vars ---
-    const rpcUrlsEnvKey = `${networkName.toUpperCase()}_RPC_URLS`;
-    const validatedRpcUrls = validateRpcUrls(process.env[rpcUrlsEnvKey], rpcUrlsEnvKey);
-    if (!validatedRpcUrls) { throw new Error(`[Config] CRITICAL: Invalid RPC URL(s).`); }
-    const validatedPrivateKey = validatePrivateKey(process.env.PRIVATE_KEY, 'PRIVATE_KEY');
-    if (!validatedPrivateKey) { throw new Error(`[Config] CRITICAL: Invalid PRIVATE_KEY.`); }
-    const flashSwapEnvKey = `${networkName.toUpperCase()}_FLASH_SWAP_ADDRESS`;
-    const validatedFlashSwapAddress = validateAndNormalizeAddress(process.env[flashSwapEnvKey], flashSwapEnvKey);
-    // --- ---
+    // --- STEP 2: Validate RPC URLs ---
+    try {
+        const rpcUrlsEnvKey = `${networkName.toUpperCase()}_RPC_URLS`;
+        const rawRpcFromEnv = process.env[rpcUrlsEnvKey];
+        logger.debug(`[loadConfig] Validating RPC: Raw='${rawRpcFromEnv}'`);
+        validatedRpcUrls = validateRpcUrls(rawRpcFromEnv, rpcUrlsEnvKey);
+        if (!validatedRpcUrls) { throw new Error(`Validation function returned null/empty for RPC URLs.`); }
+        logger.debug(`[loadConfig] RPC URLs validation passed.`);
+    } catch (error) {
+        throw new Error(`[Config] CRITICAL: Error during RPC URL validation: ${error.message}`);
+    }
 
+    // --- STEP 3: Validate Private Key ---
+    try {
+        const rawPrivateKey = process.env.PRIVATE_KEY;
+        logger.debug(`[loadConfig] Validating Private Key...`);
+        validatedPrivateKey = validatePrivateKey(rawPrivateKey, 'PRIVATE_KEY');
+        if (!validatedPrivateKey) { throw new Error(`Validation function returned null for Private Key.`); }
+        logger.debug(`[loadConfig] Private Key validation passed.`);
+    } catch (error) {
+        throw new Error(`[Config] CRITICAL: Error during Private Key validation: ${error.message}`);
+    }
+
+    // --- STEP 4: Load Network Metadata ---
     const networkMetadata = getNetworkMetadata(networkName);
     if (!networkMetadata) { throw new Error(`[Config] CRITICAL: No metadata for network: ${networkName}`); }
+    logger.debug(`[loadConfig] Network metadata loaded.`);
 
+    // --- STEP 5: Load Network Specific Config ---
     let networkSpecificConfig;
-    try { networkSpecificConfig = require(`./${networkName}.js`); logger.log(`[Config] Loaded network-specific config for ${networkName}.`); }
+    try { networkSpecificConfig = require(`./${networkName}.js`); logger.log(`[Config] Loaded ./${networkName}.js`); }
     catch (e) { throw new Error(`[Config] CRITICAL: Failed to load config/${networkName}.js: ${e.message}`); }
 
-    // --- Load Global Settings ---
+    // --- STEP 6: Validate Optional Flash Swap Address ---
+    try {
+         const flashSwapEnvKey = `${networkName.toUpperCase()}_FLASH_SWAP_ADDRESS`;
+         validatedFlashSwapAddress = validateAndNormalizeAddress(process.env[flashSwapEnvKey], flashSwapEnvKey);
+         if (!validatedFlashSwapAddress) { logger.warn(`[Config] WARNING: ${flashSwapEnvKey} not set or invalid.`); }
+         logger.debug(`[loadConfig] Flash Swap Address validated (optional).`);
+    } catch (error) {
+         logger.warn(`[Config] Error validating Flash Swap Address: ${error.message}`);
+         validatedFlashSwapAddress = null; // Treat as unset on error
+    }
+
+    // --- STEP 7: Load Global Settings ---
     const cycleIntervalMs = safeParseInt(process.env.CYCLE_INTERVAL_MS, 'CYCLE_INTERVAL_MS', 5000);
     const gasLimitEstimate = safeParseBigInt(process.env.GAS_LIMIT_ESTIMATE, 'GAS_LIMIT_ESTIMATE', 1500000n);
     const slippageToleranceBps = safeParseInt(process.env.SLIPPAGE_TOLERANCE_BPS, 'SLIPPAGE_TOLERANCE_BPS', 10);
     const isDryRun = parseBoolean(process.env.DRY_RUN);
+    logger.debug(`[loadConfig] Global settings loaded.`);
+
+    // --- STEP 8: Combine Base Config ---
+     const baseConfig = {
+         ...networkMetadata, CHAINLINK_FEEDS: networkSpecificConfig.CHAINLINK_FEEDS || {}, TOKENS: TOKENS,
+         RPC_URLS: validatedRpcUrls, PRIMARY_RPC_URL: validatedRpcUrls[0], PRIVATE_KEY: validatedPrivateKey,
+         FLASH_SWAP_CONTRACT_ADDRESS: validatedFlashSwapAddress || ethers.ZeroAddress,
+         CYCLE_INTERVAL_MS: cycleIntervalMs, GAS_LIMIT_ESTIMATE: gasLimitEstimate, SLIPPAGE_TOLERANCE_BPS: slippageToleranceBps, DRY_RUN: isDryRun,
+         FACTORY_ADDRESS: PROTOCOL_ADDRESSES.UNISWAP_V3_FACTORY, QUOTER_ADDRESS: PROTOCOL_ADDRESSES.QUOTER_V2, TICK_LENS_ADDRESS: PROTOCOL_ADDRESSES.TICK_LENS,
+     };
+     logger.debug(`[loadConfig] Base config combined.`);
+
+    // --- STEP 9: Process POOL_GROUPS ---
+    let totalPoolsLoaded = 0; const loadedPoolAddresses = new Set(); const validProcessedPoolGroups = [];
+    const rawPoolGroups = networkSpecificConfig.POOL_GROUPS;
+    if (!rawPoolGroups || !Array.isArray(rawPoolGroups)) { logger.warn('[Config] POOL_GROUPS missing/invalid.'); }
+    else {
+        logger.debug(`[loadConfig] Starting POOL_GROUP processing for ${rawPoolGroups.length} groups...`);
+        rawPoolGroups.forEach((groupInput, groupIndex) => {
+             // ... (Full group processing logic with internal try/catch as before) ...
+              try {
+                   const group = { ...groupInput }; let currentGroupIsValid = true; const errorMessages = [];
+                   // Validate structure, enrich tokens, borrow amount, min profit, load pools...
+                   if (!group || !group.name /*...*/) { errorMessages.push(/*...*/); currentGroupIsValid = false;}
+                   if (currentGroupIsValid) { group.token0 = baseConfig.TOKENS[group.token0Symbol]; /*...*/ if(!group.token0 /*...*/) { errorMessages.push(/*...*/); currentGroupIsValid=false;} else { group.sdkToken0 = /*...*/; } }
+                   if (currentGroupIsValid) { const key=`BORROW_AMOUNT_${group.borrowTokenSymbol}`; if(!process.env[key]) { errorMessages.push(/*...*/); currentGroupIsValid=false;} else try{ group.borrowAmount=ethers.parseUnits(/*...*/); } catch(e){/*...*/} }
+                   if (currentGroupIsValid) { group.minNetProfit = safeParseBigInt(/*...*/); }
+                   if (currentGroupIsValid) { group.pools=[]; if(group.feeTierToEnvMap){/*... load pools ...*/} validProcessedPoolGroups.push(group); }
+                   else { logger.error(`[Config] Skipping POOL_GROUP ${group?.name || `#${groupIndex}`} errors: ${errorMessages.join('; ')}`); }
+              } catch (groupError) { logger.error(`[Config] Unexpected error processing POOL_GROUP ${groupInput?.name || `#${groupIndex}`}: ${groupError.message}. Skipping.`); }
+        });
+        logger.log(`[Config] Finished pool group processing. Valid groups: ${validProcessedPoolGroups.length}`);
+    }
+    baseConfig.POOL_GROUPS = validProcessedPoolGroups; // Assign valid groups
+    logger.log(`[Config] Total unique pools loaded: ${loadedPoolAddresses.size}`);
+    if (loadedPoolAddresses.size === 0) { console.warn("[Config] WARNING: No pool addresses loaded."); }
     // --- ---
 
-    // --- Define the BASE config object FIRST ---
-     const baseConfig = {
-         ...networkMetadata,
-         // Do NOT spread networkSpecificConfig here yet, process its POOL_GROUPS separately
-         CHAINLINK_FEEDS: networkSpecificConfig.CHAINLINK_FEEDS || {}, // Add feeds safely
-         TOKENS: TOKENS,
-         RPC_URLS: validatedRpcUrls,
-         PRIMARY_RPC_URL: validatedRpcUrls[0],
-         PRIVATE_KEY: validatedPrivateKey,
-         FLASH_SWAP_CONTRACT_ADDRESS: validatedFlashSwapAddress || ethers.ZeroAddress,
-         CYCLE_INTERVAL_MS: cycleIntervalMs,
-         GAS_LIMIT_ESTIMATE: gasLimitEstimate,
-         SLIPPAGE_TOLERANCE_BPS: slippageToleranceBps,
-         DRY_RUN: isDryRun,
-         FACTORY_ADDRESS: PROTOCOL_ADDRESSES.UNISWAP_V3_FACTORY,
-         QUOTER_ADDRESS: PROTOCOL_ADDRESSES.QUOTER_V2,
-         TICK_LENS_ADDRESS: PROTOCOL_ADDRESSES.TICK_LENS,
-     };
-     logger.debug('[loadConfig] Base config object created.');
-
-
-    // --- Process POOL_GROUPS from networkSpecificConfig ---
-    let totalPoolsLoaded = 0;
-    const loadedPoolAddresses = new Set();
-    const validProcessedPoolGroups = []; // Store fully processed, valid groups
-
-    const rawPoolGroups = networkSpecificConfig.POOL_GROUPS; // Get groups from arbitrum.js etc.
-
-    if (!rawPoolGroups || !Array.isArray(rawPoolGroups)) {
-        logger.warn('[Config] POOL_GROUPS array is missing or invalid in network config.');
-    } else {
-        logger.debug(`[DEBUG Config] Processing ${rawPoolGroups.length} raw POOL_GROUPS...`);
-        rawPoolGroups.forEach((groupInput, groupIndex) => {
-            // Create a *copy* of the groupInput to avoid modifying the original require cache
-            const group = { ...groupInput };
-            let currentGroupIsValid = true;
-            const errorMessages = [];
-
-            try {
-                // --- Validate Group Structure ---
-                if (!group || !group.name || !group.token0Symbol || !group.token1Symbol || !group.borrowTokenSymbol || typeof group.minNetProfit === 'undefined') {
-                    errorMessages.push(`Group #${groupIndex}: Missing required fields.`); currentGroupIsValid = false;
-                }
-
-                // --- Enrich with SDK Tokens (using baseConfig.TOKENS) ---
-                if (currentGroupIsValid) {
-                    group.token0 = baseConfig.TOKENS[group.token0Symbol];
-                    group.token1 = baseConfig.TOKENS[group.token1Symbol];
-                    group.borrowToken = baseConfig.TOKENS[group.borrowTokenSymbol];
-                    if (!(group.token0 instanceof Token) || !(group.token1 instanceof Token) || !(group.borrowToken instanceof Token)) {
-                         errorMessages.push(`Group "${group.name}": Failed SDK Token lookup.`); currentGroupIsValid = false;
-                    } else {
-                         group.sdkToken0 = group.token0; group.sdkToken1 = group.token1; group.sdkBorrowToken = group.borrowToken;
-                    }
-                }
-
-                 // --- Enrich with Borrow Amount ---
-                 if (currentGroupIsValid) {
-                      const borrowAmountEnvKey = `BORROW_AMOUNT_${group.borrowTokenSymbol}`;
-                      const rawBorrowAmount = process.env[borrowAmountEnvKey];
-                      if (!rawBorrowAmount) {
-                           errorMessages.push(`Group "${group.name}": Missing env var ${borrowAmountEnvKey}.`); currentGroupIsValid = false;
-                      } else {
-                           try {
-                                group.borrowAmount = ethers.parseUnits(rawBorrowAmount, group.borrowToken.decimals);
-                                if (group.borrowAmount <= 0n) { throw new Error("must be positive"); }
-                           } catch (e) { errorMessages.push(`Group "${group.name}": Invalid borrow amt: ${e.message}`); currentGroupIsValid = false; }
-                      }
-                 }
-
-                 // --- Enrich with Min Net Profit ---
-                 if (currentGroupIsValid) {
-                      group.minNetProfit = safeParseBigInt(group.minNetProfit, `Group ${group.name} minNetProfit`, 0n);
-                 }
-
-                 // --- Load Pools for Group ---
-                 if (currentGroupIsValid) {
-                     group.pools = []; // Initialize pools array
-                     if (group.feeTierToEnvMap && typeof group.feeTierToEnvMap === 'object') {
-                         for (const feeTierStr in group.feeTierToEnvMap) {
-                             const feeTier = parseInt(feeTierStr, 10); if (isNaN(feeTier)) continue;
-                             const envVarKey = group.feeTierToEnvMap[feeTierStr]; const rawAddress = process.env[envVarKey];
-                             if (rawAddress) {
-                                 const validatedAddress = validateAndNormalizeAddress(rawAddress, envVarKey);
-                                 if (validatedAddress) {
-                                     if (loadedPoolAddresses.has(validatedAddress.toLowerCase())) continue; // Skip duplicate across groups
-                                     const poolConfig = {
-                                         address: validatedAddress, fee: feeTier, groupName: group.name,
-                                         token0Symbol: group.token0Symbol, token1Symbol: group.token1Symbol
-                                     };
-                                     group.pools.push(poolConfig); totalPoolsLoaded++; loadedPoolAddresses.add(validatedAddress.toLowerCase());
-                                 } else { logger.warn(`[Config] Invalid address format for ${envVarKey}. Skipping.`); }
-                             }
-                         }
-                         logger.log(`[Config] Group ${group.name} processed with ${group.pools.length} pools.`);
-                     } else { logger.warn(`[Config] No feeTierToEnvMap for group ${group.name}.`); }
-
-                     // If group is still valid after all processing, add it to the final list
-                     validProcessedPoolGroups.push(group);
-                 } else {
-                     // Log errors for the skipped group
-                     logger.error(`[Config] Skipping POOL_GROUP ${group.name || `#${groupIndex}`} due to errors: ${errorMessages.join('; ')}`);
-                 }
-
-            } catch (groupError) {
-                 logger.error(`[Config] Unexpected error processing POOL_GROUP ${group?.name || `#${groupIndex}`}: ${groupError.message}. Skipping.`);
-            }
-        }); // End forEach groupInput
-    } // End else (rawPoolGroups valid)
-
-
-    // --- Add the VALIDATED and PROCESSED pool groups to the final config ---
-    baseConfig.POOL_GROUPS = validProcessedPoolGroups;
-    logger.log(`[Config] Finished processing pool groups. Valid groups loaded: ${baseConfig.POOL_GROUPS.length}`);
-
-
-    logger.log(`[Config] Total unique pools loaded from .env: ${loadedPoolAddresses.size}`);
-    if (loadedPoolAddresses.size === 0) { console.warn("[Config] WARNING: No pool addresses were loaded from .env vars."); }
-
-    // --- Add Helper Function & Log Dry Run ---
-    baseConfig.getAllPoolConfigs = () => {
-        if (!baseConfig.POOL_GROUPS) return [];
-        return baseConfig.POOL_GROUPS.flatMap(group => group.pools || []);
-    };
+    // --- STEP 10: Final Steps ---
+    baseConfig.getAllPoolConfigs = () => baseConfig.POOL_GROUPS.flatMap(group => group.pools || []);
     if (baseConfig.DRY_RUN) { console.warn("[Config] --- DRY RUN MODE ENABLED ---"); } else { console.log("[Config] --- LIVE TRADING MODE ---"); }
     logger.debug('[loadConfig] Exiting loadConfig successfully.');
-    return baseConfig; // Return the final assembled config
+    return baseConfig;
 }
 // --- End loadConfig Function ---
 
@@ -190,12 +135,16 @@ let config;
 console.log('[Config] Attempting to call loadConfig inside try block...');
 try {
     config = loadConfig();
-    console.log(`[CONSOLE Config] Configuration loaded successfully for network: ${config?.NAME} (Chain ID: ${config?.CHAIN_ID})`);
-    logger.info(`[Config] Configuration loaded successfully for network: ${config?.NAME} (Chain ID: ${config?.CHAIN_ID})`);
+    // Check essential properties after loadConfig returns
+    if (!config || !config.NAME || !config.CHAIN_ID || !config.PRIVATE_KEY || !config.RPC_URLS || config.RPC_URLS.length === 0) {
+         logger.error(`[Config Load Check] loadConfig result is missing essential properties!`, config);
+         throw new Error("Config object incomplete after loading.");
+    }
+    logger.info(`[Config] Config loaded OK: Network=${config.NAME}, ChainID=${config.CHAIN_ID}`);
 } catch (error) {
     console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     console.error("!!! FATAL CONFIGURATION ERROR !!!");
-    console.error(`!!! Config Load Failed: ${error.message}`); // More specific message
+    console.error(`!!! ${error.message}`); // Log specific error message
     console.error("!!! Bot cannot start.");
     console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     process.exit(1);
