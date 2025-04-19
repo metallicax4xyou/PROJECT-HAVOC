@@ -1,189 +1,241 @@
 // core/profitCalculator.js
+// --- VERSION UPDATED FOR PHASE 1 REFACTOR ---
+
 const { ethers } = require('ethers');
-const config = require('../config/index.js'); // Load merged config
 const logger = require('../utils/logger');
-// --- CORRECTED PATH: Import from core, not utils ---
-const GasEstimator = require('./gasEstimator'); // Import GasEstimator CLASS
-// --- Import the Price Feed utility ---
+// Import the Price Feed utility functions directly
 const { getChainlinkPriceData, convertTokenAmountToWei } = require('../utils/priceFeed');
-const { ArbitrageError } = require('../utils/errorHandler'); // Import error type
+const { ArbitrageError } = require('../utils/errorHandler'); // Keep if specific errors are thrown/caught
 
-/**
- * Estimates the total transaction cost in Wei using the GasEstimator class.
- * NOTE: This function might become less necessary if the engine passes the pre-estimated cost.
- * Keeping it for now as a potential standalone check.
- *
- * @param {GasEstimator} gasEstimatorInstance An instance of the GasEstimator class.
- * @param {ethers.TransactionRequest | null} txRequest Optional transaction request for specific gas limit estimation. If null, uses fallback GAS_LIMIT_ESTIMATE.
- * @returns {Promise<bigint>} Estimated gas cost in Wei, or 0n if estimation fails.
- */
-async function estimateTotalGasCost(gasEstimatorInstance, txRequest = null) {
-    if (!(gasEstimatorInstance instanceof GasEstimator)) {
-         logger.error("[ProfitCalc] Invalid GasEstimator instance provided to estimateTotalGasCost.");
-         return 0n;
+class ProfitCalculator {
+    /**
+     * @param {object} config Configuration object containing parsed values.
+     * @param {ethers.BigNumber} config.minProfitWei Minimum required profit in Wei (already parsed BigNumber).
+     * @param {number} config.PROFIT_BUFFER_PERCENT Safety buffer percentage for net profit comparison.
+     * @param {ethers.providers.Provider} config.provider Ethers provider instance (needed for priceFeed).
+     * @param {object} config.chainlinkFeeds Map of Chainlink feeds for price conversion.
+     * @param {number} [config.nativeDecimals=18] Decimals of the native currency.
+     * @param {string} [config.nativeSymbol='ETH'] Symbol of the native currency.
+     */
+    constructor(config) {
+        const requiredKeys = ['minProfitWei', 'PROFIT_BUFFER_PERCENT', 'provider', 'chainlinkFeeds'];
+        const missingKeys = requiredKeys.filter(key => !(key in config));
+        if (missingKeys.length > 0) {
+            throw new Error(`[ProfitCalculator] Invalid configuration provided. Missing keys: ${missingKeys.join(', ')}`);
+        }
+        if (!ethers.BigNumber.isBigNumber(config.minProfitWei)) {
+             throw new Error(`[ProfitCalculator] config.minProfitWei must be a BigNumber.`);
+        }
+
+        this.minProfitWei = config.minProfitWei;
+        this.profitBufferPercent = ethers.BigNumber.from(config.PROFIT_BUFFER_PERCENT); // Store as BigNumber
+        this.provider = config.provider;
+        this.chainlinkFeeds = config.chainlinkFeeds;
+        this.nativeDecimals = config.nativeDecimals || 18;
+        this.nativeSymbol = config.nativeSymbol || 'ETH';
+
+        if (this.profitBufferPercent.lt(0) || this.profitBufferPercent.gt(100)) {
+             throw new Error("[ProfitCalculator] PROFIT_BUFFER_PERCENT must be between 0 and 100.");
+        }
+
+        logger.info(`[ProfitCalculator] Initialized with Min Profit: ${ethers.utils.formatUnits(this.minProfitWei, this.nativeDecimals)} ${this.nativeSymbol}, Profit Buffer: ${this.profitBufferPercent.toString()}%`);
     }
 
-    let gasLimit;
-    if (txRequest) {
-        // Estimate specific limit if txRequest is provided
-        gasLimit = await gasEstimatorInstance.estimateGasLimit(txRequest);
-    } else {
-        // Use fallback limit from config if no specific request is given
-        gasLimit = BigInt(config.GAS_LIMIT_ESTIMATE || 1500000n); // Ensure fallback exists
-        logger.warn(`[ProfitCalc] estimateTotalGasCost called without txRequest. Using fallback gas limit: ${gasLimit}`);
-    }
+    /**
+     * Calculates net profit and checks profitability against the configured threshold and buffer.
+     * Assumes gasEstimate is already buffered and feeData is current.
+     *
+     * @param {object} params Parameters object.
+     * @param {object} params.simulationResult Result from quoteSimulator { profitable (bool), grossProfit (token units BigNumber), initialAmount, finalAmount, details: { tokenA: SDKToken } }.
+     * @param {ethers.BigNumber} params.gasEstimate The estimated gas limit (already buffered).
+     * @param {ethers.providers.FeeData} params.feeData Current EIP-1559 fee data (or legacy gasPrice).
+     * @returns {Promise<{
+     *   isProfitable: boolean,
+     *   grossProfitWei: ethers.BigNumber | null,
+     *   estimatedGasCostWei: ethers.BigNumber | null,
+     *   netProfitWei: ethers.BigNumber | null,
+     *   bufferedNetProfitWei: ethers.BigNumber | null,
+     *   details: { grossProfitTokenFormatted: string, grossProfitWeiFormatted: string, gasCostFormatted: string, netProfitFormatted: string, bufferedNetProfitFormatted: string, minProfitFormatted: string, bufferPercent: string, tokenSymbol: string } | object // Empty object on failure
+     * }>} Profitability decision and detailed breakdown. Values are null if calculations fail (e.g., price conversion or invalid inputs).
+     */
+    async calculateNetProfit({ simulationResult, gasEstimate, feeData }) {
+        const functionSig = `[ProfitCalculator]`; // Logging prefix
 
-    // Get fee data using the estimator instance
-    const gasPriceData = await gasEstimatorInstance.getGasPriceData();
-    if (!gasPriceData) {
-        logger.warn('[ProfitCalc] Could not get gas price data for cost estimation.');
-        return 0n;
-    }
+        // --- Input Validation ---
+        if (!simulationResult || typeof simulationResult.profitable !== 'boolean' || !ethers.BigNumber.isBigNumber(simulationResult.grossProfit) || !simulationResult.details?.tokenA) {
+            logger.warn(`${functionSig} Invalid simulation result provided.`, simulationResult);
+            return this._formatResult(false, null, null, null, null, {});
+        }
+        if (!gasEstimate || !ethers.BigNumber.isBigNumber(gasEstimate) || gasEstimate.lte(0)) {
+            logger.warn(`${functionSig} Invalid gasEstimate provided: ${gasEstimate?.toString()}`);
+            return this._formatResult(false, null, null, null, null, {});
+        }
+        // Check for usable fee data (either EIP-1559 or legacy)
+        const gasPriceForCost = feeData?.maxFeePerGas || feeData?.gasPrice;
+        if (!feeData || !gasPriceForCost || !ethers.BigNumber.isBigNumber(gasPriceForCost) || gasPriceForCost.lte(0)) {
+            logger.warn(`${functionSig} Invalid feeData provided (missing or invalid maxFeePerGas/gasPrice).`, feeData);
+             return this._formatResult(false, null, null, null, null, {});
+        }
+        // --- End Validation ---
 
-    let estimatedCostWei;
-    if (gasPriceData.maxFeePerGas) {
-        // EIP-1559
-        estimatedCostWei = gasLimit * gasPriceData.maxFeePerGas;
-    } else if (gasPriceData.gasPrice) {
-        // Legacy
-        estimatedCostWei = gasLimit * gasPriceData.gasPrice;
-    } else {
-        logger.warn('[ProfitCalc] Invalid gas price data format received.');
-        return 0n;
-    }
+        const { grossProfit } = simulationResult; // Amount in borrowed token's smallest unit (BigNumber)
+        const sdkTokenBorrowed = simulationResult.details.tokenA; // SDK Token instance
 
-    // Use config.NATIVE_DECIMALS if available, otherwise default to 18 for ETH display
-    const nativeDecimals = config.NATIVE_DECIMALS || 18;
-    const nativeSymbol = config.NATIVE_SYMBOL || 'ETH';
-    logger.debug(`[ProfitCalc] Gas Cost Estimation: Limit=${gasLimit}, Fees=${JSON.stringify(gasPriceData)} => Cost=${ethers.formatUnits(estimatedCostWei, nativeDecimals)} ${nativeSymbol}`);
-    return estimatedCostWei;
-}
+        // Calculate Gas Cost early (needed for logging even if not profitable)
+        // Use maxFeePerGas primarily, fallback to gasPrice if needed (checked in validation)
+        const estimatedGasCostWei = gasEstimate.mul(gasPriceForCost);
 
+        // If gross profit is not positive, skip further calculation
+        if (!simulationResult.profitable || grossProfit.lte(0)) {
+            logger.debug(`${functionSig} Gross profit (${this._format(grossProfit, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}) is zero or negative. Not profitable.`);
+            // Attempt conversion for logging consistency
+            const grossProfitWei = await this._convertGrossProfitToWei(grossProfit, sdkTokenBorrowed, functionSig);
+            const details = this._prepareDetails(grossProfit, grossProfitWei, estimatedGasCostWei, null, null, sdkTokenBorrowed, gasEstimate, feeData);
+            return this._formatResult(false, grossProfitWei, estimatedGasCostWei, null, null, details);
+        }
 
-/**
- * Checks if the simulated opportunity is profitable after considering estimated gas costs.
- * Profit comparison is always done in native token (ETH/Wei) terms.
- *
- * @param {object} simulationResult The result from quoteSimulator. Requires { profitable, grossProfit, initialAmount, finalAmount, details:{tokenA} (SDK Token instance of borrowed token) }.
- * @param {GasEstimator} gasEstimatorInstance An instance of the GasEstimator class.
- * @param {object} groupConfig The specific pool group configuration. Requires { name, minNetProfit (in Wei) }.
- * @param {ethers.TransactionRequest | null} txRequest Optional: Prepared tx request for accurate gas estimation. If null, uses fallback gas limit.
- * @returns {Promise<{isProfitable: boolean, netProfitWei: bigint, estimatedGasCostWei: bigint, grossProfitWei: bigint | null}>} Profitability decision. All values in Wei. grossProfitWei is null if conversion failed.
- */
-async function checkProfitability(simulationResult, gasEstimatorInstance, groupConfig, txRequest = null) {
-    const functionSig = `[ProfitCalc Group: ${groupConfig?.name || 'Unknown'}]`; // For logging context
+        // --- Steps for Positive Gross Profit ---
 
-    // --- Input Validation ---
-    if (!simulationResult || typeof simulationResult.grossProfit === 'undefined' || !simulationResult.details?.tokenA) {
-        logger.warn(`${functionSig} Invalid simulation result provided (missing grossProfit or details.tokenA).`, simulationResult);
-        return { isProfitable: false, netProfitWei: -1n, estimatedGasCostWei: 0n, grossProfitWei: null };
-    }
-     // Check if GasEstimator instance is valid
-     if (!(gasEstimatorInstance instanceof GasEstimator)) {
-          logger.error(`${functionSig} Invalid GasEstimator instance provided.`);
-          // Cannot proceed without estimator
-          return { isProfitable: false, netProfitWei: -1n, estimatedGasCostWei: 0n, grossProfitWei: null };
-     }
-    if (!groupConfig || typeof groupConfig.minNetProfit === 'undefined') {
-        logger.warn(`${functionSig} Invalid or incomplete groupConfig provided (missing minNetProfit?).`);
-        groupConfig = { ...groupConfig, minNetProfit: 0n }; // Default to 0 for safety, but log warning
-        logger.warn(`${functionSig} Assuming minNetProfit = 0 Wei.`);
-    }
-    // --- End Validation ---
+        // 1. Convert Gross Profit to Wei (Native Token)
+        const grossProfitWei = await this._convertGrossProfitToWei(grossProfit, sdkTokenBorrowed, functionSig);
 
-    const { grossProfit } = simulationResult; // This is in the smallest unit of the borrowed token (tokenA)
-    const sdkTokenBorrowed = simulationResult.details.tokenA; // Get borrowed token from simulation details
-    const minNetProfitWei = BigInt(groupConfig.minNetProfit); // Ensure it's BigInt, expected in Wei
-
-    const nativeDecimals = config.NATIVE_DECIMALS || 18;
-    const nativeSymbol = config.NATIVE_SYMBOL || 'ETH';
-
-    // If gross profit is not positive, it cannot be profitable after gas
-    if (grossProfit <= 0n) {
-         logger.debug(`${functionSig} Gross profit (${ethers.formatUnits(grossProfit, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol}) is not positive. Not profitable.`);
-         // Calculate grossProfitWei as 0 if possible, otherwise null
-         let grossProfitWeiCalc = null;
-         if (sdkTokenBorrowed.symbol === nativeSymbol) {
-             grossProfitWeiCalc = grossProfit; // Already in wei (non-positive)
-         } else {
-            // Attempt conversion even if non-positive for logging consistency, might return null
-             const priceData = await getChainlinkPriceData(sdkTokenBorrowed.symbol, gasEstimatorInstance.provider, config); // Use provider from estimator
-             if (priceData) { grossProfitWeiCalc = convertTokenAmountToWei(grossProfit, sdkTokenBorrowed.decimals, priceData); }
+        if (grossProfitWei === null) {
+            // Conversion failed, cannot determine profitability
+            logger.warn(`${functionSig} Failed to convert gross profit to ${this.nativeSymbol}. Assuming not profitable.`);
+            const details = this._prepareDetails(grossProfit, null, estimatedGasCostWei, null, null, sdkTokenBorrowed, gasEstimate, feeData);
+            return this._formatResult(false, null, estimatedGasCostWei, null, null, details);
+        }
+         // Additional check: If conversion somehow resulted in non-positive Wei value
+         if (grossProfitWei.lte(0)) {
+             logger.warn(`${functionSig} Converted gross profit in Wei (${this._format(grossProfitWei)} ${this.nativeSymbol}) is not positive. Not profitable.`);
+             const details = this._prepareDetails(grossProfit, grossProfitWei, estimatedGasCostWei, null, null, sdkTokenBorrowed, gasEstimate, feeData);
+             return this._formatResult(false, grossProfitWei, estimatedGasCostWei, null, null, details);
          }
-         return { isProfitable: false, netProfitWei: grossProfitWeiCalc ?? -1n, estimatedGasCostWei: 0n, grossProfitWei: grossProfitWeiCalc };
+
+
+        // 2. Calculate Net Profit (Wei)
+        const netProfitWei = grossProfitWei.sub(estimatedGasCostWei);
+        if (netProfitWei.lte(0)) {
+             logger.info(`${functionSig} Net profit (${this._format(netProfitWei)} ${this.nativeSymbol}) is zero or negative after gas cost. Not profitable.`);
+             const details = this._prepareDetails(grossProfit, grossProfitWei, estimatedGasCostWei, netProfitWei, null, sdkTokenBorrowed, gasEstimate, feeData);
+             return this._formatResult(false, grossProfitWei, estimatedGasCostWei, netProfitWei, null, details);
+        }
+
+        // 3. Apply Safety Buffer to Net Profit
+        // buffered = net * (100 - buffer) / 100
+        let bufferedNetProfitWei = netProfitWei; // Default to net profit if buffer is 0
+        if (this.profitBufferPercent.gt(0)) {
+             const bufferMultiplier = ethers.BigNumber.from(100).sub(this.profitBufferPercent);
+             // Ensure buffer calculation doesn't make it negative if original net profit was tiny positive
+             if (bufferMultiplier.gt(0)) {
+                  bufferedNetProfitWei = netProfitWei.mul(bufferMultiplier).div(100);
+             } else {
+                  // Handle edge case of 100% buffer - profit must be > 0
+                  bufferedNetProfitWei = ethers.BigNumber.from(0);
+             }
+        }
+
+
+        // 4. Compare Buffered Net Profit against Minimum Threshold
+        const isProfitable = bufferedNetProfitWei.gte(this.minProfitWei);
+
+        // --- Logging & Formatting ---
+        const details = this._prepareDetails(grossProfit, grossProfitWei, estimatedGasCostWei, netProfitWei, bufferedNetProfitWei, sdkTokenBorrowed, gasEstimate, feeData);
+        const logMessage = `${functionSig} Profit Check: Gross=${details.grossProfitWeiFormatted} | Gas=${details.gasCostFormatted} | Net=${details.netProfitFormatted} | BufferedNet=${details.bufferedNetProfitFormatted} (MinReq: ${details.minProfitFormatted}, Buffer: ${details.bufferPercent}%) -> Profitable: ${isProfitable ? '✅ YES' : '❌ NO'}`;
+        if (isProfitable) {
+            logger.log(logMessage); // Use standard log for success
+        } else {
+            logger.info(logMessage); // Use info for non-profitable checks
+        }
+
+
+        return this._formatResult(isProfitable, grossProfitWei, estimatedGasCostWei, netProfitWei, bufferedNetProfitWei, details);
     }
 
-    // 1. Estimate Gas Cost (in Wei) using the GasEstimator instance and optional txRequest
-    const estimatedGasCostWei = await estimateTotalGasCost(gasEstimatorInstance, txRequest);
-    if (estimatedGasCostWei <= 0n) {
-         logger.warn(`${functionSig} Failed to estimate gas cost or cost is zero. Assuming not profitable.`);
-         return { isProfitable: false, netProfitWei: -1n, estimatedGasCostWei: 0n, grossProfitWei: null };
-    }
+    /** Helper to convert gross profit in token units to Wei */
+    async _convertGrossProfitToWei(grossProfitAmount, sdkToken, logPrefix) {
+        // Handle native token case first
+        if (sdkToken.symbol === this.nativeSymbol && sdkToken.decimals === this.nativeDecimals) {
+            logger.debug(`${logPrefix} Gross profit is already in native token (${this.nativeSymbol}).`);
+            return grossProfitAmount; // Already in Wei (or native smallest unit)
+        }
+        // Special case: Wrapped native token (e.g., WETH on ETH mainnet/Arbitrum)
+        // Assumes WETH has same decimals as ETH (usually 18)
+        if ((sdkToken.symbol === 'WETH' || sdkToken.symbol === this.config?.WRAPPED_NATIVE_SYMBOL) && sdkToken.decimals === this.nativeDecimals) {
+             logger.debug(`${logPrefix} Gross profit is in wrapped native token (${sdkToken.symbol}). Assuming 1:1 conversion to ${this.nativeSymbol}.`);
+             return grossProfitAmount;
+        }
 
-    // 2. Calculate Net Profit (in Wei)
-    let netProfitWei = -1n; // Default to indicate error/uncalculated
-    let grossProfitWei = null; // Will hold gross profit in Wei
-    let isProfitable = false;
+        // --- Proceed with Chainlink conversion for other tokens ---
+        logger.debug(`${logPrefix} Gross profit in ${sdkToken.symbol}. Fetching price vs ${this.nativeSymbol} via Chainlink...`);
+        try {
+            // Pass provider and feeds config to priceFeed helper
+            const priceData = await getChainlinkPriceData(
+                sdkToken.symbol,
+                this.provider,
+                { CHAINLINK_FEEDS: this.chainlinkFeeds, NATIVE_SYMBOL: this.nativeSymbol } // Pass native symbol context
+            );
 
-    // Convert Gross Profit to Wei if necessary
-    if (sdkTokenBorrowed.symbol === nativeSymbol) {
-        grossProfitWei = grossProfit; // Gross profit is already in Wei
-        logger.debug(`${functionSig} Gross profit is already in native token (${nativeSymbol}).`);
-    } else {
-        logger.debug(`${functionSig} Gross profit in ${sdkTokenBorrowed.symbol}. Fetching price vs ${nativeSymbol}...`);
-        // Use provider from gas estimator instance
-        const priceData = await getChainlinkPriceData(sdkTokenBorrowed.symbol, gasEstimatorInstance.provider, config);
-        if (priceData) {
-            grossProfitWei = convertTokenAmountToWei(grossProfit, sdkTokenBorrowed.decimals, priceData);
-            if (grossProfitWei === null) {
-                 logger.warn(`${functionSig} Failed to convert ${sdkTokenBorrowed.symbol} gross profit to ${nativeSymbol}. Assuming not profitable.`);
+            if (priceData) {
+                const convertedWei = convertTokenAmountToWei(grossProfitAmount, sdkToken.decimals, priceData, this.nativeDecimals);
+                if (convertedWei !== null) {
+                     logger.debug(`${logPrefix} Converted gross profit: ${this._format(grossProfitAmount, sdkToken.decimals)} ${sdkToken.symbol} -> ${this._format(convertedWei)} ${this.nativeSymbol}`);
+                     return convertedWei;
+                } else {
+                    logger.warn(`${logPrefix} Failed to convert ${sdkToken.symbol} gross profit to ${this.nativeSymbol} (convertTokenAmountToWei returned null). Check decimals or price data validity.`);
+                    return null;
+                }
             } else {
-                 logger.debug(`${functionSig} Converted gross profit: ${ethers.formatUnits(grossProfit, sdkTokenBorrowed.decimals)} ${sdkTokenBorrowed.symbol} -> ${ethers.formatUnits(grossProfitWei, nativeDecimals)} ${nativeSymbol}`);
+                logger.warn(`${logPrefix} Could not fetch price data for ${sdkToken.symbol}/${this.nativeSymbol} from Chainlink.`);
+                return null;
             }
-        } else {
-            logger.warn(`${functionSig} Could not fetch price data for ${sdkTokenBorrowed.symbol}/${nativeSymbol}. Cannot accurately calculate profit. Assuming not profitable.`);
+        } catch (error) {
+             logger.error(`${logPrefix} Error fetching/converting price for ${sdkToken.symbol}/${this.nativeSymbol}: ${error.message}`, error);
+             return null;
         }
     }
 
-    // Proceed only if we have gross profit in Wei
-    if (grossProfitWei !== null && grossProfitWei >= 0n) { // Check non-null and non-negative
-        netProfitWei = grossProfitWei - estimatedGasCostWei;
-
-        const grossProfitTokenFormatted = ethers.formatUnits(grossProfit, sdkTokenBorrowed.decimals);
-        const grossProfitWeiFormatted = ethers.formatUnits(grossProfitWei, nativeDecimals);
-        const gasCostFormatted = ethers.formatUnits(estimatedGasCostWei, nativeDecimals);
-        const netProfitWeiFormatted = ethers.formatUnits(netProfitWei, nativeDecimals);
-        const minProfitWeiFormatted = ethers.formatUnits(minNetProfitWei, nativeDecimals);
-
-        logger.log(`${functionSig} Profit Check:`);
-        logger.log(`  Gross Profit: ${grossProfitTokenFormatted} ${sdkTokenBorrowed.symbol} (~${grossProfitWeiFormatted} ${nativeSymbol})`);
-        logger.log(`  Est. Gas Cost: - ${gasCostFormatted} ${nativeSymbol}`);
-        logger.log(`  Net Profit (Wei): = ${netProfitWeiFormatted} ${nativeSymbol}`);
-        logger.log(`  Min Required (Wei): ${minProfitWeiFormatted} ${nativeSymbol}`);
-
-        // Compare net profit in Wei against minimum required Wei
-        if (netProfitWei >= minNetProfitWei) {
-            logger.log(`${functionSig} ✅ Profitable: Net profit >= Min profit.`);
-            isProfitable = true;
-        } else {
-            logger.log(`${functionSig} ❌ Not Profitable: Net profit < Min profit.`);
-        }
-    } else {
-         // Handle cases where grossProfitWei is null (conversion failed) or unexpectedly negative
-         logger.warn(`${functionSig} Gross profit in Wei is null or negative (${grossProfitWei}). Assuming not profitable.`);
-         netProfitWei = -1n; // Ensure net profit reflects failure state
-         isProfitable = false;
+     /** Helper to format BigNumber values for logging */
+    _format(value, decimals = this.nativeDecimals) {
+         if (value === null || typeof value === 'undefined') return 'N/A';
+         if (!ethers.BigNumber.isBigNumber(value)) return 'Invalid Value';
+         try {
+              return ethers.utils.formatUnits(value, decimals);
+         } catch (formatError) {
+             logger.warn(`[ProfitCalculator] Error formatting value: ${value?.toString()} with decimals ${decimals}`, formatError);
+             return 'Format Error';
+         }
     }
 
-    return {
-        isProfitable: isProfitable,
-        netProfitWei: netProfitWei,         // Always in Wei, or -1n if calculation failed
-        estimatedGasCostWei: estimatedGasCostWei, // Always in Wei
-        grossProfitWei: grossProfitWei,     // Gross profit in Wei (null if conversion failed)
-    };
+    /** Helper to prepare detailed breakdown object for logging and return */
+    _prepareDetails(grossProfitToken, grossProfitWei, gasCostWei, netProfitWei, bufferedNetProfitWei, sdkToken, gasEstimate, feeData) {
+         return {
+             grossProfitTokenFormatted: this._format(grossProfitToken, sdkToken?.decimals),
+             grossProfitWeiFormatted: this._format(grossProfitWei),
+             gasCostFormatted: this._format(gasCostWei),
+             netProfitFormatted: this._format(netProfitWei),
+             bufferedNetProfitFormatted: this._format(bufferedNetProfitWei),
+             minProfitFormatted: this._format(this.minProfitWei),
+             bufferPercent: this.profitBufferPercent.toString(),
+             tokenSymbol: sdkToken?.symbol || 'N/A',
+             // Optionally include gas details for deeper debugging if needed
+             // gasEstimate: gasEstimate?.toString() || 'N/A',
+             // maxFeePerGasGwei: this._format(feeData?.maxFeePerGas, 'gwei'),
+             // gasPriceGwei: this._format(feeData?.gasPrice, 'gwei'),
+         };
+    }
+
+    /** Helper to structure the final return object */
+    _formatResult(isProfitable, grossProfitWei, estimatedGasCostWei, netProfitWei, bufferedNetProfitWei, details) {
+        return {
+            isProfitable,
+            grossProfitWei,         // BigNumber or null
+            estimatedGasCostWei,    // BigNumber or null
+            netProfitWei,           // BigNumber or null
+            bufferedNetProfitWei,   // BigNumber or null
+            details                 // Object with formatted strings and context
+        };
+    }
 }
 
-module.exports = {
-    checkProfitability,
-    // estimateTotalGasCost, // Expose if needed? Usually called internally by checkProfitability
-};
+module.exports = ProfitCalculator;
