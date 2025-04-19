@@ -1,259 +1,282 @@
 // core/opportunityProcessor.js
-// *** VERSION WITH ACCURATE GAS ESTIMATION FOR NET PROFIT CHECK ***
+// --- VERSION UPDATED FOR PHASE 1 REFACTOR ---
+// Integrates new GasEstimator & ProfitCalculator classes and revised txExecutor call
 
-const { ethers } = require('ethers'); // Make sure ethers is imported
-const { Token } = require('@uniswap/sdk-core');
-const logger = require('../utils/logger');
+const { ethers } = require('ethers');
+const { Token } = require('@uniswap/sdk-core'); // Ensure this is the correct import for your SDK version
+const logger = require('../utils/logger'); // Use the global logger instance
 const { ArbitrageError, handleError } = require('../utils/errorHandler');
-const ProfitCalculator = require('./profitCalculator');
-const { executeTransaction } = require('./txExecutor'); // Assuming this exists and is correctly imported
-const { stringifyPoolState } = require('./simulationHelpers');
-const TxUtils = require('./tx'); // Import paramBuilder, encoder etc. (adjust path if needed)
-// const { ABIS } = require('../constants/abis'); // Might be needed if fetching pool tokens
+// No need to import ProfitCalculator/GasEstimator class here if instances are passed in context
+const { executeTransaction } = require('./txExecutor'); // Import the refactored executor
+const { stringifyPoolState } = require('./simulationHelpers'); // Keep simulation helpers if used
+const TxUtils = require('./tx'); // ParamBuilder, Encoder from the tx module index
 
 async function processOpportunity(opp, engineContext) {
-    const { config, manager, gasEstimator, quoteSimulator, logger: contextLogger } = engineContext;
-    const logPrefix = `[OppProcessor Type: ${opp.type}, Group: ${opp.groupName}]`;
-    contextLogger.info(`${logPrefix} Processing potential opportunity...`);
+    // Destructure instances and *parsed* config values from context
+    const {
+        config, // Expect raw config + parsed values like { parsed: { minProfitWei, maxGasWei, ... } }
+        manager, // FlashSwapManager instance
+        gasEstimator, // Instance of new GasEstimator class
+        profitCalculator, // Instance of new ProfitCalculator class
+        quoteSimulator, // Instance of QuoteSimulator
+        // logger: contextLogger // Use the global logger directly unless contextLogger has specific tags
+    } = engineContext;
 
-    // Validations
-    if (!config || !manager || !gasEstimator || !quoteSimulator || !contextLogger) {
-        const errMsg = `${logPrefix} Missing dependencies in engineContext. Aborting.`;
-        contextLogger.error(errMsg);
-        return { executed: false, success: false, txHash: null, error: new ArbitrageError(errMsg, 'INTERNAL_ERROR') };
+    // Use the global logger instance, adding context via prefix
+    const logPrefix = `[OppProcessor Type: ${opp?.type || 'N/A'}, Group: ${opp?.groupName || 'N/A'}]`;
+    logger.info(`${logPrefix} Processing potential opportunity... ID: ${opp?.id || 'N/A'}`); // Add opp ID if available
+
+    // --- Input Validations ---
+    if (!config || !config.parsed || !manager || !gasEstimator || !profitCalculator || !quoteSimulator) {
+        const errMsg = `${logPrefix} Missing critical dependencies or parsed config in engineContext. Aborting.`;
+        logger.error(errMsg, {
+            hasConfig: !!config, hasParsedConfig: !!config?.parsed, hasManager: !!manager,
+            hasGasEstimator: !!gasEstimator, hasProfitCalculator: !!profitCalculator, hasQuoteSimulator: !!quoteSimulator
+        });
+        // Return error structure consistent with try/catch block
+        return { executed: false, success: false, txHash: null, error: new ArbitrageError(errMsg, 'INTERNAL_ERROR'), simulationResult: null, profitabilityResult: null };
     }
-    if (!opp || typeof opp !== 'object') {
-        contextLogger.error(`${logPrefix} Invalid opportunity object received.`);
-        return { executed: false, success: false, txHash: null, error: new ArbitrageError('Invalid opportunity object', 'INTERNAL_ERROR') };
+    if (!opp || typeof opp !== 'object' || !opp.type || !opp.groupName) {
+         logger.error(`${logPrefix} Invalid or incomplete opportunity object received.`, opp);
+         return { executed: false, success: false, txHash: null, error: new ArbitrageError('Invalid opportunity object', 'INTERNAL_ERROR'), simulationResult: null, profitabilityResult: null };
     }
     if (opp.type !== 'triangular') {
-        contextLogger.warn(`${logPrefix} Skipping opportunity type '${opp.type}' - only 'triangular' is implemented.`);
-        return { executed: false, success: false, txHash: null, error: null };
+         logger.warn(`${logPrefix} Skipping opportunity type '${opp.type}' - only 'triangular' is currently implemented for execution.`);
+         return { executed: false, success: false, txHash: null, error: null, reason: 'UNSUPPORTED_TYPE', simulationResult: null, profitabilityResult: null };
     }
+    // --- End Validations ---
 
     let simulationResult = null;
+    let profitabilityResult = null; // Stores result from profitCalculator
+    let feeData = null; // Store fee data fetched early
+    let txRequestForGas = null; // Store the request used for gas estimation
+    let gasEstimate = null; // Store the final gas estimate
+    let buildResult = null; // Store result from ParamBuilder
 
     try {
-        // a. Find Group Config
+        // --- 1. Fetch Fee Data and Check Max Gas Price ---
+        logger.debug(`${logPrefix} Fetching current fee data...`);
+        feeData = await gasEstimator.getFeeData();
+        if (!feeData || !feeData.maxFeePerGas) {
+            // Handle potential legacy gasPrice case if necessary, but focus on EIP-1559
+            if (!feeData?.gasPrice) {
+                 throw new ArbitrageError(`${logPrefix} Failed to fetch valid fee data (maxFeePerGas or gasPrice). Cannot proceed.`, 'NETWORK_ERROR');
+            }
+            logger.warn(`${logPrefix} Using legacy gasPrice (${ethers.utils.formatUnits(feeData.gasPrice, 'gwei')} Gwei) as maxFeePerGas is unavailable.`);
+            // Use gasPrice for the check if maxFee is missing
+             if (feeData.gasPrice.gt(config.parsed.maxGasWei)) {
+                  logger.warn(`${logPrefix} ⛽ Legacy Gas price too high (${ethers.utils.formatUnits(feeData.gasPrice, 'gwei')} Gwei > Max ${ethers.utils.formatUnits(config.parsed.maxGasWei, 'gwei')} Gwei). Skipping.`);
+                  return { executed: false, success: false, txHash: null, error: null, reason: 'GAS_PRICE_TOO_HIGH', simulationResult, profitabilityResult };
+             }
+        } else {
+            // EIP-1559 check
+             logger.info(`${logPrefix} Current Gas (Gwei): Max=${ethers.utils.formatUnits(feeData.maxFeePerGas, 'gwei')}, Priority=${feeData.maxPriorityFeePerGas ? ethers.utils.formatUnits(feeData.maxPriorityFeePerGas, 'gwei') : 'N/A'}`);
+             if (feeData.maxFeePerGas.gt(config.parsed.maxGasWei)) {
+                 logger.warn(`${logPrefix} ⛽ Max Fee Per Gas too high (${ethers.utils.formatUnits(feeData.maxFeePerGas, 'gwei')} Gwei > Max ${ethers.utils.formatUnits(config.parsed.maxGasWei, 'gwei')} Gwei). Skipping.`);
+                 return { executed: false, success: false, txHash: null, error: null, reason: 'GAS_PRICE_TOO_HIGH', simulationResult, profitabilityResult };
+             }
+        }
+
+
+        // --- 2. Find Group Config & Validate ---
         const groupConfig = config.POOL_GROUPS.find(g => g.name === opp.groupName);
         if (!groupConfig) { throw new ArbitrageError(`${logPrefix} Configuration for group '${opp.groupName}' not found.`, 'CONFIG_ERROR'); }
-        if (!groupConfig.sdkBorrowToken || groupConfig.borrowAmount == null || typeof groupConfig.minNetProfit === 'undefined') {
-            throw new ArbitrageError(`${logPrefix} Incomplete configuration for group '${opp.groupName}' (missing sdkBorrowToken, borrowAmount, or minNetProfit).`, 'CONFIG_ERROR');
+        if (!groupConfig.sdkBorrowToken || !groupConfig.borrowAmount || !ethers.BigNumber.isBigNumber(groupConfig.borrowAmount) ) { // Check borrowAmount is BigNumber
+            throw new ArbitrageError(`${logPrefix} Incomplete/invalid config for group '${opp.groupName}' (missing/invalid sdkBorrowToken or borrowAmount).`, 'CONFIG_ERROR', { groupConfig });
         }
 
-        // b. Verify Borrow Token and Set Initial Amount
+
+        // --- 3. Prepare for Simulation ---
         const borrowTokenSymbol = groupConfig.borrowTokenSymbol;
-        if (!opp.pathSymbols || opp.pathSymbols.length < 1 || opp.pathSymbols[0] !== borrowTokenSymbol) {
-            throw new ArbitrageError(`${logPrefix} Opportunity path does not start with the configured borrow token '${borrowTokenSymbol}'. Path: ${opp.pathSymbols?.join('->')}`, 'CONFIG_ERROR');
+        if (!opp.pathSymbols || opp.pathSymbols.length !== 4 || opp.pathSymbols[0] !== borrowTokenSymbol || opp.pathSymbols[3] !== borrowTokenSymbol) {
+             throw new ArbitrageError(`${logPrefix} Invalid opportunity path symbols for triangular arbitrage.`, 'CONFIG_ERROR', { path: opp.pathSymbols });
         }
-        const initialAmount = groupConfig.borrowAmount;
+        const initialAmount = groupConfig.borrowAmount; // Already BigNumber from config loader
 
-        // --- c. Simulate Arbitrage Hop-by-Hop ---
-        contextLogger.info(`${logPrefix} Simulating path: ${opp.pathSymbols.join(' -> ')} with ${ethers.formatUnits(initialAmount, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}`);
-        if (!opp.pools || opp.pools.length !== 3 || !opp.pathSymbols || opp.pathSymbols.length !== 4) {
-            throw new ArbitrageError(`${logPrefix} Invalid triangular opportunity structure (pools=${opp.pools?.length}, pathSymbols=${opp.pathSymbols?.length}).`, 'INTERNAL_ERROR', { opp });
+
+        // --- 4. Simulate Arbitrage Path ---
+        logger.info(`${logPrefix} Simulating path: ${opp.pathSymbols.join(' -> ')} with Input: ${ethers.utils.formatUnits(initialAmount, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}`);
+
+        if (!opp.pools || opp.pools.length !== 3) {
+            throw new ArbitrageError(`${logPrefix} Invalid number of pools for triangular opportunity (${opp.pools?.length}).`, 'INTERNAL_ERROR', { opp });
         }
         const [pool1, pool2, pool3] = opp.pools;
-        const [symA, symB, symC, symA_final] = opp.pathSymbols;
-        if (symA !== symA_final) { throw new ArbitrageError(`${logPrefix} Path symbols do not start and end with the same token (${symA} != ${symA_final}).`, 'INTERNAL_ERROR'); }
-        if (!pool1 || !pool2 || !pool3) { throw new ArbitrageError(`${logPrefix} One or more pools in the opportunity are undefined.`, 'INTERNAL_ERROR'); }
-        if (!(pool1.token0 instanceof Token) || !(pool1.token1 instanceof Token) || !(pool2.token0 instanceof Token) || !(pool2.token1 instanceof Token) || !(pool3.token0 instanceof Token) || !(pool3.token1 instanceof Token)) {
-             contextLogger.error(`${logPrefix} One or more pools have invalid SDK token objects.`);
-             console.error("Pool 1 State:", stringifyPoolState(pool1)); console.error("Pool 2 State:", stringifyPoolState(pool2)); console.error("Pool 3 State:", stringifyPoolState(pool3));
-             throw new ArbitrageError(`${logPrefix} Invalid token objects in pools`, 'INTERNAL_ERROR');
+        if (!pool1 || !pool2 || !pool3) { throw new ArbitrageError(`${logPrefix} One or more pools are undefined.`, 'INTERNAL_ERROR'); }
+
+        // Resolve Tokens (Ensure they are SDK Token instances from the Pool objects)
+        const tokenA = groupConfig.sdkBorrowToken; // Use the one from config
+        const tokenB = (pool1.token0?.address === tokenA.address) ? pool1.token1 : pool1.token0;
+        const tokenC = (pool2.token0?.address === tokenB?.address) ? pool2.token1 : pool2.token0;
+
+        // Basic validation that tokens were resolved and match expected path logic
+        if (!(tokenB instanceof Token) || !(tokenC instanceof Token)) {
+            throw new ArbitrageError(`${logPrefix} Failed to resolve SDK Token instances for B or C. B=${tokenB?.symbol}, C=${tokenC?.symbol}`, 'INTERNAL_ERROR');
         }
+        // Optional: Add more detailed pool pair matching checks if needed
 
-        // Resolve Tokens (Ensuring they are SDK Token instances)
-        const tokenA = pool1.token0?.symbol === symA ? pool1.token0 : (pool1.token1?.symbol === symA ? pool1.token1 : null);
-        const tokenB = pool1.token0?.symbol === symB ? pool1.token0 : (pool1.token1?.symbol === symB ? pool1.token1 : null);
-        if (!tokenB) { throw new ArbitrageError(`${logPrefix} Could not find token ${symB} in pool 1 (${pool1.address}).`, 'INTERNAL_ERROR'); }
-        const tokenC = pool2.token0?.symbol === symC ? pool2.token0 : (pool2.token1?.symbol === symC ? pool2.token1 : null);
-        if (!tokenC) { throw new ArbitrageError(`${logPrefix} Could not find token ${symC} in pool 2 (${pool2.address}).`, 'INTERNAL_ERROR'); }
-        const tokenA_check = pool3.token0?.symbol === symA ? pool3.token0 : (pool3.token1?.symbol === symA ? pool3.token1 : null);
-        if (!tokenA_check) { throw new ArbitrageError(`${logPrefix} Could not find return token ${symA} in pool 3 (${pool3.address}).`, 'INTERNAL_ERROR'); }
-        if (!(tokenA instanceof Token) || !(tokenB instanceof Token) || !(tokenC instanceof Token)) { throw new ArbitrageError(`${logPrefix} Failed to resolve one or more SDK Token instances. A=${tokenA?.symbol}, B=${tokenB?.symbol}, C=${tokenC?.symbol}`, 'INTERNAL_ERROR'); }
-
-        // Validate pool token pairs
-        const pool1Matches = (pool1.token0.address === tokenA.address && pool1.token1.address === tokenB.address) || (pool1.token0.address === tokenB.address && pool1.token1.address === tokenA.address);
-        const pool2Matches = (pool2.token0.address === tokenB.address && pool2.token1.address === tokenC.address) || (pool2.token0.address === tokenC.address && pool2.token1.address === tokenB.address);
-        const pool3Matches = (pool3.token0.address === tokenC.address && pool3.token1.address === tokenA.address) || (pool3.token0.address === tokenA.address && pool3.token1.address === tokenC.address);
-        if (!pool1Matches || !pool2Matches || !pool3Matches) {
-             contextLogger.error(`${logPrefix} Pool token pairs do not match the expected path.`);
-             console.error(`Pool 1 (${pool1.address}) Pair: ${pool1.token0.symbol}/${pool1.token1.symbol} vs Expected: ${tokenA.symbol}/${tokenB.symbol}`);
-             console.error(`Pool 2 (${pool2.address}) Pair: ${pool2.token0.symbol}/${pool2.token1.symbol} vs Expected: ${tokenB.symbol}/${tokenC.symbol}`);
-             console.error(`Pool 3 (${pool3.address}) Pair: ${pool3.token0.symbol}/${pool3.token1.symbol} vs Expected: ${tokenC.symbol}/${tokenA.symbol}`);
-            throw new ArbitrageError(`${logPrefix} Pool token pair mismatch`, 'INTERNAL_ERROR');
-        }
-
-        // Hops 1, 2, 3
-        contextLogger.debug(`${logPrefix} Simulating Hop 1...`);
-        console.log(`${logPrefix} POOL 1 STATE before simulation:`); console.log(stringifyPoolState(pool1));
+        // Execute simulation hops (Keep existing logic using quoteSimulator)
+        logger.debug(`${logPrefix} Simulating Hop 1 (${tokenA.symbol}->${tokenB.symbol}) on Pool ${pool1.address}...`);
         const hop1Result = await quoteSimulator.simulateSingleSwapExactIn(pool1, tokenA, tokenB, initialAmount);
-        if (!hop1Result || hop1Result.amountOut == null || hop1Result.amountOut <= 0n) { throw new ArbitrageError(`${logPrefix} Hop 1 simulation failed.`, 'SIMULATION_ERROR', { hop: 1, result: hop1Result }); }
+        if (!hop1Result || !ethers.BigNumber.isBigNumber(hop1Result.amountOut) || hop1Result.amountOut.lte(0)) { throw new ArbitrageError(`${logPrefix} Hop 1 simulation failed or returned zero/negative output.`, 'SIMULATION_ERROR', { hop: 1, result: hop1Result }); }
         const amountB_Received = hop1Result.amountOut;
-        contextLogger.info(`[SIM Hop 1 ${tokenA.symbol}->${tokenB.symbol}] Output: ${ethers.formatUnits(amountB_Received, tokenB.decimals)} ${tokenB.symbol}`);
+        logger.info(`[SIM Hop 1 ${tokenA.symbol}->${tokenB.symbol}] Output: ${ethers.utils.formatUnits(amountB_Received, tokenB.decimals)} ${tokenB.symbol}`);
 
-        contextLogger.debug(`${logPrefix} Simulating Hop 2...`);
-        console.log(`${logPrefix} POOL 2 STATE before simulation:`); console.log(stringifyPoolState(pool2));
+        logger.debug(`${logPrefix} Simulating Hop 2 (${tokenB.symbol}->${tokenC.symbol}) on Pool ${pool2.address}...`);
         const hop2Result = await quoteSimulator.simulateSingleSwapExactIn(pool2, tokenB, tokenC, amountB_Received);
-        if (!hop2Result || hop2Result.amountOut == null || hop2Result.amountOut <= 0n) { throw new ArbitrageError(`${logPrefix} Hop 2 simulation failed.`, 'SIMULATION_ERROR', { hop: 2, result: hop2Result }); }
+        if (!hop2Result || !ethers.BigNumber.isBigNumber(hop2Result.amountOut) || hop2Result.amountOut.lte(0)) { throw new ArbitrageError(`${logPrefix} Hop 2 simulation failed or returned zero/negative output.`, 'SIMULATION_ERROR', { hop: 2, result: hop2Result }); }
         const amountC_Received = hop2Result.amountOut;
-        contextLogger.info(`[SIM Hop 2 ${tokenB.symbol}->${tokenC.symbol}] Output: ${ethers.formatUnits(amountC_Received, tokenC.decimals)} ${tokenC.symbol}`);
+        logger.info(`[SIM Hop 2 ${tokenB.symbol}->${tokenC.symbol}] Output: ${ethers.utils.formatUnits(amountC_Received, tokenC.decimals)} ${tokenC.symbol}`);
 
-        contextLogger.debug(`${logPrefix} Simulating Hop 3...`);
-        console.log(`${logPrefix} POOL 3 STATE before simulation:`); console.log(stringifyPoolState(pool3));
+        logger.debug(`${logPrefix} Simulating Hop 3 (${tokenC.symbol}->${tokenA.symbol}) on Pool ${pool3.address}...`);
         const hop3Result = await quoteSimulator.simulateSingleSwapExactIn(pool3, tokenC, tokenA, amountC_Received);
-        if (!hop3Result || hop3Result.amountOut == null || hop3Result.amountOut <= 0n) { throw new ArbitrageError(`${logPrefix} Hop 3 simulation failed.`, 'SIMULATION_ERROR', { hop: 3, result: hop3Result }); }
+        if (!hop3Result || !ethers.BigNumber.isBigNumber(hop3Result.amountOut) || hop3Result.amountOut.lte(0)) { throw new ArbitrageError(`${logPrefix} Hop 3 simulation failed or returned zero/negative output.`, 'SIMULATION_ERROR', { hop: 3, result: hop3Result }); }
         const finalAmount = hop3Result.amountOut;
-        contextLogger.info(`[SIM Hop 3 ${tokenC.symbol}->${tokenA.symbol}] Output: ${ethers.formatUnits(finalAmount, tokenA.decimals)} ${tokenA.symbol}`);
+        logger.info(`[SIM Hop 3 ${tokenC.symbol}->${tokenA.symbol}] Output: ${ethers.utils.formatUnits(finalAmount, tokenA.decimals)} ${tokenA.symbol}`);
 
-        // --- Calculate Gross Profit and Construct Result ---
-        const grossProfit = finalAmount - initialAmount;
-        const profitable = grossProfit > 0n;
+
+        // --- 5. Calculate Gross Profit & Check ---
+        const grossProfit = finalAmount.sub(initialAmount);
         simulationResult = {
-            profitable, error: null, initialAmount, finalAmount, grossProfit,
-            // Pass tokenA as SDK Token instance for ProfitCalculator
-            details: { tokenA: tokenA, hop1Result, hop2Result, hop3Result }
+            profitable: grossProfit.gt(0), // Ensure boolean
+            error: null, initialAmount, finalAmount, grossProfit, // BigNumbers
+            details: { tokenA, tokenB, tokenC, hop1Result, hop2Result, hop3Result } // Include resolved SDK tokens
         };
-        // --- End Simulation Result Construction ---
 
-        // Check Gross Profit First
         if (!simulationResult.profitable) {
-            contextLogger.info(`${logPrefix} Simulation shows NO gross profit (${ethers.formatUnits(simulationResult.grossProfit, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}). Skipping.`);
-            return { executed: false, success: false, txHash: null, error: null, simulationResult };
+            logger.info(`${logPrefix} Simulation shows NO gross profit (${ethers.utils.formatUnits(simulationResult.grossProfit, tokenA.decimals)} ${tokenA.symbol}). Skipping.`);
+            // Return non-executed state, include simulation result for context
+            return { executed: false, success: false, txHash: null, error: null, reason: 'NO_GROSS_PROFIT', simulationResult, profitabilityResult };
         }
-        contextLogger.info(`${logPrefix} ✅ Simulation shows POSITIVE gross profit: ${ethers.formatUnits(simulationResult.grossProfit, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}`);
+        logger.info(`${logPrefix} ✅ Simulation shows POSITIVE gross profit: ${ethers.utils.formatUnits(simulationResult.grossProfit, tokenA.decimals)} ${tokenA.symbol}`);
 
-        // --- START: Prepare Transaction Request for Accurate Gas Estimation ---
-        let txRequestForGas = null;
+
+        // --- 6. Prepare Transaction Request for Gas Estimation ---
         try {
-            contextLogger.debug(`${logPrefix} Preparing transaction request for gas estimation...`);
-
-            // 1. Build Params using ParamBuilder
-            // Assuming ParamBuilder uses simulationResult.initialAmount for borrowAmount if needed
-            const buildResult = TxUtils.ParamBuilder.buildTriangularParams(opp, simulationResult, config);
-
-            // 2. Encode Params using Encoder
-            const encodedParams = TxUtils.Encoder.encodeParams(buildResult.params, buildResult.typeString);
-
-            // 3. Determine Borrow Pool and Amounts
-            const borrowPoolAddress = opp.pools[0].address; // Pool 1 is the borrow pool
-            const borrowTokenAddress = buildResult.borrowTokenAddress; // Token A address
-            const borrowAmount = buildResult.borrowAmount; // Amount of Token A to borrow
-
-            // Get borrow pool token addresses (assuming they are on the pool object from scanner)
-            const pool1Token0Addr = opp.pools[0].token0?.address;
-            const pool1Token1Addr = opp.pools[0].token1?.address;
-
-            if (!pool1Token0Addr || !pool1Token1Addr) {
-                 // Fallback: Log warning if addresses aren't readily available.
-                 // checkProfitability will use fallback gas limit if txRequestForGas remains null.
-                 contextLogger.warn(`${logPrefix} Pool 1 token addresses not found on opp object, cannot determine amount0/1 accurately for gas estimate. Falling back to default limit estimate.`);
-                 txRequestForGas = null;
-            } else {
-                 let amount0ToBorrow = 0n;
-                 let amount1ToBorrow = 0n;
-
-                 // Compare addresses correctly (case-insensitive)
-                 if (ethers.getAddress(borrowTokenAddress) === ethers.getAddress(pool1Token0Addr)) {
-                     amount0ToBorrow = borrowAmount;
-                 } else if (ethers.getAddress(borrowTokenAddress) === ethers.getAddress(pool1Token1Addr)) {
-                     amount1ToBorrow = borrowAmount;
-                 } else {
-                     // This should ideally not happen if data is consistent, but good to check
-                     throw new ArbitrageError(`Borrowed token address ${borrowTokenAddress} mismatch for borrow pool ${borrowPoolAddress}. Expected ${pool1Token0Addr} or ${pool1Token1Addr}. Cannot estimate gas accurately.`, 'INTERNAL_ERROR');
-                 }
-
-                 // 4. Get Contract Details from Manager
-                 const flashSwapContract = manager.getFlashSwapContract(); // Get contract instance
-                 const flashSwapAddress = flashSwapContract.target;        // Get contract address
-                 const flashSwapInterface = flashSwapContract.interface;   // Get contract interface
-
-                 // 5. Assemble Arguments and Encode Function Data
-                 const contractFunctionName = buildResult.contractFunctionName; // e.g., 'initiateTriangularFlashSwap'
-                 const contractCallArgs = [
-                     borrowPoolAddress,
-                     amount0ToBorrow,
-                     amount1ToBorrow,
-                     encodedParams
-                 ];
-                 const encodedFunctionData = flashSwapInterface.encodeFunctionData(contractFunctionName, contractCallArgs);
-
-                 // 6. Create the Transaction Request Object
-                 txRequestForGas = {
-                     to: flashSwapAddress,
-                     data: encodedFunctionData,
-                     // from: manager.getSigner().address // Usually not needed for estimateGas
-                     // value: 0 // Explicitly zero value if needed
-                 };
-                 contextLogger.debug(`${logPrefix} Transaction request prepared for gas estimation.`);
+            logger.debug(`${logPrefix} Preparing transaction request using ParamBuilder...`);
+            // Build Params - ensure ParamBuilder returns necessary structure
+            buildResult = TxUtils.ParamBuilder.buildTriangularParams(opp, simulationResult, config);
+            if (!buildResult || !buildResult.params || !buildResult.typeString || !buildResult.contractFunctionName || !buildResult.borrowTokenAddress || !buildResult.borrowAmount) {
+                 throw new Error("ParamBuilder did not return expected structure.");
             }
 
+            // Encode Params
+            const encodedParams = TxUtils.Encoder.encodeParams(buildResult.params, buildResult.typeString);
+
+            // Determine amount0/amount1 for flash swap call (based on pool1 tokens)
+            const borrowPoolAddress = opp.pools[0].address; // Pool 1 is borrow pool
+            const borrowTokenAddress = buildResult.borrowTokenAddress; // Should match tokenA.address
+            const borrowAmount = buildResult.borrowAmount; // Should match initialAmount
+
+            const pool1Token0Addr = opp.pools[0].token0?.address;
+            const pool1Token1Addr = opp.pools[0].token1?.address;
+            if (!pool1Token0Addr || !pool1Token1Addr) {
+                 throw new Error(`Pool 1 (${borrowPoolAddress}) token addresses missing on opportunity object.`);
+            }
+
+            let amount0ToBorrow = ethers.BigNumber.from(0);
+            let amount1ToBorrow = ethers.BigNumber.from(0);
+            if (ethers.utils.getAddress(borrowTokenAddress) === ethers.utils.getAddress(pool1Token0Addr)) { amount0ToBorrow = borrowAmount; }
+            else if (ethers.utils.getAddress(borrowTokenAddress) === ethers.utils.getAddress(pool1Token1Addr)) { amount1ToBorrow = borrowAmount; }
+            else { throw new Error(`Borrowed token address ${borrowTokenAddress} mismatch for borrow pool ${borrowPoolAddress}. Expected ${pool1Token0Addr} or ${pool1Token1Addr}.`); }
+
+            // Get Contract Details from Manager
+            const flashSwapContract = manager.getFlashSwapContract();
+            const flashSwapAddress = await flashSwapContract.getAddress();
+            const flashSwapInterface = flashSwapContract.interface;
+            const signerAddress = await manager.getSignerAddress(); // Get signer address
+
+            // Assemble Arguments for contract call
+            const contractFunctionName = buildResult.contractFunctionName; // e.g., 'initiateTriangularFlashSwap'
+            const contractCallArgs = [borrowPoolAddress, amount0ToBorrow, amount1ToBorrow, encodedParams];
+
+            // Encode Function Data
+            const encodedFunctionData = flashSwapInterface.encodeFunctionData(contractFunctionName, contractCallArgs);
+
+            // Create Transaction Request Object for gas estimation
+            txRequestForGas = {
+                to: flashSwapAddress,
+                data: encodedFunctionData,
+                from: signerAddress, // Include sender address
+                value: 0 // Typically 0 for these calls
+            };
+            logger.debug(`${logPrefix} Transaction request prepared for gas estimation: To=${txRequestForGas.to}, From=${txRequestForGas.from}, Data=${txRequestForGas.data.substring(0,10)}...`);
+
         } catch (prepError) {
-            contextLogger.error(`${logPrefix} Error preparing transaction request for gas estimation: ${prepError.message}`, prepError);
-            txRequestForGas = null; // Ensure it's null on error, forcing fallback gas estimate
-            handleError(prepError, `${logPrefix} Gas Prep`);
+            logger.error(`${logPrefix} Error preparing transaction request for gas estimation: ${prepError.message}`, prepError);
+            throw new ArbitrageError(`Failed to prepare TX for gas estimate: ${prepError.message}`, 'INTERNAL_ERROR', prepError);
         }
-        // --- END: Prepare Transaction Request ---
 
 
-        // --- d. Net Profit Check & Gas Estimation ---
-        contextLogger.info(`${logPrefix} Performing Net Profit Check...`);
-        const profitabilityResult = await ProfitCalculator.checkProfitability(
+        // --- 7. Estimate Gas ---
+        logger.info(`${logPrefix} Estimating gas for the transaction call '${buildResult.contractFunctionName}'...`);
+        gasEstimate = await gasEstimator.estimateGasForTx(txRequestForGas); // Call the new estimator method
+        // Check if gas estimate is the fallback value, which might indicate an issue
+        if (gasEstimate.eq(gasEstimator.fallbackGasLimit)) { // Compare against the instance's fallback limit
+             logger.warn(`${logPrefix} ⚠️ Gas estimation resulted in fallback limit (${gasEstimate.toString()}). Transaction might fail or be unprofitable. Proceeding with caution.`);
+        } else {
+             logger.info(`${logPrefix} Gas estimate (buffered): ${gasEstimate.toString()}`);
+        }
+
+
+        // --- 8. Net Profit Check ---
+        logger.info(`${logPrefix} Performing Net Profit Check using ProfitCalculator...`);
+        profitabilityResult = await profitCalculator.calculateNetProfit({
             simulationResult,
-            gasEstimator,     // Pass the GasEstimator instance
-            groupConfig,
-            txRequestForGas   // Pass the prepared request (or null if prep failed)
-        );
+            gasEstimate, // Pass the final buffered estimate
+            feeData      // Pass the feeData fetched earlier
+            // minProfitWei is handled inside the profitCalculator instance
+        });
 
+        // Check the result from the calculator
         if (!profitabilityResult || !profitabilityResult.isProfitable) {
-            const netProfitStr = profitabilityResult ? `${ethers.formatUnits(profitabilityResult.netProfitWei, config.NATIVE_DECIMALS || 18)} ${config.NATIVE_SYMBOL || 'ETH'}` : 'N/A';
-            const gasCostStr = profitabilityResult ? `${ethers.formatUnits(profitabilityResult.estimatedGasCostWei, config.NATIVE_DECIMALS || 18)} ${config.NATIVE_SYMBOL || 'ETH'}` : 'N/A';
-            contextLogger.info(`${logPrefix} Opportunity NOT Profitable after estimated gas (Net Profit: ${netProfitStr}, Est Gas Cost: ${gasCostStr}). Skipping.`);
-            return { executed: false, success: false, txHash: null, error: null, simulationResult, profitabilityResult }; // Return profitabilityResult for potential logging higher up
+             const reason = profitabilityResult?.details
+                 ? `Net=${profitabilityResult.details.netProfitFormatted}, BufferedNet=${profitabilityResult.details.bufferedNetProfitFormatted}, Min=${profitabilityResult.details.minProfitFormatted}`
+                 : 'Calculation Error or Invalid Result';
+            logger.info(`${logPrefix} ❌ Opportunity NOT Profitable after estimated gas (${reason}). Skipping.`);
+            // Return non-executed state, include both simulation and profitability results
+            return { executed: false, success: false, txHash: null, error: null, reason: 'NOT_PROFITABLE_POST_GAS', simulationResult, profitabilityResult };
         }
-        contextLogger.info(`${logPrefix} ✅✅ Opportunity IS Profitable after estimated gas! (Net Profit: ${ethers.formatUnits(profitabilityResult.netProfitWei, config.NATIVE_DECIMALS || 18)} ${config.NATIVE_SYMBOL || 'ETH'})`);
+        // Log detailed breakdown on success
+        logger.info(`${logPrefix} ✅✅ Opportunity IS Profitable after estimated gas!`);
+        logger.info(`${logPrefix} Profit Breakdown: Gross=${profitabilityResult.details.grossProfitWeiFormatted} | Gas=${profitabilityResult.details.gasCostFormatted} | Net=${profitabilityResult.details.netProfitFormatted} | BufferedNet=${profitabilityResult.details.bufferedNetProfitFormatted} (MinRequired: ${profitabilityResult.details.minProfitFormatted})`);
 
 
-        // e. Execute if profitable
-        contextLogger.info(`${logPrefix} >>> Attempting Execution... <<<`);
-        // Check DRY_RUN using config directly
-        if (config.DRY_RUN) {
-             contextLogger.warn(`${logPrefix} --- DRY RUN ENABLED --- Skipping actual transaction execution.`);
-             // In dry run, we still return success=true to indicate the *potential* execution path was valid
-             return { executed: true, success: true, txHash: "0xDRYRUN_PROFITABLE_SKIPPED_SEND", error: null, simulationResult, profitabilityResult };
-        }
+        // --- 9. Execute Transaction ---
+        logger.info(`${logPrefix} >>> Attempting Execution... <<<`);
+        const dryRun = config.DRY_RUN === 'true' || config.DRY_RUN === true; // Handle string 'true'
 
-        // Execute Transaction (Pass contextLogger if needed by txExecutor)
+        // Prepare arguments for the executor
+        const executorArgs = {
+             contractFunctionName: buildResult.contractFunctionName,
+             contractCallArgs: [ // Re-assemble args based on buildResult and derived values
+                 opp.pools[0].address, // borrowPoolAddress
+                 txRequestForGas.data.startsWith(flashSwapInterface.getSighash(buildResult.contractFunctionName)) ? // Basic check if data matches function
+                     ethers.BigNumber.from(ethers.utils.hexlify(ethers.utils.stripZeros(flashSwapInterface.decodeFunctionData(buildResult.contractFunctionName, txRequestForGas.data)[1]))) : ethers.BigNumber.from(0), // amount0ToBorrow (re-decode carefully or pass from step 6)
+                 ethers.BigNumber.from(ethers.utils.hexlify(ethers.utils.stripZeros(flashSwapInterface.decodeFunctionData(buildResult.contractFunctionName, txRequestForGas.data)[2]))), // amount1ToBorrow
+                 TxUtils.Encoder.encodeParams(buildResult.params, buildResult.typeString) // encodedParams
+             ],
+             manager,
+             gasEstimate,
+             feeData,
+             logger, // Pass the global logger
+             dryRun
+        };
+
+        // Call the refactored executeTransaction
         const executionResult = await executeTransaction(
-            opp,
-            simulationResult,
-            // NOTE: profitabilityResult is REMOVED from the arguments here
-            manager,
-            gasEstimator // Pass gasEstimator as txExecutor needs it for final fees/nonce
-            // Pass contextLogger if executeTransaction needs it, e.g.: , contextLogger
+            executorArgs.contractFunctionName,
+            executorArgs.contractCallArgs,
+            executorArgs.manager,
+            executorArgs.gasEstimate,
+            executorArgs.feeData,
+            executorArgs.logger,
+            executorArgs.dryRun
         );
 
-        // Check execution result
+        // --- 10. Handle Execution Result ---
         if (executionResult.success) {
-            contextLogger.info(`${logPrefix} 🎉🎉🎉 SUCCESSFULLY EXECUTED Transaction: ${executionResult.txHash}`);
+            logger.info(`${logPrefix} 🎉🎉🎉 SUCCESSFULLY ${dryRun ? 'DRY RUN' : 'EXECUTED'} Transaction: ${executionResult.txHash}`);
+            // Include profitability details in the successful return
             return { executed: true, success: true, txHash: executionResult.txHash, error: null, simulationResult, profitabilityResult };
         } else {
-            contextLogger.error(`${logPrefix} Transaction execution failed. Hash: ${executionResult.txHash || 'N/A'}, Reason: ${executionResult.error?.message || 'Unknown'}`);
-            const finalError = executionResult.error instanceof Error ? executionResult.error : new ArbitrageError(executionResult.error?.message || 'Execution failed', 'EXECUTION_ERROR');
-            // Include simulation/profitability details in the failure return
-            return { executed: true, success: false, txHash: executionResult.txHash, error: finalError, simulationResult, profitabilityResult };
-        }
-
-    } catch (oppError) {
-        // Catch errors from simulation, prep, or checks before execution attempt
-        contextLogger.error(`${logPrefix} Error processing opportunity: ${oppError.message}`);
-        if (oppError instanceof ArbitrageError && oppError.stack) { console.error(oppError.stack); }
-        else { console.error(oppError); }
-        handleError(oppError, `Opportunity Processor (${opp.groupName || opp.type})`);
-        // Include simulation details if available, even on error
-        return { executed: false, success: false, txHash: null, error: oppError, simulationResult };
-    }
-}
-
-module.exports = { processOpportunity };
+            logger.error(`${logPrefix} Transaction execution failed. Hash: ${executionResult.txHash || 'N/A'}, Reason: ${executionResult.error?.message || 'Unknown Error'}`, { errorObj: executionR
