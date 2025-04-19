@@ -1,5 +1,5 @@
 // core/profitCalculator.js
-// --- VERSION UPDATED FOR ETHERS V6 UTILS & PHASE 1 REFACTOR ---
+// --- VERSION UPDATED FOR ETHERS V6 UTILS (Removed isBigNumberish) & PHASE 1 REFACTOR ---
 
 const { ethers } = require('ethers'); // Ethers v6+
 const logger = require('../utils/logger');
@@ -156,7 +156,7 @@ class ProfitCalculator {
         const grossProfitBigInt = ethers.toBigInt(grossProfitAmount);
         if (sdkToken.symbol === this.nativeSymbol && sdkToken.decimals === this.nativeDecimals) {
             logger.debug(`${logPrefix} Gross profit is already in native token (${this.nativeSymbol}).`);
-            return grossProfitBigInt;
+            return grossProfitBigInt; // Already in Wei (or native smallest unit)
         }
         // Special case: Wrapped native token (e.g., WETH)
         if (sdkToken.symbol === this.wrappedNativeSymbol && sdkToken.decimals === this.nativeDecimals) {
@@ -199,13 +199,14 @@ class ProfitCalculator {
      /** Helper to format BigNumberish values for logging */
     _format(value, decimals = this.nativeDecimals) {
          if (value === null || typeof value === 'undefined') return 'N/A';
-         // Check if it's BigInt or BigNumber-like before formatting
-         if (!ethers.isBigNumberish(value)) return 'Invalid Value';
+         // --- REMOVED ethers.isBigNumberish check ---
+         // Directly try formatting. Let ethers.formatUnits handle errors if value isn't BigInt compatible.
          try {
               // --- Use ethers.formatUnits (v6 syntax) ---
               return ethers.formatUnits(value, decimals);
          } catch (formatError) {
-             logger.warn(`[ProfitCalculator] Error formatting value: ${value?.toString()} with decimals ${decimals}`, formatError);
+             // Log the error if formatting fails
+             logger.warn(`[ProfitCalculator _format] Error formatting value: ${value?.toString()} with decimals ${decimals}`, formatError);
              return 'Format Error';
          }
     }
