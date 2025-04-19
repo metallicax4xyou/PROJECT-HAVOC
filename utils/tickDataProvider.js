@@ -1,4 +1,4 @@
-// utils/tickDataProvider.js
+// utils/tickDataProvider.js - Cache Disabled
 const { ethers } = require('ethers');
 const logger = require('./logger');
 const { tickToWord } = require('./tickUtils');
@@ -18,53 +18,17 @@ class LensTickDataProvider {
             logger.error(`[LensTickDataProvider] FAILED to initialize ethers.Contract for TickLens: ${e.message}`);
             throw e;
         }
-        this.wordCache = new Map();
-        this.cacheTTL = 5000;
+        // Cache disabled
+        // this.wordCache = new Map();
+        // this.cacheTTL = 5000;
+        logger.warn('[LensTickDataProvider] Tick data cache is DISABLED for debugging.');
     }
 
-    async getCachedPopulatedTicks(poolAddress, wordPos) {
-        const cacheKey = `${poolAddress}-${wordPos}`;
-        const cachedEntry = this.wordCache.get(cacheKey);
+    // Removed getCachedPopulatedTicks helper - direct calls now
 
-        if (cachedEntry && (Date.now() - cachedEntry.timestamp < this.cacheTTL)) {
-            logger.debug(`[LensTickDataProvider Pool: ${poolAddress} WordPos: ${wordPos}] Cache HIT`);
-            return cachedEntry.data;
-        }
+    // Removed cleanupCache helper
 
-        logger.debug(`[LensTickDataProvider Pool: ${poolAddress} WordPos: ${wordPos}] Cache MISS or expired`);
-        if (!this.tickLensContract) { throw new Error("TickLens contract instance is not initialized."); }
-
-        logger.info(`[LensTickDataProvider Pool: ${poolAddress} WordPos: ${wordPos}] Calling TickLens.getPopulatedTicksInWord...`);
-        const ticksInWord = await this.tickLensContract.getPopulatedTicksInWord(poolAddress, wordPos);
-        logger.debug(`[LensTickDataProvider Pool: ${poolAddress} WordPos: ${wordPos}] Received ${ticksInWord?.length ?? 0} ticks from TickLens.`);
-
-        const processedTicks = [];
-        if (Array.isArray(ticksInWord)) {
-            ticksInWord.forEach(tickInfo => {
-                if (tickInfo && tickInfo.tick !== undefined && tickInfo.liquidityNet !== undefined) {
-                    const tick = Number(tickInfo.tick);
-                    const liquidityNet = BigInt(tickInfo.liquidityNet);
-                    if (!isNaN(tick)) {
-                        processedTicks.push({ tick: tick, liquidityNet: liquidityNet });
-                    } else { logger.warn(`[LensTickDataProvider Pool: ${poolAddress} WordPos: ${wordPos}] Parsed tick is NaN from tickInfo: ${JSON.stringify(tickInfo)}`); }
-                } else { logger.warn(`[LensTickDataProvider Pool: ${poolAddress} WordPos: ${wordPos}] Received invalid tickInfo structure: ${JSON.stringify(tickInfo)}`); }
-            });
-        } else { logger.warn(`[LensTickDataProvider Pool: ${poolAddress} WordPos: ${wordPos}] TickLens call returned non-array data: ${JSON.stringify(ticksInWord)}`); }
-
-        this.wordCache.set(cacheKey, { data: processedTicks, timestamp: Date.now() });
-        this.cleanupCache();
-        return processedTicks;
-    }
-
-     cleanupCache() {
-         const now = Date.now();
-         for (const [key, entry] of this.wordCache.entries()) {
-             if (now - entry.timestamp >= this.cacheTTL) {
-                 this.wordCache.delete(key);
-             }
-         }
-     }
-
+    // getPopulatedTicksInRange calls TickLens directly now
     async getPopulatedTicksInRange(poolAddress, tickLower, tickUpper, tickSpacing) {
         const logPrefix = `[LensTickDataProvider Pool: ${poolAddress}]`;
         if (!ethers.isAddress(poolAddress)) { logger.error(`${logPrefix} Invalid pool address provided.`); return []; }
@@ -82,20 +46,41 @@ class LensTickDataProvider {
         for (let wordPos = wordLower; wordPos <= wordUpper; wordPos++) {
             const iterLogPrefix = `${logPrefix} WordPos: ${wordPos}`;
             try {
-                 const ticksFromCacheOrFetch = await this.getCachedPopulatedTicks(poolAddress, wordPos);
-                 ticksFromCacheOrFetch.forEach(tickInfo => {
+                // --- Direct TickLens Call (No Cache) ---
+                if (!this.tickLensContract) { throw new Error("TickLens contract instance is not initialized."); }
+                logger.info(`${iterLogPrefix} Calling TickLens.getPopulatedTicksInWord... (Cache Disabled)`);
+                const ticksInWord = await this.tickLensContract.getPopulatedTicksInWord(poolAddress, wordPos);
+                logger.debug(`${iterLogPrefix} Received ${ticksInWord?.length ?? 0} ticks from TickLens.`);
+
+                const processedTicks = [];
+                 if (Array.isArray(ticksInWord)) {
+                     ticksInWord.forEach(tickInfo => {
+                         if (tickInfo && tickInfo.tick !== undefined && tickInfo.liquidityNet !== undefined) {
+                             const tick = Number(tickInfo.tick);
+                             const liquidityNet = BigInt(tickInfo.liquidityNet);
+                             if (!isNaN(tick)) {
+                                 processedTicks.push({ tick: tick, liquidityNet: liquidityNet });
+                             } else { logger.warn(`${iterLogPrefix} Parsed tick is NaN from tickInfo: ${JSON.stringify(tickInfo)}`); }
+                         } else { logger.warn(`${iterLogPrefix} Received invalid tickInfo structure: ${JSON.stringify(tickInfo)}`); }
+                     });
+                 } else { logger.warn(`${iterLogPrefix} TickLens call returned non-array data: ${JSON.stringify(ticksInWord)}`); }
+                 // --- End Direct TickLens Call ---
+
+                 // Filter ticks from this word to be within the requested range
+                 processedTicks.forEach(tickInfo => {
                      if (tickInfo.tick >= tickLower && tickInfo.tick <= tickUpper) {
                          allPopulatedTicks.push(tickInfo);
                      }
                  });
+
             } catch (error) {
-                logger.error(`${iterLogPrefix} FAILED call via getCachedPopulatedTicks. Error: ${error.message}`);
+                logger.error(`${iterLogPrefix} FAILED call to TickLens. Error: ${error.message}`);
                 if (error.code === 'CALL_EXCEPTION') { logger.error(`${iterLogPrefix} CALL_EXCEPTION details: Action=${error.action}, Code=${error.code}, Reason=${error.reason}, Tx=${JSON.stringify(error.transaction)} Data=${error.data}`); }
                 else { logger.error(`${iterLogPrefix} Non-CALL_EXCEPTION details: Code=${error.code}, ${JSON.stringify(error)}`); }
                 logger.error(`${logPrefix} Aborting tick fetch for this range due to error.`);
-                return [];
+                return []; // Return empty array on error
             }
-        }
+        } // End for loop
 
         allPopulatedTicks.sort((a, b) => a.tick - b.tick);
         logger.info(`${logPrefix} Successfully processed ${allPopulatedTicks.length} populated ticks in range [${tickLower}, ${tickUpper}]`);
@@ -103,71 +88,68 @@ class LensTickDataProvider {
     }
 
     // --- SDK TickProvider Interface Methods ---
+    // These now call getPopulatedTicksInRange directly for the required word
 
     async getTick(tick, tickSpacing, poolAddress) {
         const wordPos = tickToWord(tick, tickSpacing);
-        if (wordPos === null) {
-             logger.error(`[LensTickDataProvider Pool: ${poolAddress}] Could not calculate wordPos for getTick(${tick})`);
-             return null;
-        }
-        // Changed logger.trace to logger.debug
-        logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] getTick(${tick}) - Fetching/getting word ${wordPos} from cache`);
+        if (wordPos === null) { logger.error(`[LensTickDataProvider Pool: ${poolAddress}] Could not calculate wordPos for getTick(${tick})`); return null; }
+
+        // Calculate the range for the single word needed
+        const tickLower = wordPos * tickSpacing * 256;
+        const tickUpper = tickLower + tickSpacing * 256 - 1;
+
+        logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] getTick(${tick}) - Fetching word range [${tickLower}, ${tickUpper}] (WordPos: ${wordPos})`);
         let ticksInWord;
         try {
-             ticksInWord = await this.getCachedPopulatedTicks(poolAddress, wordPos);
+             // Directly fetch the required word
+             ticksInWord = await this.getPopulatedTicksInRange(poolAddress, tickLower, tickUpper, tickSpacing);
         } catch (error) {
-             logger.error(`[LensTickDataProvider Pool: ${poolAddress}] Error calling getCachedPopulatedTicks for getTick(${tick}): ${error.message}`);
+             logger.error(`[LensTickDataProvider Pool: ${poolAddress}] Error calling getPopulatedTicksInRange for getTick(${tick}): ${error.message}`);
              throw new Error(`Failed to fetch tick data for getTick: ${error.message}`);
         }
         const foundTick = ticksInWord.find(t => t.tick === tick);
         if (foundTick) {
-             // Changed logger.trace to logger.debug
-             logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] getTick(${tick}) - Found in word ${wordPos}, liquidityNet=${foundTick.liquidityNet}`);
+             logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] getTick(${tick}) - Found in fetched word ${wordPos}, liquidityNet=${foundTick.liquidityNet}`);
             return { liquidityNet: foundTick.liquidityNet };
         } else {
-             // Changed logger.trace to logger.debug
              logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] getTick(${tick}) - Tick not found in fetched word ${wordPos}.`);
-             return null;
+             return null; // Return null if tick is not initialized/found
         }
     }
 
     async nextInitializedTickWithinOneWord(tick, lte, tickSpacing, poolAddress) {
         const wordPos = tickToWord(tick, tickSpacing);
-         if (wordPos === null) {
-             logger.error(`[LensTickDataProvider Pool: ${poolAddress}] Could not calculate wordPos for nextInitializedTickWithinOneWord(${tick})`);
-             return null;
-         }
-        logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] nextInitializedTickWithinOneWord(${tick}, lte=${lte}) - Fetching/getting word ${wordPos} from cache`);
+        if (wordPos === null) { logger.error(`[LensTickDataProvider Pool: ${poolAddress}] Could not calculate wordPos for nextInitializedTickWithinOneWord(${tick})`); return null; }
+
+         // Calculate the range for the single word needed
+         const tickLower = wordPos * tickSpacing * 256;
+         const tickUpper = tickLower + tickSpacing * 256 - 1;
+
+        logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] nextInitializedTickWithinOneWord(${tick}, lte=${lte}) - Fetching word range [${tickLower}, ${tickUpper}] (WordPos: ${wordPos})`);
         let ticksInWord;
         try {
-            ticksInWord = await this.getCachedPopulatedTicks(poolAddress, wordPos);
+             // Directly fetch the required word
+             ticksInWord = await this.getPopulatedTicksInRange(poolAddress, tickLower, tickUpper, tickSpacing);
         } catch(error){
-            logger.error(`[LensTickDataProvider Pool: ${poolAddress}] Error calling getCachedPopulatedTicks for nextInitializedTickWithinOneWord(${tick}): ${error.message}`);
+            logger.error(`[LensTickDataProvider Pool: ${poolAddress}] Error calling getPopulatedTicksInRange for nextInitializedTickWithinOneWord(${tick}): ${error.message}`);
             throw new Error(`Failed to fetch tick data for nextInitializedTickWithinOneWord: ${error.message}`);
         }
         if (!ticksInWord || ticksInWord.length === 0) {
-             // Changed logger.trace to logger.debug
-            logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] No initialized ticks found in word ${wordPos} for nextInitializedTickWithinOneWord(${tick}).`);
+            logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] No initialized ticks found in fetched word ${wordPos} for nextInitializedTickWithinOneWord(${tick}).`);
             return null;
         }
-        ticksInWord.sort((a, b) => a.tick - b.tick);
+
+        ticksInWord.sort((a, b) => a.tick - b.tick); // Ensure sorted
         let resultTick = null;
         if (lte) {
             for (let i = ticksInWord.length - 1; i >= 0; i--) {
-                if (ticksInWord[i].tick <= tick) {
-                    resultTick = ticksInWord[i].tick;
-                    break;
-                }
+                if (ticksInWord[i].tick <= tick) { resultTick = ticksInWord[i].tick; break; }
             }
         } else {
             for (let i = 0; i < ticksInWord.length; i++) {
-                if (ticksInWord[i].tick > tick) {
-                    resultTick = ticksInWord[i].tick;
-                    break;
-                }
+                if (ticksInWord[i].tick > tick) { resultTick = ticksInWord[i].tick; break; }
             }
         }
-        // Changed logger.trace to logger.debug
         logger.debug(`[LensTickDataProvider Pool: ${poolAddress}] nextInitializedTickWithinOneWord(${tick}, lte=${lte}) result: ${resultTick}`);
         return resultTick;
     }
