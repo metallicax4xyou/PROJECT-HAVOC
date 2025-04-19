@@ -279,4 +279,31 @@ async function processOpportunity(opp, engineContext) {
             // Include profitability details in the successful return
             return { executed: true, success: true, txHash: executionResult.txHash, error: null, simulationResult, profitabilityResult };
         } else {
-            logger.error(`${logPrefix} Transaction execution failed. Hash: ${executionResult.txHash || 'N/A'}, Reason: ${executionResult.error?.message || 'Unknown Error'}`, { errorObj: executionR
+                       logger.error(`${logPrefix} Transaction execution failed. Hash: ${executionResult.txHash || 'N/A'}, Reason: ${executionResult.error?.message || 'Unknown Error'}`, { errorObj: executionResult.error }); // THIS LINE WAS THE LAST ONE YOU PASTED
+            // Ensure error is properly formed
+            const finalError = executionResult.error instanceof Error ? executionResult.error : new ArbitrageError(executionResult.error?.message || 'Execution failed', 'EXECUTION_ERROR');
+            // Return executed=true because an attempt was made, but success=false
+            return { executed: true, success: false, txHash: executionResult.txHash, error: finalError, simulationResult, profitabilityResult };
+        } // END of else block for executionResult handling
+
+    } catch (oppError) {
+        // Centralized error handling for the entire process
+        const message = oppError.message || 'Unknown error';
+        logger.error(`${logPrefix} Error processing opportunity: ${message}`, {
+             errorName: oppError.name,
+             errorCode: oppError.code, // Include specific codes if available
+             errorStack: oppError.stack // Uncomment for deep debugging if needed
+        });
+
+        // Use centralized handler if available
+        if (typeof handleError === 'function') {
+            handleError(oppError, `Opportunity Processor (${opp?.groupName || opp?.type || 'Unknown'})`);
+        }
+
+        // Standardize return structure on error
+        const returnError = (oppError instanceof ArbitrageError) ? oppError : new ArbitrageError(`Unhandled error: ${message}`, 'PROCESSOR_ERROR', oppError);
+        return { executed: false, success: false, txHash: null, error: returnError, simulationResult, profitabilityResult }; // Include results if available
+    } // END of main try...catch block
+} // END of processOpportunity function
+
+module.exports = { processOpportunity }; // Export the function
