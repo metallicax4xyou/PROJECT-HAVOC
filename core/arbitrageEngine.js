@@ -2,42 +2,39 @@
 
 const { ethers } = require('ethers');
 const { PoolScanner } = require('./poolScanner');
-const QuoteSimulator = require('./quoteSimulator'); // Keep for calling simulateArbitrage
-const GasEstimator = require('./gasEstimator'); // Keep for potential future integration
+const QuoteSimulator = require('./quoteSimulator'); // Now includes simulateArbitrage
+const GasEstimator = require('./gasEstimator');
+const ProfitCalculator = require('./profitCalculator'); // Import ProfitCalculator
 const logger = require('../utils/logger');
 const ErrorHandler = require('../utils/errorHandler');
-const FlashSwapManager = require('./flashSwapManager'); // Need type hint / validation
-const { TOKENS } = require('../constants/tokens'); // Keep for now, might be needed for token lookups?
+const FlashSwapManager = require('./flashSwapManager');
+// const { TOKENS } = require('../constants/tokens'); // Might not be needed directly here
 
-// Load FlashSwap ABI (Consider moving to constants/abis.js if not already there)
+// Load FlashSwap ABI (Ensure this path is correct)
 let flashSwapAbi;
 try {
-    // Assuming abi is directly exported from the JSON require if it's CommonJS
     flashSwapAbi = require('../abis/FlashSwap.json');
-    if (!flashSwapAbi || (Array.isArray(flashSwapAbi) && flashSwapAbi.length === 0) || (typeof flashSwapAbi === 'object' && !flashSwapAbi.abi && Object.keys(flashSwapAbi).length === 0) ) {
+    if (!flashSwapAbi || (Array.isArray(flashSwapAbi) && flashSwapAbi.length === 0) || (typeof flashSwapAbi === 'object' && !flashSwapAbi.abi && Object.keys(flashSwapAbi).length === 0)) {
         throw new Error("ABI loaded is empty or invalid structure.");
     }
-    // If the require gives { abi: [...] }, use flashSwapAbi.abi
-    if (flashSwapAbi.abi) {
-        flashSwapAbi = flashSwapAbi.abi;
-    }
+    if (flashSwapAbi.abi) { flashSwapAbi = flashSwapAbi.abi; } // Use nested ABI if present
     logger.debug("[Engine] Successfully loaded FlashSwap ABI.");
 } catch (err) {
     logger.fatal("[Engine] CRITICAL: FAILED TO LOAD FlashSwap ABI.", err);
-    // Ensure process exit happens correctly even in async context potentially
     process.nextTick(() => process.exit(1));
-    // Throw error to prevent constructor from proceeding partially
     throw new Error("Failed to load FlashSwap ABI.");
 }
 
-// Helper for safe stringify (can be moved to utils later)
+// Import the executor function
+const { executeTransaction } = require('./txExecutor');
+
+// Helper for safe stringify
 function safeStringify(obj, indent = null) {
     try { return JSON.stringify(obj, (_, value) => typeof value === 'bigint' ? value.toString() : value, indent); }
     catch (e) { return "[Unstringifiable Object]"; }
 }
 
 class ArbitrageEngine {
-    // --- Updated Constructor Signature ---
     constructor(manager, config) {
         if (!manager || !(manager instanceof FlashSwapManager)) {
              logger.fatal('[Engine Constructor] Invalid FlashSwapManager instance received.');
@@ -49,57 +46,58 @@ class ArbitrageEngine {
         }
 
         this.manager = manager;
-        this.config = config; // Use the passed-in consolidated config
-        this.provider = manager.getProvider(); // Get provider from manager
-        this.signer = manager.getSigner(); // Get nonce-managed signer from manager
+        this.config = config;
+        this.provider = manager.getProvider();
+        this.signer = manager.getSigner(); // This is the NonceManager instance
+        this.flashSwapContract = manager.getFlashSwapContract(); // Contract instance connected to NonceManager
 
-        // Get FlashSwap contract instance from manager
-        this.flashSwapContract = manager.getFlashSwapContract();
-        if (!this.flashSwapContract) { // Add check
-             throw new Error(`[Engine Constructor] Failed to get FlashSwap contract instance from manager.`);
-        }
-        logger.info(`[Engine] Using FlashSwap contract at ${this.flashSwapContract.target} via Manager`); // Use target for address
+        logger.info(`[Engine] Using FlashSwap contract at ${this.flashSwapContract.target} via Manager`);
 
-        // --- Initialize other components ---
         logger.debug('[Engine Constructor] Initializing PoolScanner...');
         try {
-            // Pass the main config object and the provider
             this.poolScanner = new PoolScanner(this.config, this.provider);
         } catch(scannerError){
              logger.fatal(`[Engine Constructor] Failed to initialize PoolScanner: ${scannerError.message}`);
              throw scannerError;
         }
 
-        // GasEstimator might be used later for net profit check
-        this.gasEstimator = new GasEstimator(this.provider);
+        this.gasEstimator = new GasEstimator(this.provider); // Keep for future profit calc
         this.isRunning = false;
         this.cycleCount = 0;
-        // Get cycle interval from the main config object
-        this.cycleInterval = this.config.CYCLE_INTERVAL_MS || 5000; // Use || for safety
-
-        // Remove profitThresholdUsd - profit check is now per-group in Wei via ProfitCalculator
-        // this.profitThresholdUsd = ...;
+        this.cycleInterval = this.config.CYCLE_INTERVAL_MS || 5000;
 
         logger.info('[Engine] Arbitrage Engine Constructor Finished.');
     }
 
     async initialize() {
-        // NonceManager is initialized within FlashSwapManager constructor
-        // PoolScanner initialization requires no async setup currently
         logger.info('[Engine] Arbitrage Engine Initialized Successfully.');
+        // Attempt to initialize NonceManager early (optional, depends on NonceManager design)
+        try {
+            if (this.signer && typeof this.signer.initialize === 'function') {
+                 await this.signer.initialize();
+                 logger.info(`[Engine] Nonce Manager initialized via Engine.`);
+            }
+        } catch (nonceError) {
+             logger.error(`[Engine] Failed to initialize Nonce Manager during engine init: ${nonceError.message}`);
+             // Decide if this is fatal or can be recovered later
+             throw nonceError; // Rethrow as it's critical for execution
+        }
     }
 
     async start() {
         if (this.isRunning) { logger.warn('[Engine] Engine already running.'); return; }
         this.isRunning = true;
-        logger.info(`[Engine] Starting arbitrage monitoring loop for ${this.config.NAME}...`); // Use config.NAME
+        logger.info(`[Engine] Starting arbitrage monitoring loop for ${this.config.NAME}...`);
         logger.info(`[Engine] Cycle Interval: ${this.cycleInterval / 1000} seconds.`);
-        // Remove Min Profit Threshold log here - it's per group now
-        // logger.info(`[Engine] Minimum Profit Threshold: ...`);
+        // Run first cycle immediately, then set interval
         setImmediate(() => this.runCycle());
         this.intervalId = setInterval(() => {
             if (this.isRunning) { this.runCycle(); }
-            else { logger.info('[Engine] Stopping interval loop.'); clearInterval(this.intervalId); this.intervalId = null; }
+            else {
+                 logger.info('[Engine] Stopping interval loop.');
+                 if(this.intervalId) clearInterval(this.intervalId);
+                 this.intervalId = null;
+            }
         }, this.cycleInterval);
         logger.info('>>> Engine started. Monitoring for opportunities... (Press Ctrl+C to stop) <<<');
     }
@@ -107,8 +105,8 @@ class ArbitrageEngine {
     stop() {
         if (!this.isRunning) { logger.warn('[Engine] Engine not running.'); return; }
         logger.info('[Engine] Stopping Arbitrage Engine...');
-        this.isRunning = false;
-        // Clear interval if it exists
+        this.isRunning = false; // Signal runCycle to stop
+        // Clear interval if exists
         if (this.intervalId) {
             clearInterval(this.intervalId);
             this.intervalId = null;
@@ -120,102 +118,141 @@ class ArbitrageEngine {
         this.cycleCount++;
         const cycleStartTime = Date.now();
         logger.info(`\n===== [Engine] Starting Cycle #${this.cycleCount} =====`);
-        try {
-            // --- Use helper on config object to get flat list of pools ---
-            const poolInfosToFetch = this.config.getAllPoolConfigs();
 
+        try {
+            // 1. Get Pool List from Config
+            const poolInfosToFetch = this.config.getAllPoolConfigs();
             if (!poolInfosToFetch || poolInfosToFetch.length === 0) {
-                 logger.warn('[Engine runCycle] No pool configurations found in config.getAllPoolConfigs(). Check config setup.');
+                 logger.warn('[Engine runCycle] No pool configurations found. Check config setup.');
                  this.logCycleEnd(cycleStartTime); return;
             }
-            logger.debug(`[Engine runCycle] Prepared ${poolInfosToFetch.length} pool infos from config for scanner.`);
-            // --- END Preparation ---
+            logger.debug(`[Engine runCycle] Prepared ${poolInfosToFetch.length} pool infos for scanner.`);
 
-
-            // --- Call fetchPoolStates WITH the poolInfos argument ---
+            // 2. Fetch Live Pool States
             const livePoolStatesMap = await this.poolScanner.fetchPoolStates(poolInfosToFetch);
-
-            // --- Log fetched state count ---
             const fetchedCount = livePoolStatesMap ? Object.keys(livePoolStatesMap).length : 0;
             if (fetchedCount === 0) {
-                logger.warn(`[Engine runCycle] fetchPoolStates returned 0 live states (attempted: ${poolInfosToFetch.length}). Check RPC or pool addresses.`);
+                logger.warn(`[Engine runCycle] fetchPoolStates returned 0 live states (attempted: ${poolInfosToFetch.length}).`);
                 this.logCycleEnd(cycleStartTime); return;
             }
             logger.info(`[Engine] Fetched ${fetchedCount} live pool states.`);
 
-            // --- Call findOpportunities WITH the livePoolStatesMap ---
+            // 3. Find Opportunities (Scanner does the heavy lifting)
             const potentialOpportunities = this.poolScanner.findOpportunities(livePoolStatesMap);
-
             if (potentialOpportunities.length === 0) {
                 logger.info('[Engine] No potential opportunities found this cycle.');
                 this.logCycleEnd(cycleStartTime); return;
             }
             logger.info(`[Engine] Found ${potentialOpportunities.length} potential opportunities.`);
 
-            // --- Simulation & Execution Logic (NEEDS MAJOR REWORK for Triangular/Profit Calc) ---
-            // Placeholder for where the new logic will go:
-            // 1. Iterate opportunities
-            // 2. For each opp:
-            //    a. Determine Group Config (groupName, borrowToken, borrowAmount, minNetProfit) based on opp.pools
-            //    b. Simulate using QuoteSimulator.simulateArbitrage(opp, borrowAmount, borrowToken) - NEEDS UPDATED SIGNATURE
-            //    c. If simulation successful:
-            //       i. Prepare tx data using TxExecutor logic (needs refactor) - get estimated gas limit
-            //       ii. Check profitability using ProfitCalculator.checkProfitability(simResult, provider, groupConfig, estimatedGasLimit) - NEEDS UPDATED SIGNATURE?
-            //       iii. If profitable:
-            //            - Execute using TxExecutor - Needs refactor for triangular
-            //
-            logger.warn('[Engine] --- SIMULATION & EXECUTION LOGIC NEEDS REFACTOR ---');
-            logger.info(`[Engine] Found ${potentialOpportunities.length} potential opps (raw scan), but skipping simulation/execution until refactored.`);
+            // --- 4. Process Opportunities (Simulation, Profit Check, Execution) ---
+            let executedThisCycle = false; // Flag to execute only one opp per cycle
 
+            for (const opp of potentialOpportunities) {
+                if (executedThisCycle) break; // Only execute the first profitable opp found
 
-            // TODO: REMOVE OLD SIMULATION/EXECUTION LOGIC BELOW AFTER REFACTOR
-            /*
-            // --- OLD Simulation Logic ---
-            const simulationPromises = potentialOpportunities.map(async (opp) => { ... }); // OLD logic assumes 2-hop
-            const simulationResults = await Promise.all(simulationPromises);
-            const profitableResults = simulationResults.filter(r => r && r.profitable && r.grossProfit > 0n); // OLD logic
-            logger.info(`[Engine] ${profitableResults.length} opportunities passed OLD simulation (Gross Profit Check Only).`);
-            if (profitableResults.length === 0) { this.logCycleEnd(cycleStartTime); return; }
+                const logPrefix = `[Engine OppProc Type: ${opp.type}, Group: ${opp.groupName}]`;
+                logger.info(`${logPrefix} Processing potential opportunity...`);
+                logger.debug(`${logPrefix} Details: ${safeStringify(opp)}`);
 
-            // --- OLD Execution Logic ---
-            const bestOpportunity = profitableResults.sort((a, b) => Number(b.grossProfit - a.grossProfit))[0]; // OLD logic
-            logger.info(`[Engine] Best Opp (OLD) Gross Profit: ${ethers.formatUnits(bestOpportunity.grossProfit, bestOpportunity.token0.decimals)} ${bestOpportunity.token0.symbol} in group ${bestOpportunity.group}`); // OLD logic
-
-             if (bestOpportunity.grossProfit > 0n) { // OLD logic - NO NET PROFIT CHECK
-                logger.info(`[Engine] >>> PROFITABLE OPPORTUNITY DETECTED (OLD LOGIC - GROSS ONLY) <<<`);
-                logger.info(`[Engine] Details: Group=${bestOpportunity.group}, Hop1=${bestOpportunity.poolHop1.address}(${bestOpportunity.poolHop1.fee} fee), Hop2=${bestOpportunity.poolHop2.address}(${bestOpportunity.poolHop2.fee} fee)`); // OLD logic
-
-                // Check DRY_RUN using consolidated config
-                if (this.config.DRY_RUN) {
-                    logger.warn('[Engine] DRY RUN ENABLED. Transaction will NOT be sent.');
-                } else {
-                    logger.info('[Engine] Attempting to execute Flash Swap (OLD LOGIC - LIKELY WILL FAIL)...');
-                    try {
-                        // --- THIS CALL IS INCORRECT for triangular AND uses old contract function name likely ---
-                        const tx = await this.flashSwapContract.executeSwap( // WRONG FUNCTION / PARAMS
-                             bestOpportunity.poolHop1.address,
-                             bestOpportunity.poolHop2.address,
-                             bestOpportunity.token0.address,
-                             bestOpportunity.initialAmountToken0,
-                             bestOpportunity.poolHop1.fee,
-                             bestOpportunity.poolHop2.fee
-                         );
-                         // ... rest of old execution ...
-                    } catch (error) { ... } // OLD error handling
+                // We only handle triangular for now
+                if (opp.type !== 'triangular') {
+                    logger.warn(`${logPrefix} Skipping opportunity type '${opp.type}' (only 'triangular' supported).`);
+                    continue;
                 }
-            } else { ... } // OLD logic
-            */
-            // END TODO REMOVE OLD LOGIC
+
+                try {
+                    // a. Find Group Config
+                    // Assumes opp.groupName matches a group name in config.POOL_GROUPS
+                    const groupConfig = this.config.POOL_GROUPS.find(g => g.name === opp.groupName);
+                    if (!groupConfig) {
+                        logger.error(`${logPrefix} Could not find group config for group name '${opp.groupName}'. Skipping.`);
+                        continue;
+                    }
+                    if (!groupConfig.sdkBorrowToken || !groupConfig.borrowAmount || typeof groupConfig.minNetProfit === 'undefined') {
+                        logger.error(`${logPrefix} Incomplete group config found for '${opp.groupName}'. Skipping.`);
+                        continue;
+                    }
+
+                    // b. Verify Borrow Token Matches Path Start
+                    // Assumes the triangular path always starts with the group's borrow token
+                    const borrowTokenSymbol = groupConfig.borrowTokenSymbol;
+                    if (opp.pathSymbols[0] !== borrowTokenSymbol) {
+                        logger.error(`${logPrefix} Opportunity path start token (${opp.pathSymbols[0]}) does not match group borrow token (${borrowTokenSymbol}). Skipping. (Logic assumes borrowing start token).`);
+                        continue;
+                    }
+                    const initialAmount = groupConfig.borrowAmount; // Amount to borrow (BigInt)
+
+                    // c. Simulate
+                    logger.info(`${logPrefix} Simulating path: ${opp.pathSymbols.join(' -> ')} with ${ethers.formatUnits(initialAmount, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}`);
+                    const simulationResult = await QuoteSimulator.simulateArbitrage(opp, initialAmount);
+
+                    if (!simulationResult) {
+                        logger.warn(`${logPrefix} Simulation returned null. Skipping.`);
+                        continue;
+                    }
+                    if (simulationResult.error) {
+                        logger.warn(`${logPrefix} Simulation failed: ${simulationResult.error}. Skipping.`);
+                        continue;
+                    }
+                    if (!simulationResult.profitable) {
+                        logger.info(`${logPrefix} Simulation shows NO gross profit (${ethers.formatUnits(simulationResult.grossProfit, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}). Skipping.`);
+                        continue;
+                    }
+
+                    logger.info(`${logPrefix} ✅ Simulation shows POSITIVE gross profit: ${ethers.formatUnits(simulationResult.grossProfit, groupConfig.sdkBorrowToken.decimals)} ${borrowTokenSymbol}`);
+
+                    // d. (Deferred) Net Profit Check & Gas Estimation
+                    // TODO: Implement full profit check using ProfitCalculator
+                    // Requires:
+                    // 1. Prepare tx data using TxExecutor logic (or a helper) to get gas estimate input
+                    // 2. Call gasEstimator.estimateGasLimit(txRequestForGas)
+                    // 3. Call ProfitCalculator.checkProfitability(simulationResult, this.provider, groupConfig, estimatedGasLimit)
+                    // 4. Check result.isProfitable before proceeding
+
+                    logger.warn(`${logPrefix} Net profit check deferred. Proceeding based on positive gross profit.`);
+                    const isProfitableNet = true; // TEMPORARY ASSUMPTION FOR TESTING FLOW
+
+                    // e. Execute if profitable
+                    if (isProfitableNet) {
+                        logger.info(`${logPrefix} >>> PROFITABLE OPPORTUNITY CONFIRMED (Gross Profit). Attempting Execution... <<<`);
+
+                        // Call the refactored executor
+                        const executionResult = await executeTransaction(
+                            opp,
+                            simulationResult, // Pass the full simulation result
+                            this.manager,      // Pass the FlashSwapManager
+                            this.gasEstimator  // Pass the GasEstimator
+                        );
+
+                        if (executionResult.success) {
+                            logger.info(`${logPrefix} ✅✅✅ EXECUTION SUCCEEDED! TxHash: ${executionResult.txHash}`);
+                            executedThisCycle = true; // Stop processing after first successful execution
+                        } else {
+                            logger.error(`${logPrefix} ❌ Execution FAILED: ${executionResult.error?.message || 'Unknown execution error'}`);
+                            // Log details if available in ArbitrageError
+                            if (executionResult.error instanceof ArbitrageError && executionResult.error.details) {
+                                logger.error(`${logPrefix} Execution Details: ${safeStringify(executionResult.error.details)}`);
+                            }
+                        }
+                    } else {
+                         // This block will be reached when net profit check is implemented
+                         logger.info(`${logPrefix} Opportunity not profitable after estimated gas costs. Skipping execution.`);
+                    }
+
+                } catch (oppError) {
+                    logger.error(`${logPrefix} Error processing opportunity: ${oppError.message}`);
+                    ErrorHandler.handleError(oppError, `Engine Opportunity Processing (${opp.groupName})`);
+                    // Continue to the next opportunity
+                }
+            } // End for loop iterating opportunities
 
             this.logCycleEnd(cycleStartTime);
-        } catch (error) {
+
+        } catch (error) { // Catch errors in the main cycle logic (fetching, scanning)
             logger.error(`[Engine] Critical error during cycle execution: ${error.message}`);
-            if (ErrorHandler && typeof ErrorHandler.handleError === 'function') {
-                ErrorHandler.handleError(error, `Engine.runCycle (${this.cycleCount})`);
-            } else {
-                 console.error("[Emergency Log] Cycle Error: ErrorHandler not available.");
-            }
-            this.logCycleEnd(cycleStartTime, true); // Mark cycle as having error
+            ErrorHandler.handleError(error, `Engine.runCycle (${this.cycleCount})`);
+            this.logCycleEnd(cycleStartTime, true);
         }
     } // End runCycle
 
@@ -223,9 +260,6 @@ class ArbitrageEngine {
         const duration = Date.now() - startTime;
         logger.info(`===== [Engine] Cycle #${this.cycleCount} Finished (${duration}ms) ${hadError ? '[ERROR]' : ''} =====`);
     }
-
-    // Remove old convertToUsd - use ProfitCalculator/PriceFeed
-    // async convertToUsd(amount, token) { ... }
 }
 
 module.exports = { ArbitrageEngine };
