@@ -1,15 +1,14 @@
 // /workspaces/arbitrum-flash/core/poolScanner.js
-const { ethers, FixedNumber } = require('ethers'); // Keep FixedNumber for formatting
-const { Pool } = require('@uniswap/v3-sdk');
+const { ethers } = require('ethers'); // Keep ethers for constants like ZeroAddress if needed, but remove FixedNumber
 const { Token } = require('@uniswap/sdk-core');
 const { ABIS } = require('../constants/abis');
 const logger = require('../utils/logger');
 const { ArbitrageError, handleError } = require('../utils/errorHandler');
-const { getPoolInfo } = require('./poolDataProvider');
-const { TOKENS } = require('../constants/tokens');
+// Removed getPoolInfo require (redundant)
+const { TOKENS } = require('../constants/tokens'); // Use the SDK Token objects directly
 
 const MAX_UINT128 = (1n << 128n) - 1n;
-const Q96 = (1n << 96n);
+const Q96 = 1n << 96n;
 const Q192 = Q96 * Q96; // Precompute Q192
 
 // --- Configuration ---
@@ -39,149 +38,220 @@ function getTickSpacingFromFeeBps(feeBps) {
  * @returns {bigint|null} The scaled price ratio, or null on error.
  */
 function getScaledPriceRatio(sqrtPriceX96) {
-    if (sqrtPriceX96 === 0n) return 0n;
+    if (sqrtPriceX96 === 0n) return 0n; // Avoid division by zero if Q192 is used incorrectly below, though it shouldn't be 0
+    if (Q192 === 0n) { // Safety check, should never happen with constants defined above
+        logger.error("[getScaledPriceRatio] Q192 constant is zero!");
+        return null;
+    }
     try {
+        // Calculate numerator = (sqrtPriceX96^2) * SCALE
+        // Perform multiplication before division to maintain precision
         const sqrtP_squared = sqrtPriceX96 * sqrtPriceX96;
         const numerator = sqrtP_squared * BIGNUM_SCALE;
-        if (Q192 === 0n) {
-            logger.error("[getScaledPriceRatio] Q192 constant is zero!");
-            return null;
-        }
+
+        // Calculate priceRatioScaled = numerator / Q192
         const priceRatioScaled = numerator / Q192;
         return priceRatioScaled;
     } catch (error) {
+        // Catch potential BigInt errors (e.g., overflow if sqrtPriceX96 is absurdly large, though unlikely)
         logger.error(`[getScaledPriceRatio] Error calculating scaled price ratio: ${error.message} for sqrtP=${sqrtPriceX96}`);
         return null;
     }
 }
 
+
 // --- Helper to format scaled BigInt for logging (Safer) ---
-function formatScaledBigIntForLogging(scaledValue, scaleDecimals = BIGNUM_SCALE_DECIMALS) {
+function formatScaledBigIntForLogging(scaledValue, scaleDecimals = BIGNUM_SCALE_DECIMALS, displayDecimals = 8) {
     if (typeof scaledValue !== 'bigint') return 'N/A';
     try {
         const scaleFactor = 10n ** BigInt(scaleDecimals);
-        // Handle potential negative values if they ever occur (unlikely for rates)
+        if (scaleFactor === 0n) return scaledValue.toString() + ' (Scale Factor Zero)'; // Avoid division by zero
+
         const isNegative = scaledValue < 0n;
         const absValue = isNegative ? -scaledValue : scaledValue;
 
         const integerPart = absValue / scaleFactor;
         const fractionalPart = absValue % scaleFactor;
 
+        // Pad fractional part with leading zeros if needed
         const fractionalString = fractionalPart.toString().padStart(scaleDecimals, '0');
-        const displayDecimals = 8; // How many decimals to show in logs
+        // Slice to the desired number of display decimals
         const displayFractional = fractionalString.slice(0, displayDecimals);
 
         return `${isNegative ? '-' : ''}${integerPart}.${displayFractional}`;
     } catch (e) {
         logger.error(`Error formatting BigInt ${scaledValue} for logging: ${e.message}`);
-        return scaledValue.toString() + ` (Scale ${scaleDecimals})`; // Fallback
+        // Fallback to raw string representation with scale info
+        return scaledValue.toString() + ` (Scale ${scaleDecimals})`;
     }
 }
+
 
 class PoolScanner {
     // --- Constructor ---
     constructor(config, provider) {
         logger.debug(`[Scanner Constructor] Initializing...`);
         if (!config || !provider) {
-             const errMsg = 'PoolScanner requires config and provider.';
-             if (handleError) handleError(new Error(errMsg), 'ScannerInit'); else console.error(errMsg);
-             throw new ArbitrageError(errMsg, 'INITIALIZATION_ERROR');
+            const errMsg = 'PoolScanner requires config and provider.';
+            // Use handleError if available, otherwise console.error
+            if (typeof handleError === 'function') handleError(new Error(errMsg), 'ScannerInit'); else console.error(errMsg);
+            throw new ArbitrageError(errMsg, 'INITIALIZATION_ERROR');
         }
         this.config = config;
         this.provider = provider;
-        this.poolContractCache = {};
+        this.poolContractCache = {}; // Cache for ethers.Contract instances
         logger.debug(`[Scanner Constructor] Config object received keys: ${Object.keys(config || {}).join(', ')}`);
         logger.info(`[Scanner] Initialized.`);
     }
 
     // --- _getPoolContract ---
     _getPoolContract(poolAddress) {
-        if (!this.poolContractCache[poolAddress]) {
+        const lowerCaseAddress = poolAddress.toLowerCase();
+        if (!this.poolContractCache[lowerCaseAddress]) {
             try {
+                // Ensure ABIS and the specific ABI are loaded correctly
                 if (!ABIS || !ABIS.UniswapV3Pool) { throw new Error("UniswapV3Pool ABI not found in constants/abis."); }
-                this.poolContractCache[poolAddress] = new ethers.Contract(
-                    poolAddress, ABIS.UniswapV3Pool, this.provider
+                this.poolContractCache[lowerCaseAddress] = new ethers.Contract(
+                    poolAddress, // Use original casing for contract constructor
+                    ABIS.UniswapV3Pool,
+                    this.provider
                 );
             } catch (error) {
                  logger.error(`[Scanner _getPoolContract] Error creating contract instance for ${poolAddress}: ${error.message}`);
-                 if (handleError) handleError(error, `PoolScanner._getPoolContract (${poolAddress})`);
+                 if (typeof handleError === 'function') handleError(error, `PoolScanner._getPoolContract (${poolAddress})`);
+                 // Re-throw the error to prevent proceeding with an invalid contract instance
                  throw error;
             }
         }
-        return this.poolContractCache[poolAddress];
+        return this.poolContractCache[lowerCaseAddress];
     }
 
     // --- fetchPoolStates ---
+    // Fetches slot0 and liquidity for a list of pool configurations
     async fetchPoolStates(poolInfos) {
-         logger.debug(`[Scanner fetchPoolStates] Received ${poolInfos?.length ?? 0} poolInfos to fetch.`);
+        logger.debug(`[Scanner fetchPoolStates] Received ${poolInfos?.length ?? 0} poolInfos to fetch.`);
         if (!poolInfos || poolInfos.length === 0) {
-            logger.warn('[Scanner fetchPoolStates] No pool configurations provided. Cannot fetch states.'); return {};
+            logger.warn('[Scanner fetchPoolStates] No pool configurations provided. Cannot fetch states.');
+            return {}; // Return empty map if no pools to check
         }
         logger.info(`[Scanner] Fetching live states for ${poolInfos.length} configured pools...`);
-        const statePromises = []; const validPoolConfigsForStateFetch = [];
+
+        const statePromises = [];
+        const validPoolConfigsForStateFetch = []; // Keep track of configs we attempt to fetch
+
         for (const poolInfo of poolInfos) {
+            // Validate basic poolInfo structure needed for fetching
             if (!poolInfo || !poolInfo.address || !ethers.isAddress(poolInfo.address) || poolInfo.address === ethers.ZeroAddress || typeof poolInfo.fee !== 'number') {
-                logger.warn(`[Scanner fetchPoolStates] Skipping invalid poolInfo: ${JSON.stringify(poolInfo)}`); continue;
+                logger.warn(`[Scanner fetchPoolStates] Skipping invalid poolInfo: ${JSON.stringify(poolInfo)}`);
+                continue; // Skip this invalid config
             }
+
             try {
                 const poolContract = this._getPoolContract(poolInfo.address);
+                // Fetch slot0 and liquidity using Promise.allSettled for resilience
                 statePromises.push(
                     Promise.allSettled([
-                        poolContract.slot0({ blockTag: 'latest' }), poolContract.liquidity({ blockTag: 'latest' })
-                    ]).then(results => ({ poolInfo, slot0Result: results[0], liquidityResult: results[1] }))
+                        poolContract.slot0({ blockTag: 'latest' }),
+                        poolContract.liquidity({ blockTag: 'latest' })
+                    ]).then(results => ({
+                        poolInfo, // Pass the original config through
+                        slot0Result: results[0],
+                        liquidityResult: results[1]
+                    }))
                 );
-                validPoolConfigsForStateFetch.push(poolInfo);
-            } catch (error) { logger.error(`[Scanner fetchPoolStates] Error preparing fetch for pool ${poolInfo.address}: ${error.message}`); }
+                validPoolConfigsForStateFetch.push(poolInfo); // Mark as attempted
+            } catch (error) {
+                // Error likely from _getPoolContract (e.g., invalid ABI)
+                logger.error(`[Scanner fetchPoolStates] Error preparing fetch for pool ${poolInfo.address}: ${error.message}`);
+                // Do not add to statePromises if contract instantiation failed
+            }
         }
+
         if (statePromises.length === 0) {
-            logger.warn('[Scanner fetchPoolStates] No valid pools to fetch states for.'); return {};
+            logger.warn('[Scanner fetchPoolStates] No valid pools to fetch states for after preparation.');
+            return {};
         }
-        const livePoolStates = {};
+
+        const livePoolStates = {}; // Map: poolAddress -> poolState object
+
         try {
-            const results = await Promise.all(statePromises);
+            const results = await Promise.all(statePromises); // Wait for all fetches to settle
+
             for (const stateResult of results) {
-                 const { poolInfo, slot0Result, liquidityResult } = stateResult; const address = poolInfo.address;
+                const { poolInfo, slot0Result, liquidityResult } = stateResult;
+                const address = poolInfo.address; // Use address from original config
+
+                // Check if fetches were successful
                 if (slot0Result.status !== 'fulfilled' || liquidityResult.status !== 'fulfilled') {
                     const reason = slot0Result.reason?.message || liquidityResult.reason?.message || 'Unknown RPC/Contract Error';
-                    logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Fetch FAIL: ${reason}`); continue;
+                    logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) State Fetch FAIL: ${reason}`);
+                    continue; // Skip processing this pool
                 }
-                const slot0 = slot0Result.value; const liquidity = liquidityResult.value;
+
+                const slot0 = slot0Result.value;
+                const liquidity = liquidityResult.value;
+
+                // Validate the structure of returned data
                 if (slot0 == null || typeof slot0.sqrtPriceX96 === 'undefined' || typeof slot0.tick === 'undefined' || liquidity == null) {
-                    logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Invalid State Data: SqrtPrice=${slot0?.sqrtPriceX96}, Tick=${slot0?.tick}, Liquidity=${liquidity}`); continue;
+                    logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Invalid State Data: SqrtPrice=${slot0?.sqrtPriceX96}, Tick=${slot0?.tick}, Liquidity=${liquidity}`);
+                    continue; // Skip processing this pool
                 }
+
+                 // Convert results to BigInt
                  const currentSqrtPriceX96 = BigInt(slot0.sqrtPriceX96);
                  const currentLiquidity = BigInt(liquidity);
+                 const currentTick = BigInt(slot0.tick); // Keep tick as BigInt initially
 
+                 // Check for invalid liquidity value
                  if (currentLiquidity > MAX_UINT128) {
-                      logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Liquidity value > MAX_UINT128 (${currentLiquidity}). Skipping.`); continue;
+                      logger.warn(`[Scanner] Pool ${address} (Fee: ${poolInfo.fee}bps) Liquidity value > MAX_UINT128 (${currentLiquidity}). Skipping.`);
+                      continue; // Skip pools with invalid liquidity
                  }
-                const token0 = TOKENS[poolInfo.token0Symbol]; const token1 = TOKENS[poolInfo.token1Symbol];
+
+                // Get SDK Token instances using symbols from poolInfo and the global TOKENS map
+                const token0 = TOKENS[poolInfo.token0Symbol];
+                const token1 = TOKENS[poolInfo.token1Symbol];
+
+                // Ensure we got valid SDK Token instances
                 if (!(token0 instanceof Token) || !(token1 instanceof Token)) {
-                    logger.error(`[Scanner] Internal Error: Could not resolve SDK Token instances for ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}. Check constants/tokens.js. Skipping pool ${address}`); continue;
+                    logger.error(`[Scanner] Internal Error: Could not resolve SDK Token instances for pool ${address} (${poolInfo.token0Symbol}/${poolInfo.token1Symbol}). Check constants/tokens.js.`);
+                    continue; // Skip if tokens are invalid
                 }
-                try {
-                    livePoolStates[address] = {
-                        address, fee: poolInfo.fee, tick: Number(slot0.tick),
-                        liquidity: currentLiquidity, sqrtPriceX96: currentSqrtPriceX96,
-                        tickSpacing: getTickSpacingFromFeeBps(poolInfo.fee), token0, token1,
-                        token0Symbol: poolInfo.token0Symbol, token1Symbol: poolInfo.token1Symbol,
+
+                // Build the pool state object
+                 try {
+                    livePoolStates[address.toLowerCase()] = { // Use lowercase address as key for consistency
+                        address: address, // Keep original casing for reference
+                        fee: poolInfo.fee,
+                        tick: currentTick, // Store as BigInt
+                        liquidity: currentLiquidity,
+                        sqrtPriceX96: currentSqrtPriceX96,
+                        tickSpacing: getTickSpacingFromFeeBps(poolInfo.fee), // Calculate tick spacing
+                        token0: token0, // Store SDK Token instance
+                        token1: token1, // Store SDK Token instance
+                        token0Symbol: poolInfo.token0Symbol, // Store symbol for convenience
+                        token1Symbol: poolInfo.token1Symbol, // Store symbol for convenience
                     };
-                } catch (sdkError) {
-                     logger.error(`[Scanner fetchPoolStates] Pool ${address} SDK Pool Creation Error: ${sdkError.message}`);
-                     if (handleError) handleError(sdkError, `PoolScanner.CreateSDKPool (${address})`);
-                }
+                 } catch (sdkError) { // Catch potential errors during state object creation (less likely here)
+                      logger.error(`[Scanner fetchPoolStates] Pool ${address} Error creating state object: ${sdkError.message}`);
+                      if (typeof handleError === 'function') handleError(sdkError, `PoolScanner.CreatePoolStateObject (${address})`);
+                 }
             }
         } catch (error) {
+            // Catch errors from Promise.all (less likely with allSettled but possible)
             logger.error(`[Scanner fetchPoolStates] CRITICAL Error processing pool states: ${error.message}`);
-            if (handleError) handleError(error, 'PoolScanner.fetchPoolStates'); return {};
+            if (typeof handleError === 'function') handleError(error, 'PoolScanner.fetchPoolStates');
+            return {}; // Return empty map on critical failure
         }
+
         const finalCount = Object.keys(livePoolStates).length;
         logger.info(`[Scanner] Successfully fetched and processed states for ${finalCount} pools.`);
         if(finalCount === 0 && validPoolConfigsForStateFetch.length > 0){
-            logger.warn(`[Scanner] Fetched 0 valid states despite attempting ${validPoolConfigsForStateFetch.length} pools.`);
+            logger.warn(`[Scanner] Fetched 0 valid states despite attempting ${validPoolConfigsForStateFetch.length} pools. Check RPC and pool addresses in .env.`);
         }
-        return livePoolStates;
+        return livePoolStates; // Return map of address -> state object
     }
+
 
      // --- REFACTORED findOpportunities (Pure BigInt Pipeline) ---
      findOpportunities(livePoolStatesMap) {
@@ -189,128 +259,97 @@ class PoolScanner {
          const opportunities = [];
          if (!livePoolStatesMap || Object.keys(livePoolStatesMap).length < 3) {
               logger.info('[Scanner] Not enough live pool states (< 3) to form triangular path.');
-              return opportunities;
+              return opportunities; // Return empty array
          }
 
          // --- Step 1: Build Token Graph ---
+         // Graph structure: { tokenSymbol: { otherTokenSymbol: [poolState1, poolState2, ...] } }
          const tokenGraph = {};
          if (LOG_ALL_TRIANGLES) logger.debug('[Scanner] Building token graph...');
          for (const poolAddress in livePoolStatesMap) {
              const poolState = livePoolStatesMap[poolAddress];
-             if (!poolState || !poolState.token0Symbol || !poolState.token1Symbol) {
-                 logger.warn(`[Scanner] Pool ${poolAddress} missing token symbols or state. Skipping graph build.`);
+             // Basic validation of pool state needed for graph
+             if (!poolState || !poolState.token0Symbol || !poolState.token1Symbol || !poolState.token0 || !poolState.token1 || !poolState.sqrtPriceX96) {
+                 logger.warn(`[Scanner] Pool ${poolAddress} missing required state for graph build. Skipping.`);
                  continue;
              }
-             const sym0 = poolState.token0Symbol; const sym1 = poolState.token1Symbol;
-             if (!tokenGraph[sym0]) tokenGraph[sym0] = {}; if (!tokenGraph[sym0][sym1]) tokenGraph[sym0][sym1] = []; tokenGraph[sym0][sym1].push(poolState);
-             if (!tokenGraph[sym1]) tokenGraph[sym1] = {}; if (!tokenGraph[sym1][sym0]) tokenGraph[sym1][sym0] = []; tokenGraph[sym1][sym0].push(poolState);
+             const sym0 = poolState.token0Symbol;
+             const sym1 = poolState.token1Symbol;
+
+             // Add edge sym0 -> sym1
+             if (!tokenGraph[sym0]) tokenGraph[sym0] = {};
+             if (!tokenGraph[sym0][sym1]) tokenGraph[sym0][sym1] = [];
+             tokenGraph[sym0][sym1].push(poolState);
+
+             // Add edge sym1 -> sym0
+             if (!tokenGraph[sym1]) tokenGraph[sym1] = {};
+             if (!tokenGraph[sym1][sym0]) tokenGraph[sym1][sym0] = [];
+             tokenGraph[sym1][sym0].push(poolState);
          }
-         if (LOG_ALL_TRIANGLES) logger.debug(`[Scanner] Token graph built. Edges: ${Object.keys(tokenGraph).join(', ')}`);
+         if (LOG_ALL_TRIANGLES) logger.debug(`[Scanner] Token graph built. Tokens with edges: ${Object.keys(tokenGraph).join(', ')}`);
          // --- End Step 1 ---
 
          // --- Step 2 & 3: Triangle Detection, BigInt Price Calculation & Profit Check ---
-         logger.debug(`[Scanner] Starting triangle detection (BigInt) (Threshold: ~${formatScaledBigIntForLogging(PROFIT_THRESHOLD_SCALED)})...`);
-         const checkedTriangles = new Set();
+         logger.debug(`[Scanner] Starting triangle detection (BigInt) (Raw Rate Threshold: ~${formatScaledBigIntForLogging(PROFIT_THRESHOLD_SCALED)} after fees)...`);
+         const checkedTriangles = new Set(); // Avoid checking the same set of 3 pools multiple times
 
+         // Iterate through potential starting tokens (A)
          for (const tokenASymbol in tokenGraph) {
+             // Iterate through potential intermediate tokens (B) connected to A
              for (const tokenBSymbol in tokenGraph[tokenASymbol]) {
+                 // Iterate through pools connecting A and B
                  for (const poolAB of tokenGraph[tokenASymbol][tokenBSymbol]) {
-                     if (!poolAB || !poolAB.token0 || !poolAB.token1 || !poolAB.sqrtPriceX96) { continue; }
+                     // Ensure poolAB state is valid (redundant check, but safe)
+                     if (!poolAB || !poolAB.sqrtPriceX96) { continue; }
+
+                     // Check if B is connected to other tokens (C)
                      if (!tokenGraph[tokenBSymbol]) continue;
 
+                     // Iterate through potential end tokens (C) connected to B
                      for (const tokenCSymbol in tokenGraph[tokenBSymbol]) {
+                         // Skip if C is the same as A (we need a triangle)
                          if (tokenCSymbol === tokenASymbol) continue;
 
+                         // Iterate through pools connecting B and C
                          for (const poolBC of tokenGraph[tokenBSymbol][tokenCSymbol]) {
-                              if (!poolBC || !poolBC.token0 || !poolBC.token1 || !poolBC.sqrtPriceX96) { continue; }
+                              if (!poolBC || !poolBC.sqrtPriceX96) { continue; }
 
+                             // Check if C is connected back to A
                              if (tokenGraph[tokenCSymbol] && tokenGraph[tokenCSymbol][tokenASymbol]) {
+                                 // Iterate through pools connecting C and A
                                  for (const poolCA of tokenGraph[tokenCSymbol][tokenASymbol]) {
-                                     if (!poolCA || !poolCA.token0 || !poolCA.token1 || !poolCA.sqrtPriceX96) { continue; }
+                                     if (!poolCA || !poolCA.sqrtPriceX96) { continue; }
 
+                                     // Found a potential triangle A -> B -> C -> A
                                      const pools = [poolAB, poolBC, poolCA];
+                                     // Create a unique ID for this set of pools, independent of path direction
                                      const triangleId = pools.map(p => p.address).sort().join('-');
-                                     if (checkedTriangles.has(triangleId)) { continue; }
+                                     if (checkedTriangles.has(triangleId)) { continue; } // Already checked this triangle
                                      checkedTriangles.add(triangleId);
 
+                                     // Define the path symbols for clarity
                                      const pathSymbols = [tokenASymbol, tokenBSymbol, tokenCSymbol, tokenASymbol];
+                                     const pathPools = [poolAB.address, poolBC.address, poolCA.address];
+                                     const pathFees = [poolAB.fee, poolBC.fee, poolCA.fee];
+
+                                     if (LOG_ALL_TRIANGLES) logger.debug(`--- Checking Triangle: ${pathSymbols.join(' -> ')} Pools: ${pathPools.join(' , ')} Fees: ${pathFees.join(', ')} ---`);
 
                                      try {
-                                         // 1. Get Price Ratios (Token1/Token0) * SCALE
+                                         // 1. Get Base Scaled Price Ratios (Token1/Token0) * SCALE for each pool
                                          const priceRatioAB_scaled = getScaledPriceRatio(poolAB.sqrtPriceX96);
                                          const priceRatioBC_scaled = getScaledPriceRatio(poolBC.sqrtPriceX96);
                                          const priceRatioCA_scaled = getScaledPriceRatio(poolCA.sqrtPriceX96);
 
+                                         // Check for calculation errors
                                          if (priceRatioAB_scaled === null || priceRatioBC_scaled === null || priceRatioCA_scaled === null) {
-                                             if (LOG_ALL_TRIANGLES) logger.debug(`[Scanner] Skipping triangle ${pathSymbols.join('->')} due to PriceRatio error.`);
-                                             continue;
+                                             logger.warn(`[Scanner] Skipping triangle ${triangleId} due to PriceRatio calculation error.`);
+                                             continue; // Skip this triangle if any price ratio failed
                                          }
 
-                                         // 2. Adjust for direction and decimals
+                                         // 2. Adjust Ratios for Direction (A->B, B->C, C->A) and Decimals
                                          let scaledPrice_AtoB, scaledPrice_BtoC, scaledPrice_CtoA;
 
-                                         // Price A -> B
+                                         // Price A -> B calculation
                                          const decimals_T0_AB = BigInt(poolAB.token0.decimals);
                                          const decimals_T1_AB = BigInt(poolAB.token1.decimals);
-                                         const decimalDiff_AB = decimals_T0_AB - decimals_T1_AB;
-                                         if (poolAB.token0Symbol === tokenASymbol) { // A=T0, B=T1. Price(B/A) = P(T1/T0)
-                                              scaledPrice_AtoB = decimalDiff_AB > 0
-                                                   ? (priceRatioAB_scaled * (10n ** decimalDiff_AB))
-                                                   : (priceRatioAB_scaled / (10n ** (-decimalDiff_AB)));
-                                         } else { // A=T1, B=T0. Price(B/A) = P(T0/T1) = 1 / P(T1/T0)
-                                              const price_T1T0_adj_scaled = decimalDiff_AB > 0
-                                                   ? (priceRatioAB_scaled * (10n ** decimalDiff_AB))
-                                                   : (priceRatioAB_scaled / (10n ** (-decimalDiff_AB)));
-                                              if (price_T1T0_adj_scaled === 0n) { throw new Error('Zero price in inversion A->B'); }
-                                              scaledPrice_AtoB = (BIGNUM_SCALE * BIGNUM_SCALE) / price_T1T0_adj_scaled;
-                                         }
-
-                                         // Price B -> C
-                                         const decimals_T0_BC = BigInt(poolBC.token0.decimals);
-                                         const decimals_T1_BC = BigInt(poolBC.token1.decimals);
-                                         const decimalDiff_BC = decimals_T0_BC - decimals_T1_BC;
-                                         if (poolBC.token0Symbol === tokenBSymbol) { // B=T0, C=T1. Price(C/B) = P(T1/T0)
-                                              scaledPrice_BtoC = decimalDiff_BC > 0
-                                                 ? (priceRatioBC_scaled * (10n ** decimalDiff_BC))
-                                                 : (priceRatioBC_scaled / (10n ** (-decimalDiff_BC)));
-                                         } else { // B=T1, C=T0. Price(C/B) = P(T0/T1) = 1 / P(T1/T0)
-                                             const price_T1T0_adj_scaled = decimalDiff_BC > 0
-                                                 ? (priceRatioBC_scaled * (10n ** decimalDiff_BC))
-                                                 : (priceRatioBC_scaled / (10n ** (-decimalDiff_BC)));
-                                             if (price_T1T0_adj_scaled === 0n) { throw new Error('Zero price in inversion B->C'); }
-                                             scaledPrice_BtoC = (BIGNUM_SCALE * BIGNUM_SCALE) / price_T1T0_adj_scaled;
-                                         }
-
-                                         // Price C -> A
-                                         const decimals_T0_CA = BigInt(poolCA.token0.decimals);
-                                         const decimals_T1_CA = BigInt(poolCA.token1.decimals);
-                                         const decimalDiff_CA = decimals_T0_CA - decimals_T1_CA;
-                                         if (poolCA.token0Symbol === tokenCSymbol) { // C=T0, A=T1. Price(A/C) = P(T1/T0)
-                                              scaledPrice_CtoA = decimalDiff_CA > 0
-                                                 ? (priceRatioCA_scaled * (10n ** decimalDiff_CA))
-                                                 : (priceRatioCA_scaled / (10n ** (-decimalDiff_CA)));
-                                         } else { // C=T1, A=T0. Price(A/C) = P(T0/T1) = 1 / P(T1/T0)
-                                             const price_T1T0_adj_scaled = decimalDiff_CA > 0
-                                                 ? (priceRatioCA_scaled * (10n ** decimalDiff_CA))
-                                                 : (priceRatioCA_scaled / (10n ** (-decimalDiff_CA)));
-                                             if (price_T1T0_adj_scaled === 0n) { throw new Error('Zero price in inversion C->A'); }
-                                             scaledPrice_CtoA = (BIGNUM_SCALE * BIGNUM_SCALE) / price_T1T0_adj_scaled;
-                                         }
-
-                                         // 3. Calculate Raw Rate (scaled)
-                                         const rawRate_scaled = (scaledPrice_AtoB * scaledPrice_BtoC * scaledPrice_CtoA) / (BIGNUM_SCALE * BIGNUM_SCALE);
-
-                                         // 4. Calculate Fee Multiplier (scaled)
-                                         const feeAB_bps = BigInt(poolAB.fee);
-                                         const feeBC_bps = BigInt(poolBC.fee);
-                                         const feeCA_bps = BigInt(poolCA.fee);
-                                         const feeNum_scaled = (10000n - feeAB_bps) * (10000n - feeBC_bps) * (10000n - feeCA_bps) * BIGNUM_SCALE;
-                                         const feeDenom = 10000n * 10000n * 10000n;
-                                         const feeMultiplier_scaled = feeNum_scaled / feeDenom;
-
-                                         // 5. Calculate Final Rate (scaled)
-                                         const rateWithFees_scaled = (rawRate_scaled * feeMultiplier_scaled) / BIGNUM_SCALE;
-
-                                         // Log details if enabled
-                                         if (LOG_ALL_TRIANGLES) {
-                                             logger.debug(`[Scanner] Triangle ${pathSymbols.join('->')} | Pools [${pools.map(p => `${p.address.slice(
+                
