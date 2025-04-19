@@ -4,10 +4,15 @@
 require('dotenv').config(); // Load .env file first
 const { ethers } = require('ethers');
 const { Token } = require('@uniswap/sdk-core');
-const logger = require('../utils/logger'); // Assuming logger exists
+// --- Load logger earlier for validation functions ---
+const logger = require('../utils/logger');
 
 // --- Load Network Metadata Helper (Simplified) ---
-function getNetworkMetadata(networkName) { /* ... implementation ... */ }
+function getNetworkMetadata(networkName) {
+    const lowerName = networkName?.toLowerCase();
+    if (lowerName === 'arbitrum') { return { CHAIN_ID: 42161, NAME: 'arbitrum', NATIVE_SYMBOL: 'ETH', NATIVE_DECIMALS: 18 }; }
+    return null;
+}
 
 // --- Load Shared Protocol Addresses ---
 const { PROTOCOL_ADDRESSES } = require('../constants/addresses');
@@ -16,30 +21,39 @@ const { TOKENS } = require('../constants/tokens');
 
 // --- Validation Functions ---
 function validateAndNormalizeAddress(rawAddress, contextName) { /* ... implementation ... */ }
-function validatePrivateKey(rawKey, contextName) { /* ... implementation ... */ }
-function validateRpcUrls(rawUrls, contextName) {
-    const urlsString = String(rawUrls || '').trim();
-    if (!urlsString) {
-        logger.error(`[Config Validate] CRITICAL ${contextName}: RPC URL(s) string is empty.`);
+
+/**
+ * Validates a private key string.
+ * @param {string} rawKey Raw private key string.
+ * @param {string} contextName Name for logging.
+ * @returns {string|null} Validated private key (without 0x) or null if invalid.
+ */
+function validatePrivateKey(rawKey, contextName) {
+    // --- ADDED DEBUG LOGGING ---
+    logger.debug(`[DEBUG Validate PK] Received rawKey for ${contextName}: "${rawKey}" (Type: ${typeof rawKey})`);
+    const keyString = String(rawKey || '').trim().replace(/^0x/, '');
+    logger.debug(`[DEBUG Validate PK] Trimmed/Cleaned keyString: "${keyString}" (Length: ${keyString.length})`);
+    // --- ---
+
+    if (!keyString) {
+        logger.error(`[Config Validate] CRITICAL ${contextName}: Private key is empty after cleaning.`);
         return null;
     }
-    const urls = urlsString.split(',')
-        .map(url => url.trim())
-        .filter(url => {
-            if (!url) return false;
-            if (!/^(https?|wss?):\/\/.+/i.test(url)) {
-                 logger.warn(`[Config Validate] ${contextName}: Invalid URL format skipped: "${url}"`);
-                 return false;
-            }
-            return true;
-        });
-    if (urls.length === 0) {
-        logger.error(`[Config Validate] CRITICAL ${contextName}: No valid RPC URLs found after parsing "${urlsString}".`);
+
+    const isValidFormat = /^[a-fA-F0-9]{64}$/.test(keyString);
+    // --- ADDED DEBUG LOGGING ---
+    logger.debug(`[DEBUG Validate PK] Regex test result (/^[a-fA-F0-9]{64}$/): ${isValidFormat}`);
+    // --- ---
+
+    if (!isValidFormat) {
+        logger.error(`[Config Validate] CRITICAL ${contextName}: Invalid format. Must be 64 hexadecimal characters (without '0x' prefix). Actual length: ${keyString.length}`);
         return null;
     }
-    logger.debug(`[Config Validate] Validated RPC URLs for ${contextName}: ${urls.length} found.`);
-    return urls;
+    logger.debug(`[DEBUG Validate PK] Validation successful for ${contextName}.`);
+    return keyString; // Return the clean key (no 0x)
 }
+
+function validateRpcUrls(rawUrls, contextName) { /* ... implementation ... */ }
 function safeParseBigInt(valueStr, contextName, defaultValue = 0n) { /* ... implementation ... */ }
 function safeParseInt(valueStr, contextName, defaultValue = 0) { /* ... implementation ... */ }
 function parseBoolean(valueStr) { /* ... implementation ... */ }
@@ -52,22 +66,23 @@ function loadConfig() {
     const networkName = process.env.NETWORK?.toLowerCase();
     if (!networkName) { throw new Error(`[Config] CRITICAL: Missing NETWORK environment variable.`); }
 
-    // 2. Validate RPC URLs EARLY - Need this for provider setup elsewhere potentially
+    // 2. Validate RPC URLs EARLY
     const rpcUrlsEnvKey = `${networkName.toUpperCase()}_RPC_URLS`;
     const rawRpcUrls = process.env[rpcUrlsEnvKey];
     const validatedRpcUrls = validateRpcUrls(rawRpcUrls, rpcUrlsEnvKey);
     if (!validatedRpcUrls) { throw new Error(`[Config] CRITICAL: Missing or invalid RPC URL(s) in ${rpcUrlsEnvKey}. Bot cannot start.`); }
 
-    // 3. Validate Private Key EARLY
+    // 3. Validate Private Key EARLY (Now with debug logs inside the function)
     const rawPrivateKey = process.env.PRIVATE_KEY;
     const validatedPrivateKey = validatePrivateKey(rawPrivateKey, 'PRIVATE_KEY');
-    if (!validatedPrivateKey) { throw new Error(`[Config] CRITICAL: Missing or invalid PRIVATE_KEY. Bot cannot start.`); }
+    if (!validatedPrivateKey) { throw new Error(`[Config] CRITICAL: Missing or invalid PRIVATE_KEY. Bot cannot start.`); } // Error thrown if validation returns null
 
+    // ... (rest of loadConfig remains the same as the previous version) ...
     // 4. Load Network Metadata
     const networkMetadata = getNetworkMetadata(networkName);
     if (!networkMetadata) { throw new Error(`[Config] CRITICAL: No network metadata found for network: ${networkName}`); }
 
-    // 5. Load Network Specific Config (Pool Groups, Chainlink Feeds etc.)
+    // 5. Load Network Specific Config
     let networkSpecificConfig;
     try {
         networkSpecificConfig = require(`./${networkName}.js`);
@@ -90,10 +105,10 @@ function loadConfig() {
     const combinedConfig = {
         ...networkMetadata,
         ...networkSpecificConfig,
-        TOKENS: TOKENS, // Use SDK Token instances
+        TOKENS: TOKENS,
         RPC_URLS: validatedRpcUrls,
         PRIMARY_RPC_URL: validatedRpcUrls[0],
-        PRIVATE_KEY: validatedPrivateKey,
+        PRIVATE_KEY: validatedPrivateKey, // Store the validated key (no 0x)
         FLASH_SWAP_CONTRACT_ADDRESS: validatedFlashSwapAddress || ethers.ZeroAddress,
         CYCLE_INTERVAL_MS: cycleIntervalMs,
         GAS_LIMIT_ESTIMATE: gasLimitEstimate,
@@ -116,8 +131,12 @@ function loadConfig() {
     console.log(`[Config] Total unique pools loaded from .env: ${loadedPoolAddresses.size}`);
     if (loadedPoolAddresses.size === 0) { console.warn("[Config] WARNING: No pool addresses loaded."); }
 
+
     // 10. Add Helper Function & Log Dry Run
-    combinedConfig.getAllPoolConfigs = () => { /* ... implementation ... */ };
+    combinedConfig.getAllPoolConfigs = () => {
+         if (!combinedConfig.POOL_GROUPS) return [];
+         return combinedConfig.POOL_GROUPS.flatMap(group => group.pools || []);
+    };
     if (combinedConfig.DRY_RUN) { console.warn("[Config] --- DRY RUN MODE ENABLED ---"); } else { console.log("[Config] --- LIVE TRADING MODE ---"); }
 
     return combinedConfig;
@@ -129,13 +148,12 @@ try {
     config = loadConfig();
     console.log(`[Config] Configuration loaded successfully for network: ${config.NAME} (Chain ID: ${config.CHAIN_ID})`);
 } catch (error) {
-    // Use logger if available, otherwise console.error
     const log = typeof logger !== 'undefined' ? logger : console;
     log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     log.error("!!! FATAL CONFIGURATION ERROR !!!");
-    log.error(`!!! ${error.message}`);
+    log.error(`!!! ${error.message}`); // Log the specific error message from the throw statement
     log.error("!!! Bot cannot start. Please check your .env file and config files.");
     log.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     process.exit(1);
 }
-module.exports = config;
+module.exports = config; // Export the loaded config object directly
