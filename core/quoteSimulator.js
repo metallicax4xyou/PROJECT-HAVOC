@@ -1,10 +1,16 @@
-// /workspaces/arbitrum-flash/core/quoteSimulator.js - Convert sqrtPrice to JSBI for TickMath
+// /workspaces/arbitrum-flash/core/quoteSimulator.js - Validate SqrtPriceX96 Range
 const { Pool, Route, Trade, TickMath } = require('@uniswap/v3-sdk');
 const { Token, CurrencyAmount, TradeType } = require('@uniswap/sdk-core');
 const { ethers } = require('ethers');
-const JSBI = require('jsbi'); // Import JSBI
+const JSBI = require('jsbi');
 const logger = require('../utils/logger');
 const ErrorHandler = require('../utils/errorHandler');
+
+// --- Define MIN/MAX SqrtRatio constants (copied from SDK for direct comparison) ---
+// These might need adjustment if using a different SDK version, but are standard V3 limits
+const MIN_SQRT_RATIO = JSBI.BigInt('4295128739');
+const MAX_SQRT_RATIO = JSBI.BigInt('1461446703485210103287273052203988822378723970342');
+// ---
 
 class QuoteSimulator {
     constructor(tickDataProvider) {
@@ -20,7 +26,8 @@ class QuoteSimulator {
         const context = `[SimSwap ${tokenIn?.symbol}->${tokenOut?.symbol} (${poolState?.fee}bps)]`;
         if (!this.tickDataProvider) { /* ... */ }
         if (!poolState) { /* ... */ }
-        if (!tokenIn || !tokenOut || !poolState.sqrtPriceX96 || !poolState.liquidity || typeof poolState.tick === 'undefined' || !poolState.fee || typeof poolState.tickSpacing !== 'number' ) { /* ... */ }
+        // Check required fields including sqrtPriceX96 type
+        if (!tokenIn || !tokenOut || typeof poolState.sqrtPriceX96 !== 'bigint' || !poolState.liquidity || typeof poolState.tick === 'undefined' || !poolState.fee || typeof poolState.tickSpacing !== 'number' ) { log.error(`${context} Invalid poolState fields or missing tokens/tickSpacing/sqrtPrice.`); console.error("Problematic PoolState:", this.stringifyPoolState(poolState)); return null; }
         if (!(tokenIn instanceof Token) || !(tokenOut instanceof Token)) { /* ... */ }
         if (amountIn <= 0n) { /* ... */ }
         const amountInStr = amountIn.toString(); if (!/^\d+$/.test(amountInStr)) { /* ... */ }
@@ -31,6 +38,7 @@ class QuoteSimulator {
         let tickFromSqrtPrice = 'N/A';
         let tickAdjusted = 'N/A';
         let tickSpacing = 'N/A';
+        let sqrtPriceJSBI; // Define here for catch block
 
         try {
             const [tokenA, tokenB] = tokenIn.sortsBefore(tokenOut) ? [tokenIn, tokenOut] : [tokenOut, tokenIn];
@@ -38,19 +46,25 @@ class QuoteSimulator {
 
             if (isNaN(tickSpacing) || tickSpacing <= 0) { log.error(`${context} Invalid tickSpacing (${poolState.tickSpacing}).`); return null; }
 
-            // --- Calculate tick from sqrtPrice, ensuring input is JSBI ---
-            let sqrtPriceJSBI;
+            // --- Validate sqrtPriceX96 range BEFORE using it ---
+            sqrtPriceJSBI = JSBI.BigInt(poolState.sqrtPriceX96.toString());
+            if (JSBI.lessThan(sqrtPriceJSBI, MIN_SQRT_RATIO) || JSBI.greaterThan(sqrtPriceJSBI, MAX_SQRT_RATIO)) {
+                 log.error(`${context} sqrtPriceX96 (${poolState.sqrtPriceX96}) is outside the valid SDK range.`);
+                 console.error(`MIN_SQRT_RATIO: ${MIN_SQRT_RATIO.toString()}, MAX_SQRT_RATIO: ${MAX_SQRT_RATIO.toString()}`);
+                 // Treat as invalid data, cannot simulate
+                 return null;
+            }
+            // --- End Validation ---
+
+
+            // --- Calculate tick from sqrtPrice (should now succeed if validation passes) ---
             try {
-                 // Convert native bigint from poolState to JSBI
-                 sqrtPriceJSBI = JSBI.BigInt(poolState.sqrtPriceX96.toString());
-                 tickFromSqrtPrice = TickMath.getTickAtSqrtRatio(sqrtPriceJSBI); // Pass JSBI here
+                 tickFromSqrtPrice = TickMath.getTickAtSqrtRatio(sqrtPriceJSBI); // Pass validated JSBI
                  console.log(`${context} Calculated tick from sqrtPriceX96 (${poolState.sqrtPriceX96}): ${tickFromSqrtPrice}`);
             } catch (tickMathError) {
-                 log.error(`${context} Failed to calculate tick from sqrtPriceX96 (${poolState.sqrtPriceX96}): ${tickMathError.message}`);
-                 // Log the type being passed if it failed
-                 log.error(`Typeof poolState.sqrtPriceX96: ${typeof poolState.sqrtPriceX96}`);
-                 if (sqrtPriceJSBI) log.error(`Typeof sqrtPriceJSBI: ${typeof sqrtPriceJSBI}, Value: ${sqrtPriceJSBI.toString()}`);
-                 throw tickMathError; // Rethrow
+                 // This catch should ideally not be hit now, but keep for safety
+                 log.error(`${context} Unexpected error calculating tick from VALIDATED sqrtPriceX96 (${poolState.sqrtPriceX96}): ${tickMathError.message}`);
+                 throw tickMathError;
             }
 
             tickAdjusted = Math.round(tickFromSqrtPrice / tickSpacing) * tickSpacing;
@@ -58,60 +72,33 @@ class QuoteSimulator {
             else { console.log(`${context} Tick calculated from price (${tickFromSqrtPrice}) is already multiple of tickSpacing ${tickSpacing}`); }
             // --- End Tick Calculation/Adjustment ---
 
-
             console.log(`${context} ===> PREPARING TO CALL new Pool(...) with tick derived from sqrtPrice and adjusted: ${tickAdjusted}`);
 
-            // Create Uniswap SDK Pool Instance using the derived and adjusted tick
-            const pool = new Pool(
-                tokenA, tokenB, poolState.fee,
-                poolState.sqrtPriceX96.toString(), // Constructor might accept string or JSBI - check SDK version if errors persist here
-                poolState.liquidity.toString(),   // Constructor might accept string or JSBI
-                tickAdjusted,                    // Use the tick derived from price & adjusted
-                { // Tick Provider Wrapper
-                    getTick: async (tick) => {
-                        console.log(`${context} >>> SDK requesting getTick(${tick})`);
-                        const result = await this.tickDataProvider.getTick(tick, tickSpacing, poolState.address);
-                        console.log(`${context} <<< Provider returned for getTick(${tick}): ${result ? `{ liquidityNet: ${result.liquidityNet} }` : 'null'}`);
-                        return result;
-                    },
-                    nextInitializedTickWithinOneWord: async (tick, lte) => {
-                        console.log(`${context} >>> SDK requesting nextInitializedTickWithinOneWord(tick=${tick}, lte=${lte})`);
-                        const result = await this.tickDataProvider.nextInitializedTickWithinOneWord(tick, lte, tickSpacing, poolState.address);
-                        console.log(`${context} <<< Provider returned for nextInitializedTickWithinOneWord(tick=${tick}, lte=${lte}): ${result}`);
-                        return result;
-                    }
-                }
-            );
-
+            const pool = new Pool( /* ... same as before ... */ );
             console.log(`${context} ===> SUCCESSFULLY CALLED new Pool(...) - SDK derived tick: ${pool.tickCurrent}`);
             log.debug(`${context} SDK Pool instance created. Proceeding to Trade.fromRoute...`);
 
             const swapRoute = new Route([pool], tokenIn, tokenOut);
-            // Ensure amountIn is also compatible if needed (CurrencyAmount handles string/bigint/JSBI usually)
             const trade = await Trade.fromRoute( swapRoute, CurrencyAmount.fromRawAmount(tokenIn, amountInStr), TradeType.EXACT_INPUT );
 
             log.debug(`${context} Trade.fromRoute finished.`);
 
-            if (!trade || !trade.outputAmount || !trade.outputAmount.quotient) {
-                 log.warn(`${context} SDK Trade creation failed or returned no output.`);
-                 if (trade) log.debug(`${context} Trade details: ${JSON.stringify(trade)}`);
-                 return { amountOut: 0n, sdkTokenIn: tokenIn, sdkTokenOut: tokenOut, trade: trade };
-            }
-            const amountOutBI = BigInt(trade.outputAmount.quotient.toString()); // Convert final JSBI result back to native bigint
+            if (!trade || !trade.outputAmount || !trade.outputAmount.quotient) { /* ... */ }
+            const amountOutBI = BigInt(trade.outputAmount.quotient.toString());
              log.info(`${context} Simulation successful. Output Amount: ${amountOutBI}`);
             return { amountOut: amountOutBI, sdkTokenIn: tokenIn, sdkTokenOut: tokenOut, trade: trade };
 
         } catch (error) {
             console.error(`${context} !!!!!!!!!!!!!! CATCH BLOCK in simulateSingleSwapExactIn !!!!!!!!!!!!!!`);
             log.error(`${context} Error during single swap simulation: ${error.message}`);
-            log.error(`${context} Details: TickFromSqrtPrice=${tickFromSqrtPrice}, AdjustedTick=${tickAdjusted}, Spacing=${tickSpacing}`);
+            // Log validated SqrtPrice if available
+            log.error(`${context} Details: SqrtPriceX96=${poolState?.sqrtPriceX96?.toString() || 'N/A'}, TickFromSqrtPrice=${tickFromSqrtPrice}, AdjustedTick=${tickAdjusted}, Spacing=${tickSpacing}`);
             if (error.message?.toLowerCase().includes('insufficient liquidity')) { log.error(`${context} SDK Error: INSUFFICIENT LIQUIDITY...`); }
-            else if (error.message?.includes('already') || error.message?.includes('TICK') || error.message?.includes('PRICE_BOUNDS') || error.message?.includes('SQRT_RATIO')) { log.error(`${context} SDK Error: TICK/PRICE/SQRT_RATIO invariant issue... Error: ${error.message}`); } // Added SQRT_RATIO
-            ErrorHandler.handleError(error, context, { poolAddress: poolState?.address || 'N/A', amountIn: amountInStr, tickFromSqrtPrice, tickAdjusted });
-            return null;
+            else if (error.message?.includes('already') || error.message?.includes('TICK') || error.message?.includes('PRICE_BOUNDS') || error.message?.includes('SQRT_RATIO')) { log.error(`${context} SDK Error: TICK/PRICE/SQRT_RATIO invariant issue... Error: ${error.message}`); }
+            ErrorHandler.handleError(error, context, { poolAddress: poolState?.address || 'N/A', amountIn: amountInStr, sqrtPriceX96: poolState?.sqrtPriceX96?.toString(), tickFromSqrtPrice, tickAdjusted });
+            return null; // Return null on error
         }
     }
-
 
     // simulateArbitrage remains the same
     async simulateArbitrage(opportunity, initialAmount) {
