@@ -1,5 +1,5 @@
 // config/index.js
-// Main configuration loader - Attempt 6: Correct Pool Group Logic
+// Main configuration loader - Attempt 7: Correct TickLens Address Loading
 
 require('dotenv').config(); // Load .env file first
 const { ethers } = require('ethers');
@@ -10,11 +10,12 @@ let logger; try { logger = require('../utils/logger'); } catch(e) { console.erro
 function getNetworkMetadata(networkName) { if (networkName === 'arbitrum') return { CHAIN_ID: 42161, NAME: 'arbitrum', NATIVE_SYMBOL: 'ETH', NATIVE_DECIMALS: 18 }; return null; }
 
 // --- Load Shared Protocol Addresses ---
+// We still need this for Factory and Quoter
 const { PROTOCOL_ADDRESSES } = require('../constants/addresses');
 // --- Load SDK Token Instances ---
 const { TOKENS } = require('../constants/tokens');
 
-// --- Validation Functions --- (Full implementations)
+// --- Validation Functions --- (Keep existing full implementations)
 function validateAndNormalizeAddress(rawAddress, contextName) {
     const addressString = String(rawAddress || '').trim();
     if (!addressString) { return null; }
@@ -63,16 +64,31 @@ function parseBoolean(valueStr) { return String(valueStr || '').trim().toLowerCa
 function loadConfig() {
     logger.debug('[loadConfig] Starting loadConfig function...');
     const networkName = process.env.NETWORK?.toLowerCase();
-    if (!networkName) { throw new Error(`[Config] CRITICAL: Missing NETWORK.`); }
+    if (!networkName) { throw new Error(`[Config] CRITICAL: Missing NETWORK environment variable.`); }
 
     // --- Validate Core Env Vars ---
     const rpcUrlsEnvKey = `${networkName.toUpperCase()}_RPC_URLS`;
     const validatedRpcUrls = validateRpcUrls(process.env[rpcUrlsEnvKey], rpcUrlsEnvKey);
-    if (!validatedRpcUrls) { throw new Error(`[Config] CRITICAL: Invalid RPC URL(s).`); }
+    if (!validatedRpcUrls) { throw new Error(`[Config] CRITICAL: Invalid or missing RPC URL(s). Env var needed: ${rpcUrlsEnvKey}`); }
+
     const validatedPrivateKey = validatePrivateKey(process.env.PRIVATE_KEY, 'PRIVATE_KEY');
-    if (!validatedPrivateKey) { throw new Error(`[Config] CRITICAL: Invalid PRIVATE_KEY.`); }
+    if (!validatedPrivateKey) { throw new Error(`[Config] CRITICAL: Invalid or missing PRIVATE_KEY.`); }
+
     const flashSwapEnvKey = `${networkName.toUpperCase()}_FLASH_SWAP_ADDRESS`;
     const validatedFlashSwapAddress = validateAndNormalizeAddress(process.env[flashSwapEnvKey], flashSwapEnvKey);
+    if (!validatedFlashSwapAddress) {
+        logger.warn(`[Config] WARNING: FlashSwap address not set or invalid. Env var checked: ${flashSwapEnvKey}. Bot may fail if execution is attempted.`);
+        // Consider throwing an error if flash swap is absolutely required to run
+        // throw new Error(`[Config] CRITICAL: Invalid or missing FlashSwap address. Env var needed: ${flashSwapEnvKey}`);
+    }
+
+    // *** NEW: Validate TickLens Address ***
+    const tickLensEnvKey = `${networkName.toUpperCase()}_TICKLENS_ADDRESS`;
+    const validatedTickLensAddress = validateAndNormalizeAddress(process.env[tickLensEnvKey], tickLensEnvKey);
+    if (!validatedTickLensAddress) {
+        // TickLens IS essential for simulation, so throw an error if it's missing/invalid
+        throw new Error(`[Config] CRITICAL: Invalid or missing TickLens address. Env var needed: ${tickLensEnvKey}`);
+    }
     // --- ---
 
     const networkMetadata = getNetworkMetadata(networkName);
@@ -82,8 +98,6 @@ function loadConfig() {
     try { networkSpecificConfig = require(`./${networkName}.js`); logger.log(`[Config] Loaded ./${networkName}.js`); }
     catch (e) { throw new Error(`[Config] CRITICAL: Failed to load config/${networkName}.js: ${e.message}`); }
 
-    if (!validatedFlashSwapAddress) { logger.warn(`[Config] WARNING: ${flashSwapEnvKey} not set or invalid.`); }
-
     // Load Global Settings
     const cycleIntervalMs = safeParseInt(process.env.CYCLE_INTERVAL_MS, 'CYCLE_INTERVAL_MS', 5000);
     const gasLimitEstimate = safeParseBigInt(process.env.GAS_LIMIT_ESTIMATE, 'GAS_LIMIT_ESTIMATE', 1500000n);
@@ -92,16 +106,32 @@ function loadConfig() {
 
     // --- Combine Base Config Object ---
      const baseConfig = {
-         ...networkMetadata, CHAINLINK_FEEDS: networkSpecificConfig.CHAINLINK_FEEDS || {}, TOKENS: TOKENS,
-         RPC_URLS: validatedRpcUrls, PRIMARY_RPC_URL: validatedRpcUrls[0], PRIVATE_KEY: validatedPrivateKey,
-         FLASH_SWAP_CONTRACT_ADDRESS: validatedFlashSwapAddress || ethers.ZeroAddress,
-         CYCLE_INTERVAL_MS: cycleIntervalMs, GAS_LIMIT_ESTIMATE: gasLimitEstimate, SLIPPAGE_TOLERANCE_BPS: slippageToleranceBps, DRY_RUN: isDryRun,
-         FACTORY_ADDRESS: PROTOCOL_ADDRESSES.UNISWAP_V3_FACTORY, QUOTER_ADDRESS: PROTOCOL_ADDRESSES.QUOTER_V2, TICK_LENS_ADDRESS: PROTOCOL_ADDRESSES.TICK_LENS,
+         ...networkMetadata,
+         CHAINLINK_FEEDS: networkSpecificConfig.CHAINLINK_FEEDS || {}, // From arbitrum.js
+         TOKENS: TOKENS, // From constants/tokens.js
+
+         // Core items from .env
+         RPC_URLS: validatedRpcUrls,
+         PRIMARY_RPC_URL: validatedRpcUrls[0],
+         PRIVATE_KEY: validatedPrivateKey,
+         FLASH_SWAP_CONTRACT_ADDRESS: validatedFlashSwapAddress || ethers.ZeroAddress, // Use validated or default
+         TICKLENS_ADDRESS: validatedTickLensAddress, // *** Use the validated address from .env ***
+
+         // Global bot settings from .env
+         CYCLE_INTERVAL_MS: cycleIntervalMs,
+         GAS_LIMIT_ESTIMATE: gasLimitEstimate,
+         SLIPPAGE_TOLERANCE_BPS: slippageToleranceBps,
+         DRY_RUN: isDryRun,
+
+         // Protocol constants (still useful)
+         FACTORY_ADDRESS: PROTOCOL_ADDRESSES.UNISWAP_V3_FACTORY,
+         QUOTER_ADDRESS: PROTOCOL_ADDRESSES.QUOTER_V2,
+         // Removed TICK_LENS_ADDRESS: PROTOCOL_ADDRESSES.TICK_LENS
      };
      logger.debug('[loadConfig] Base config object created.');
 
 
-    // --- Process POOL_GROUPS with Correct Logic ---
+    // --- Process POOL_GROUPS with Correct Logic --- (Keep existing logic)
     let totalPoolsLoaded = 0;
     const loadedPoolAddresses = new Set();
     const validProcessedPoolGroups = [];
@@ -226,8 +256,9 @@ let config;
 console.log('[Config] Attempting to call loadConfig inside try block...');
 try {
     config = loadConfig();
-    if (!config || !config.NAME || !config.CHAIN_ID || !config.PRIVATE_KEY || !config.RPC_URLS || config.RPC_URLS.length === 0) {
-         logger.error(`[Config Load Check] loadConfig result missing essential properties!`, config); throw new Error("Config object incomplete after loading.");
+    // Add TICKLENS_ADDRESS check here
+    if (!config || !config.NAME || !config.CHAIN_ID || !config.PRIVATE_KEY || !config.RPC_URLS || config.RPC_URLS.length === 0 || !config.TICKLENS_ADDRESS || config.TICKLENS_ADDRESS === ethers.ZeroAddress) {
+         logger.error(`[Config Load Check] loadConfig result missing essential properties (RPC, PK, TickLens)!`, config); throw new Error("Config object incomplete after loading.");
     }
     logger.info(`[Config] Config loaded: Network=${config.NAME}, ChainID=${config.CHAIN_ID}`);
 } catch (error) {
