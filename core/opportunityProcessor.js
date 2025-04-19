@@ -1,6 +1,5 @@
 // core/opportunityProcessor.js
-// --- VERSION UPDATED FOR ETHERS V6 UTILS & PHASE 1 REFACTOR ---
-// Integrates new GasEstimator & ProfitCalculator classes and revised txExecutor call
+// --- VERSION UPDATED FOR ETHERS V6 UTILS (Removed isBigNumberish) & PHASE 1 REFACTOR ---
 
 const { ethers } = require('ethers'); // Ethers v6+
 const { Token } = require('@uniswap/sdk-core'); // Ensure this is the correct import for your SDK version
@@ -33,6 +32,7 @@ async function processOpportunity(opp, engineContext) {
             hasConfig: !!config, hasParsedConfig: !!config?.parsed, hasManager: !!manager,
             hasGasEstimator: !!gasEstimator, hasProfitCalculator: !!profitCalculator, hasQuoteSimulator: !!quoteSimulator
         });
+        // Return error structure consistent with try/catch block
         return { executed: false, success: false, txHash: null, error: new ArbitrageError(errMsg, 'INTERNAL_ERROR'), simulationResult: null, profitabilityResult: null };
     }
     if (!opp || typeof opp !== 'object' || !opp.type || !opp.groupName) {
@@ -116,33 +116,33 @@ async function processOpportunity(opp, engineContext) {
             throw new ArbitrageError(`${logPrefix} Failed to resolve SDK Token instances for B or C. B=${tokenB?.symbol}, C=${tokenC?.symbol}`, 'INTERNAL_ERROR');
         }
 
-        // Execute simulation hops (Keep existing logic using quoteSimulator)
+        // Execute simulation hops
         logger.debug(`${logPrefix} Simulating Hop 1 (${tokenA.symbol}->${tokenB.symbol}) on Pool ${pool1.address}...`);
         const hop1Result = await quoteSimulator.simulateSingleSwapExactIn(pool1, tokenA, tokenB, initialAmount);
-        // Use ethers.toBigInt for consistent BigInt handling and comparison
-        if (!hop1Result || !ethers.isBigNumberish(hop1Result.amountOut) || ethers.toBigInt(hop1Result.amountOut) <= 0n) {
-             throw new ArbitrageError(`${logPrefix} Hop 1 simulation failed or returned zero/negative output.`, 'SIMULATION_ERROR', { hop: 1, result: hop1Result });
+        // --- REMOVED ethers.isBigNumberish check ---
+        // Add null/undefined check before trying to convert and compare
+        if (!hop1Result || hop1Result.amountOut === null || hop1Result.amountOut === undefined || ethers.toBigInt(hop1Result.amountOut) <= 0n) {
+             throw new ArbitrageError(`${logPrefix} Hop 1 simulation failed, returned invalid/zero/negative output.`, 'SIMULATION_ERROR', { hop: 1, result: hop1Result });
         }
         const amountB_Received = ethers.toBigInt(hop1Result.amountOut); // Ensure BigInt
-        // --- Use ethers.formatUnits (v6 syntax) ---
         logger.info(`[SIM Hop 1 ${tokenA.symbol}->${tokenB.symbol}] Output: ${ethers.formatUnits(amountB_Received, tokenB.decimals)} ${tokenB.symbol}`);
 
         logger.debug(`${logPrefix} Simulating Hop 2 (${tokenB.symbol}->${tokenC.symbol}) on Pool ${pool2.address}...`);
         const hop2Result = await quoteSimulator.simulateSingleSwapExactIn(pool2, tokenB, tokenC, amountB_Received);
-        if (!hop2Result || !ethers.isBigNumberish(hop2Result.amountOut) || ethers.toBigInt(hop2Result.amountOut) <= 0n) {
-             throw new ArbitrageError(`${logPrefix} Hop 2 simulation failed or returned zero/negative output.`, 'SIMULATION_ERROR', { hop: 2, result: hop2Result });
+        // --- REMOVED ethers.isBigNumberish check ---
+        if (!hop2Result || hop2Result.amountOut === null || hop2Result.amountOut === undefined || ethers.toBigInt(hop2Result.amountOut) <= 0n) {
+             throw new ArbitrageError(`${logPrefix} Hop 2 simulation failed, returned invalid/zero/negative output.`, 'SIMULATION_ERROR', { hop: 2, result: hop2Result });
         }
         const amountC_Received = ethers.toBigInt(hop2Result.amountOut);
-        // --- Use ethers.formatUnits (v6 syntax) ---
         logger.info(`[SIM Hop 2 ${tokenB.symbol}->${tokenC.symbol}] Output: ${ethers.formatUnits(amountC_Received, tokenC.decimals)} ${tokenC.symbol}`);
 
         logger.debug(`${logPrefix} Simulating Hop 3 (${tokenC.symbol}->${tokenA.symbol}) on Pool ${pool3.address}...`);
         const hop3Result = await quoteSimulator.simulateSingleSwapExactIn(pool3, tokenC, tokenA, amountC_Received);
-        if (!hop3Result || !ethers.isBigNumberish(hop3Result.amountOut) || ethers.toBigInt(hop3Result.amountOut) <= 0n) {
-             throw new ArbitrageError(`${logPrefix} Hop 3 simulation failed or returned zero/negative output.`, 'SIMULATION_ERROR', { hop: 3, result: hop3Result });
+        // --- REMOVED ethers.isBigNumberish check ---
+        if (!hop3Result || hop3Result.amountOut === null || hop3Result.amountOut === undefined || ethers.toBigInt(hop3Result.amountOut) <= 0n) {
+             throw new ArbitrageError(`${logPrefix} Hop 3 simulation failed, returned invalid/zero/negative output.`, 'SIMULATION_ERROR', { hop: 3, result: hop3Result });
         }
         const finalAmount = ethers.toBigInt(hop3Result.amountOut);
-        // --- Use ethers.formatUnits (v6 syntax) ---
         logger.info(`[SIM Hop 3 ${tokenC.symbol}->${tokenA.symbol}] Output: ${ethers.formatUnits(finalAmount, tokenA.decimals)} ${tokenA.symbol}`);
 
 
@@ -164,6 +164,7 @@ async function processOpportunity(opp, engineContext) {
 
 
         // --- 6. Prepare Transaction Request for Gas Estimation ---
+        let encodedParams; // Define here to be accessible later
         try {
             logger.debug(`${logPrefix} Preparing transaction request using ParamBuilder...`);
             buildResult = TxUtils.ParamBuilder.buildTriangularParams(opp, simulationResult, config);
@@ -171,9 +172,9 @@ async function processOpportunity(opp, engineContext) {
                  throw new Error("ParamBuilder did not return expected structure.");
             }
 
-            const encodedParams = TxUtils.Encoder.encodeParams(buildResult.params, buildResult.typeString);
+            encodedParams = TxUtils.Encoder.encodeParams(buildResult.params, buildResult.typeString); // Assign here
             const borrowPoolAddress = opp.pools[0].address;
-            const borrowTokenAddress = buildResult.borrowTokenAddress; // Should match tokenA.address
+            const borrowTokenAddress = buildResult.borrowTokenAddress;
             const borrowAmountBigInt = ethers.toBigInt(buildResult.borrowAmount); // Ensure BigInt
 
             const pool1Token0Addr = opp.pools[0].token0?.address;
@@ -193,8 +194,9 @@ async function processOpportunity(opp, engineContext) {
             const signerAddress = await manager.getSignerAddress();
 
             const contractFunctionName = buildResult.contractFunctionName;
-            const contractCallArgs = [borrowPoolAddress, amount0ToBorrow, amount1ToBorrow, encodedParams]; // Args for estimate/execute
-            const encodedFunctionData = flashSwapInterface.encodeFunctionData(contractFunctionName, contractCallArgs);
+            // Arguments for gas estimation need to match the contract function call
+            const contractCallArgsForEstimate = [borrowPoolAddress, amount0ToBorrow, amount1ToBorrow, encodedParams];
+            const encodedFunctionData = flashSwapInterface.encodeFunctionData(contractFunctionName, contractCallArgsForEstimate);
 
             txRequestForGas = { to: flashSwapAddress, data: encodedFunctionData, from: signerAddress, value: 0n }; // Use BigInt 0n
             logger.debug(`${logPrefix} Transaction request prepared for gas estimation: To=${txRequestForGas.to}, From=${txRequestForGas.from}, Data=${txRequestForGas.data.substring(0,10)}...`);
@@ -241,11 +243,12 @@ async function processOpportunity(opp, engineContext) {
 
         // Prepare arguments for the executor - reuse args from step 6 if possible and safe
         // Ensure args passed to executeTransaction match exactly what the contract expects
+        // These should be the same values used for gas estimation in step 6
         const executorContractCallArgs = [
-             opp.pools[0].address, // borrowPoolAddress
-             amount0ToBorrow,      // Use amount calculated in step 6
-             amount1ToBorrow,      // Use amount calculated in step 6
-             encodedParams         // Use encoded params from step 6
+             opp.pools[0].address, // borrowPoolAddress from step 6
+             amount0ToBorrow,      // from step 6
+             amount1ToBorrow,      // from step 6
+             encodedParams         // from step 6
         ];
 
         // Call the refactored executeTransaction
