@@ -1,7 +1,12 @@
 // /workspaces/arbitrum-flash/core/quoteSimulator.js
+// *** Added require('ethers') ***
 // *** Constructor Updated to accept provider and config object ***
 // *** Simulates SINGLE swap using pool.getOutputAmount directly ***
 // *** Enforces JSBI for amountIn ***
+
+// --- ADDED ETHERS REQUIRE ---
+const { ethers } = require('ethers');
+// --- END ETHERS REQUIRE ---
 
 const { Pool, TickMath } = require('@uniswap/v3-sdk');
 const { Token, CurrencyAmount, Price } = require('@uniswap/sdk-core');
@@ -36,10 +41,8 @@ class QuoteSimulator {
         const chainId = config.CHAIN_ID;
 
         // Validate extracted values
-        // Note: TickLens might be optional depending on strategy, but this simulator *needs* it for the TickDataProvider
-        // Allow ZeroAddress if necessary, but LensTickDataProvider might fail later if it's Zero.
-        // For now, require a non-zero address here as the error implied it was needed.
-        if (!tickLensAddress || tickLensAddress === ethers.constants?.ZeroAddress || tickLensAddress === '0x0000000000000000000000000000000000000000') { // Check for ZeroAddress explicitly
+        // Note: We use ethers.ZeroAddress now that ethers is required
+        if (!tickLensAddress || tickLensAddress === ethers.ZeroAddress) {
             throw new Error("QuoteSimulator requires a non-zero config.TICKLENS_ADDRESS for creating TickDataProviders.");
         }
          if (!chainId || typeof chainId !== 'number' || chainId <= 0) {
@@ -145,7 +148,6 @@ class QuoteSimulator {
                 amountOut: amountOutBI,
                 sdkTokenIn: tokenIn,
                 sdkTokenOut: tokenOut,
-                // No need to return pool or resultingPool usually for just the quote
             };
 
         } catch (error) {
