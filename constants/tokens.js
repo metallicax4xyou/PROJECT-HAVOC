@@ -1,4 +1,5 @@
 // /workspaces/arbitrum-flash/constants/tokens.js
+// --- UPDATED USDC.e KEY TO USE PERIOD ---
 
 const { Token } = require('@uniswap/sdk-core');
 
@@ -26,12 +27,13 @@ const ARBITRUM_TOKENS = {
         'USDC',
         'USD Coin'
     ),
-     USDC_e: new Token( // Representing bridged USDC from Ethereum (often has .e suffix)
+    // *** CHANGED KEY FROM USDC_e TO USDC.e ***
+     'USDC.e': new Token( // Representing bridged USDC from Ethereum (often has .e suffix)
          ARBITRUM_CHAIN_ID,
          '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8', // Bridged USDC.e on Arbitrum
          6,
-         'USDC.e',
-         'USD Coin Bridged' // Keep distinct name if using both
+         'USDC.e', // Symbol remains the same
+         'USD Coin Bridged'
      ),
     USDT: new Token(
         ARBITRUM_CHAIN_ID,
@@ -40,7 +42,6 @@ const ARBITRUM_TOKENS = {
         'USDT',
         'Tether USD'
     ),
-    // --- ADDED TOKENS ---
     ARB: new Token(
         ARBITRUM_CHAIN_ID,
         '0x912CE59144191C1204E64559FE8253a0e49E6548', // Verified ARB
@@ -62,13 +63,9 @@ const ARBITRUM_TOKENS = {
         'WBTC',
         'Wrapped BTC'
     ),
-    // --- END ADDED TOKENS ---
 };
 
 // --- Export based on current network ---
-// This structure assumes you might want multi-network support later.
-// For now, we'll just export the Arbitrum tokens directly or based on NETWORK env var.
-
 const networkName = process.env.NETWORK?.toLowerCase() || 'arbitrum'; // Default to arbitrum
 
 let TOKENS_TO_EXPORT;
@@ -89,10 +86,6 @@ switch (networkName) {
 
 module.exports = {
     TOKENS: TOKENS_TO_EXPORT,
-    // Optionally export specific tokens directly if frequently used
-    // WETH: TOKENS_TO_EXPORT.WETH,
-    // USDC: TOKENS_TO_EXPORT.USDC,
-    // USDT: TOKENS_TO_EXPORT.USDT,
 };
 
 console.log(`[tokens.js] Exporting tokens for network: ${networkName}`);
