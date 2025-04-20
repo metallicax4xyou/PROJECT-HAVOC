@@ -81,6 +81,14 @@ class UniswapV3Fetcher {
                 throw new Error(`Could not resolve SDK Tokens for ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}. Check constants/tokens.js`);
             }
 
+            // ---> ADDED THIS BLOCK <---
+            const token0Address = ethers.getAddress(token0.address); // Normalize address
+            const token1Address = ethers.getAddress(token1.address); // Normalize address
+            const pairKey = token0Address < token1Address
+                ? `${token0Address}-${token1Address}`
+                : `${token1Address}-${token0Address}`;
+            // ---> END ADDED BLOCK <---
+
             // Return the formatted state object
             return {
                 address: address,
@@ -95,6 +103,7 @@ class UniswapV3Fetcher {
                 token0Symbol: poolInfo.token0Symbol,
                 token1Symbol: poolInfo.token1Symbol,
                 groupName: poolInfo.groupName || 'N/A',
+                pairKey: pairKey, // ---> ADDED THIS LINE <---
             };
 
         } catch (error) {
