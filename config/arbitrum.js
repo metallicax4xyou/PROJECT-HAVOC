@@ -1,5 +1,6 @@
 // config/arbitrum.js
 // --- VERSION UPDATED TO ADD SUSHISWAP POOLS ---
+// --- Modified WETH_USDC_SUSHI entry to use USDC.e and correct ENV variable ---
 
 // --- Add Chainlink Feed Addresses ---
 const CHAINLINK_FEEDS = {
@@ -16,13 +17,13 @@ const UNISWAP_V3_POOLS = [
     {
         name: 'WETH_USDC_V3', // Added V3 suffix for clarity
         token0Symbol: 'WETH',
-        token1Symbol: 'USDC',
+        token1Symbol: 'USDC', // Native USDC
         borrowTokenSymbol: 'WETH',
         feeTierToEnvMap: {
             '100':   'ARBITRUM_WETH_USDC_100_ADDRESS',
             '500':   'ARBITRUM_WETH_USDC_500_ADDRESS',
             '3000':  'ARBITRUM_WETH_USDC_3000_ADDRESS',
-            '10000': 'ARBITRUM_WETH_USDC_10000_ADDRESS',
+            // '10000': 'ARBITRUM_WETH_USDC_10000_ADDRESS', // Keep commented if not used
         }
     },
     // ... (keep other V3 pools, maybe add _V3 suffix to names) ...
@@ -35,41 +36,40 @@ const UNISWAP_V3_POOLS = [
             '500': 'ARBITRUM_WBTC_WETH_500_ADDRESS',
         }
     },
+    // Add other V3 pools here if needed, matching the structure
 ];
 
 // --- Define SushiSwap (V2 Style) Pools ---
 // Get addresses from SushiSwap Analytics or directly from the Factory/Router contracts
 const SUSHISWAP_POOLS = [
     {
-        name: 'WETH_USDC_SUSHI',
+        name: 'WETH_USDCe_SUSHI', // Renamed to reflect USDC.e
         token0Symbol: 'WETH',
-        token1Symbol: 'USDC',
-        // Find the actual SushiSwap WETH/USDC pool address on Arbitrum
-        // Example: Look it up on Arbiscan or Sushi interface
-        poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDC_ADDRESS' // Use an ENV variable
+        token1Symbol: 'USDC.e', // *** IMPORTANT: Use the symbol for Bridged USDC (USDC.e) ***
+        // This now matches the variable in your .env file
+        poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDC_E_ADDRESS'
     },
     {
         name: 'WBTC_WETH_SUSHI',
         token0Symbol: 'WBTC',
         token1Symbol: 'WETH',
-        poolAddressEnv: 'ARBITRUM_SUSHI_WBTC_WETH_ADDRESS'
+        poolAddressEnv: 'ARBITRUM_SUSHI_WBTC_WETH_ADDRESS' // This was already correct
     },
     // Add other SushiSwap pools you want to monitor here
-    // {
-    //     name: 'ARB_WETH_SUSHI',
-    //     token0Symbol: 'ARB',
-    //     token1Symbol: 'WETH',
-    //     poolAddressEnv: 'ARBITRUM_SUSHI_ARB_WETH_ADDRESS'
-    // },
+    {
+        name: 'ARB_WETH_SUSHI',
+        token0Symbol: 'ARB',
+        token1Symbol: 'WETH',
+        // Make sure ARBITRUM_SUSHI_ARB_WETH_ADDRESS is defined in your .env if you uncomment this
+        poolAddressEnv: 'ARBITRUM_SUSHI_ARB_WETH_ADDRESS'
+    },
 ];
 
 
 // --- Combine and Export ---
 const ARBITRUM_CONFIG = {
     CHAINLINK_FEEDS: CHAINLINK_FEEDS,
-    // Rename V3 pool group key for clarity
     UNISWAP_V3_POOLS: UNISWAP_V3_POOLS,
-    // Add the new SushiSwap pool list
     SUSHISWAP_POOLS: SUSHISWAP_POOLS,
 
     // --- Global Settings ---
@@ -79,8 +79,8 @@ const ARBITRUM_CONFIG = {
     FALLBACK_GAS_LIMIT: '3000000',
     PROFIT_BUFFER_PERCENT: 10,
 
-    // Optional SushiSwap specific constants if needed later (like Router address)
-    // SUSHISWAP_ROUTER_ADDRESS: '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506', // SushiSwap Arbitrum Router
+    // Define SushiSwap Router Address - Get from Sushi Docs for Arbitrum
+    SUSHISWAP_ROUTER_ADDRESS: process.env.ARBITRUM_SUSHISWAP_ROUTER_ADDRESS || '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506',
 
 };
 
