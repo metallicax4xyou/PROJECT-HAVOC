@@ -76,31 +76,21 @@ class SushiSwapFetcher {
                 throw new Error(`Zero reserves found (${reserve0}, ${reserve1}). Pool likely empty or invalid.`);
             }
 
-            // Optional: Validate fetched token addresses against config
-            // if (token0Settle.status === 'fulfilled' && token1Settle.status === 'fulfilled') {
-            //     const fetchedToken0 = ethers.getAddress(token0Settle.value); // Normalize
-            //     const fetchedToken1 = ethers.getAddress(token1Settle.value); // Normalize
-            //     const configToken0 = TOKENS[poolInfo.token0Symbol]?.address;
-            //     const configToken1 = TOKENS[poolInfo.token1Symbol]?.address;
-            //     if (configToken0 && configToken1) {
-            //        // Check both orders
-            //        if (!((fetchedToken0 === configToken0 && fetchedToken1 === configToken1) ||
-            //              (fetchedToken0 === configToken1 && fetchedToken1 === configToken0))) {
-            //              throw new Error(`Mismatch between config tokens (${configToken0}, ${configToken1}) and contract tokens (${fetchedToken0}, ${fetchedToken1}) for pool ${address}.`);
-            //        }
-            //     } else {
-            //         logger.warn(`[SushiSwapFetcher] Could not fully validate tokens for pool ${address} due to missing config token addresses.`);
-            //     }
-            // } else {
-            //      logger.warn(`[SushiSwapFetcher] Could not fetch token addresses for pool ${address} for validation.`);
-            // }
-
+            // Optional: Validate fetched token addresses against config (code omitted for brevity, was commented out)
 
             const token0 = TOKENS[poolInfo.token0Symbol];
             const token1 = TOKENS[poolInfo.token1Symbol];
             if (!(token0 instanceof Token) || !(token1 instanceof Token)) {
                 throw new Error(`Could not resolve SDK Tokens for ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}. Check constants/tokens.js`);
             }
+
+            // ---> ADDED THIS BLOCK <---
+            const token0Address = ethers.getAddress(token0.address); // Normalize address
+            const token1Address = ethers.getAddress(token1.address); // Normalize address
+            const pairKey = token0Address < token1Address
+                ? `${token0Address}-${token1Address}`
+                : `${token1Address}-${token0Address}`;
+            // ---> END ADDED BLOCK <---
 
             // Return the formatted state object
             return {
@@ -114,11 +104,12 @@ class SushiSwapFetcher {
                 token0Symbol: poolInfo.token0Symbol,
                 token1Symbol: poolInfo.token1Symbol,
                 groupName: poolInfo.groupName || 'N/A',
-                 // V3 specific fields set to null
-                 sqrtPriceX96: null,
-                 liquidity: null,
-                 tick: null,
-                 tickSpacing: null,
+                pairKey: pairKey, // ---> ADDED THIS LINE <---
+                // V3 specific fields set to null
+                sqrtPriceX96: null,
+                liquidity: null,
+                tick: null,
+                tickSpacing: null,
             };
 
         } catch (error) {
