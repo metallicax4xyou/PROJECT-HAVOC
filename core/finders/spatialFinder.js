@@ -1,5 +1,5 @@
 // core/finders/spatialFinder.js
-// --- VERSION 1.13: Isolate failing effective price calculation ---
+// --- VERSION 1.14: Log raw scaled prices before effective calc ---
 
 const logger = require('../../utils/logger');
 const { handleError, ArbitrageError } = require('../../utils/errorHandler');
@@ -17,13 +17,13 @@ class SpatialFinder {
     }
 
     findOpportunities(livePoolStatesMap) {
-        const logPrefix = '[SpatialFinder V1.13]'; // Updated prefix
+        const logPrefix = '[SpatialFinder V1.14]'; // Updated prefix
         logger.info(`${logPrefix} Starting spatial (UniV3 vs SushiSwap) opportunity scan...`);
         const opportunities = [];
         const checkedPairings = new Set();
         const poolsByPair = {};
 
-        // Step 1: Group pools (same as 1.12)
+        // Step 1: Group pools
         // ... grouping logic ...
         const poolAddresses = livePoolStatesMap ? Object.keys(livePoolStatesMap) : [];
         logger.debug(`${logPrefix} Grouping ${poolAddresses.length} fetched pool states...`);
@@ -50,17 +50,20 @@ class SpatialFinder {
                     if (checkedPairings.has(pairingId)) continue;
                     checkedPairings.add(pairingId);
                     const compareLogPrefix = `${logPrefix} Compare [${pairKey}] V3(${v3Pool.fee}bps) vs Sushi:`;
-                    // logger.debug(`${compareLogPrefix} Comparing V3 Pool ${v3Pool.address} vs Sushi Pool ${sushiPool.address}`);
 
                     try {
-                        // logger.debug(`${compareLogPrefix} Calculating prices...`);
+                        // Calculate Raw Prices
                         const priceV3_scaled = this._calculateV3Price(v3Pool);
                         const priceSushi_scaled = this._calculateSushiPrice(sushiPool);
-                        // logger.debug(`${compareLogPrefix} Price calculation done. V3: ${priceV3_scaled !== null}, Sushi: ${priceSushi_scaled !== null}`);
-                        if (priceV3_scaled === null || priceSushi_scaled === null) { continue; }
 
-                        // Log raw prices BEFORE trying effective price calcs
-                        logger.debug(`${compareLogPrefix} Raw Prices | V3_scaled: ${priceV3_scaled?.toString()}, Sushi_scaled: ${priceSushi_scaled?.toString()}`);
+                        // --- *** Explicit Check and Log BEFORE Effective Calc *** ---
+                        logger.debug(`${compareLogPrefix} Raw Price Check | V3_scaled: ${priceV3_scaled?.toString() ?? 'NULL'}, Sushi_scaled: ${priceSushi_scaled?.toString() ?? 'NULL'}`);
+                        if (priceV3_scaled === null || priceSushi_scaled === null || priceV3_scaled <= 0n || priceSushi_scaled <= 0n) {
+                             logger.warn(`${compareLogPrefix} Skipping comparison due to null or non-positive raw price.`);
+                             continue; // Skip if prices are invalid/null/zero
+                         }
+                        // --- *** END Explicit Check *** ---
+
 
                         logger.debug(`${compareLogPrefix} Preparing values for effective price calc...`);
                         let v3FeeBps, sushiFeeBps, divisorSushi, divisorV3;
@@ -68,55 +71,39 @@ class SpatialFinder {
                              v3FeeBps = BigInt(v3Pool.fee); sushiFeeBps = BigInt(sushiPool.fee);
                              divisorSushi = (TEN_THOUSAND - sushiFeeBps); divisorV3 = (TEN_THOUSAND - v3FeeBps);
                              if (divisorSushi <= 0n || divisorV3 <= 0n || BIGNUM_SCALE <= 0n) { throw new Error(`Invalid divisor or scale`); }
-                             logger.debug(`${compareLogPrefix} Fees and Divisors OK.`);
+                             logger.debug(`${compareLogPrefix} Fees and Divisors OK | V3 Fee: ${v3FeeBps}, Sushi Fee: ${sushiFeeBps}, DivV3: ${divisorV3}, DivSushi: ${divisorSushi}`);
                         } catch (feeError) { logger.error(`${compareLogPrefix} Error preparing fee values: ${feeError.message}`); continue; }
 
-                        // --- *** Calculate Effective Prices Individually *** ---
+                        // Calculate Effective Prices Individually with try/catch
                         let effectiveSushiBuyPrice_scaled, effectiveV3SellPrice_scaled, effectiveV3BuyPrice_scaled, effectiveSushiSellPrice_scaled;
                         let calcError = null;
 
                         try {
                              logger.debug(`${compareLogPrefix} Calculating effectiveSushiBuyPrice_scaled...`);
-                             const num = priceSushi_scaled * TEN_THOUSAND * BIGNUM_SCALE;
-                             const den = divisorSushi * BIGNUM_SCALE;
-                             if (den === 0n) throw new Error("Denominator zero for effectiveSushiBuyPrice_scaled");
-                             effectiveSushiBuyPrice_scaled = num / den;
-                             logger.debug(`${compareLogPrefix}   -> OK: ${effectiveSushiBuyPrice_scaled}`);
+                             effectiveSushiBuyPrice_scaled = (priceSushi_scaled * TEN_THOUSAND * BIGNUM_SCALE) / (divisorSushi * BIGNUM_SCALE);
                         } catch (e) { calcError = e; logger.error(`${compareLogPrefix} ERROR calculating effectiveSushiBuyPrice_scaled: ${e.message}`); }
 
                         if (!calcError) try {
                              logger.debug(`${compareLogPrefix} Calculating effectiveV3SellPrice_scaled...`);
-                             const num = priceV3_scaled * divisorV3;
-                             const den = TEN_THOUSAND; // Safe
-                             effectiveV3SellPrice_scaled = num / den;
-                             logger.debug(`${compareLogPrefix}   -> OK: ${effectiveV3SellPrice_scaled}`);
+                             effectiveV3SellPrice_scaled = (priceV3_scaled * divisorV3) / TEN_THOUSAND;
                         } catch (e) { calcError = e; logger.error(`${compareLogPrefix} ERROR calculating effectiveV3SellPrice_scaled: ${e.message}`); }
 
                         if (!calcError) try {
                              logger.debug(`${compareLogPrefix} Calculating effectiveV3BuyPrice_scaled...`);
-                             const num = priceV3_scaled * TEN_THOUSAND * BIGNUM_SCALE;
-                             const den = divisorV3 * BIGNUM_SCALE;
-                             if (den === 0n) throw new Error("Denominator zero for effectiveV3BuyPrice_scaled");
-                             effectiveV3BuyPrice_scaled = num / den;
-                             logger.debug(`${compareLogPrefix}   -> OK: ${effectiveV3BuyPrice_scaled}`);
+                             effectiveV3BuyPrice_scaled = (priceV3_scaled * TEN_THOUSAND * BIGNUM_SCALE) / (divisorV3 * BIGNUM_SCALE);
                         } catch (e) { calcError = e; logger.error(`${compareLogPrefix} ERROR calculating effectiveV3BuyPrice_scaled: ${e.message}`); }
 
                         if (!calcError) try {
                              logger.debug(`${compareLogPrefix} Calculating effectiveSushiSellPrice_scaled...`);
-                             const num = priceSushi_scaled * divisorSushi;
-                             const den = TEN_THOUSAND; // Safe
-                             effectiveSushiSellPrice_scaled = num / den;
-                             logger.debug(`${compareLogPrefix}   -> OK: ${effectiveSushiSellPrice_scaled}`);
+                             effectiveSushiSellPrice_scaled = (priceSushi_scaled * divisorSushi) / TEN_THOUSAND;
                         } catch (e) { calcError = e; logger.error(`${compareLogPrefix} ERROR calculating effectiveSushiSellPrice_scaled: ${e.message}`); }
 
-                        // If any calculation failed, skip the rest for this pair
                         if (calcError) {
                              logger.warn(`${compareLogPrefix} Skipping profitability check due to calculation error.`);
                              continue;
                         }
-                        // --- *** End Individual Calculation *** ---
 
-                        logger.debug(`${compareLogPrefix} Effective price calculation completed.`); // Should reach here now
+                        logger.debug(`${compareLogPrefix} Effective price calculation completed.`);
 
                         // Log prices and check for opportunities...
                         logger.debug(`${compareLogPrefix}`);
@@ -126,13 +113,12 @@ class SpatialFinder {
 
                         // Check opportunities...
                         let foundOpp = false;
-                         if (effectiveV3SellPrice_scaled * BIGNUM_SCALE > effectiveSushiBuyPrice_scaled * PROFIT_THRESHOLD_SCALED) { /* ... */ }
-                         if (effectiveSushiSellPrice_scaled * BIGNUM_SCALE > effectiveV3BuyPrice_scaled * PROFIT_THRESHOLD_SCALED) { /* ... */ }
+                        // ... check logic ...
                         if (!foundOpp) { logger.debug(`${compareLogPrefix} No profitable opportunity found meeting threshold.`); }
 
-                    } catch (priceError) {
-                         logger.error(`${compareLogPrefix} Outer error calculating/comparing prices: ${priceError.message}`);
-                         handleError(priceError, `SpatialPriceCalc ${pairKey}`);
+                    } catch (outerError) {
+                         logger.error(`${compareLogPrefix} Outer error calculating/comparing prices: ${outerError.message}`);
+                         handleError(outerError, `SpatialPriceCalc ${pairKey}`);
                      }
                 } // End Sushi loop
             } // End V3 loop
@@ -141,7 +127,6 @@ class SpatialFinder {
         logger.info(`${logPrefix} Scan finished. Found ${opportunities.length} potential spatial opportunities.`);
         return opportunities;
     }
-
 
     // --- Price Calculation Helpers ---
      _calculateV3Price(poolState) { /* ... */ }
