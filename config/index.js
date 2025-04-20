@@ -29,6 +29,7 @@ function getNetworkMetadata(networkName) {
 // --- Load Shared Protocol Addresses ---
 const { PROTOCOL_ADDRESSES } = require('../constants/addresses');
 // --- Load SDK Token Instances ---
+// *** This imports the TOKENS object exported by constants/tokens.js ***
 const { TOKENS } = require('../constants/tokens');
 
 // --- loadConfig Function ---
@@ -60,14 +61,17 @@ function loadConfig() {
 
     // --- Load Global Settings from .env ---
     const cycleIntervalMs = ConfigHelpers.Validators.safeParseInt(process.env.CYCLE_INTERVAL_MS, 'CYCLE_INTERVAL_MS', 5000);
-    const slippageToleranceBps = ConfigHelpers.Validators.safeParseInt(process.env.SLIPPAGE_TOLERANCE_BPS, 'SLIPPAGE_TOLERANCE_BPS', 10);
+    const slippageToleranceBps = ConfigHelpers.Validators.safeParseInt(process.env.SLIPPAGE_TOLERANCE_BPS, 'SLIPPAGE_TOLERANCE_BPS', 10); // Still use default if env var missing
+    if(process.env.SLIPPAGE_TOLERANCE_BPS === undefined) {
+         logger.warn(`[Config Parse Int] SLIPPAGE_TOLERANCE_BPS env variable not set, using default: ${slippageToleranceBps}`);
+    }
     const isDryRun = ConfigHelpers.Validators.parseBoolean(process.env.DRY_RUN);
     const stopOnFirst = ConfigHelpers.Validators.parseBoolean(process.env.STOP_ON_FIRST_EXECUTION, false);
 
     // --- Combine Base Config Object (Merge step-by-step) ---
     const baseConfig = {
         ...networkMetadata,
-        TOKENS: TOKENS,
+        TOKENS: TOKENS, // Assign the imported TOKENS object
         RPC_URLS: validatedRpcUrls,
         PRIMARY_RPC_URL: validatedRpcUrls[0],
         PRIVATE_KEY: validatedPrivateKey,
@@ -86,7 +90,6 @@ function loadConfig() {
     logger.debug('[loadConfig] Base config object created.');
 
     // --- Merge Global Settings from Network Config File ---
-    // Update handled keys to include the Sushi pools and router address explicitly
     const handledKeys = ['CHAINLINK_FEEDS', 'UNISWAP_V3_POOLS', 'SUSHISWAP_POOLS', 'SUSHISWAP_ROUTER_ADDRESS'];
     for (const key in networkSpecificConfig) {
         if (!handledKeys.includes(key)) {
@@ -105,22 +108,28 @@ function loadConfig() {
     const rawV3PoolGroups = networkSpecificConfig.UNISWAP_V3_POOLS || [];
     logger.debug(`[Config V3 Pools] Found ${rawV3PoolGroups.length} V3 pool groups defined in ${networkName}.js`);
     for (const group of rawV3PoolGroups) {
-        const token0 = TOKENS[group.token0Symbol];
-        const token1 = TOKENS[group.token1Symbol];
+        // Use the TOKENS object from the baseConfig (which came from the import)
+        const token0 = baseConfig.TOKENS[group.token0Symbol];
+        const token1 = baseConfig.TOKENS[group.token1Symbol];
         if (!token0 || !token1) {
             logger.warn(`[Config V3 Pools] Skipping group ${group.name}: Invalid token symbols ${group.token0Symbol}/${group.token1Symbol}. Ensure they exist in constants/tokens.js`);
             continue;
         }
 
         for (const feeTierStr in group.feeTierToEnvMap) {
+            // Skip processing if feeTierToEnvMap value is null or undefined (e.g., for commented out entries in arbitrum.js)
+             const envVarName = group.feeTierToEnvMap[feeTierStr];
+             if (!envVarName) {
+                 // logger.debug(`[Config V3 Pools] Skipping fee tier "${feeTierStr}" for group ${group.name}: No env var defined in feeTierToEnvMap.`);
+                 continue;
+             }
+
             const fee = parseInt(feeTierStr, 10);
             if (isNaN(fee)) {
                  logger.warn(`[Config V3 Pools] Skipping fee tier "${feeTierStr}" for group ${group.name}: Invalid fee tier format.`);
                  continue;
             }
-            const envVarName = group.feeTierToEnvMap[feeTierStr];
             const poolAddress = ConfigHelpers.Validators.validateAndNormalizeAddress(process.env[envVarName], envVarName);
-            // console.log(`DEBUG: Checking V3 Pool Env Var: ${envVarName}, Value: ${process.env[envVarName]}, Validated Address: ${poolAddress}`); // Temporary debug log
             if (poolAddress && poolAddress !== ethers.ZeroAddress) {
                 if (loadedPoolAddresses.has(poolAddress.toLowerCase())) {
                     logger.warn(`[Config V3 Pools] Duplicate pool address ${poolAddress} for ${group.name}/${fee}bps. Skipping.`);
@@ -138,9 +147,14 @@ function loadConfig() {
                  });
                  loadedPoolAddresses.add(poolAddress.toLowerCase());
                  logger.debug(`[Config V3 Pools] Loaded ${group.name} (${fee}bps): ${poolAddress}`);
-                 // console.log(`DEBUG: Added V3 Pool: ${poolAddress}`); // Temporary debug log
             } else {
-                 logger.warn(`[Config V3 Pools] Skipping ${group.name} (${fee}bps): Missing or invalid address in env var ${envVarName}.`);
+                 // Only warn if the address wasn't found for a defined env var
+                 if(process.env[envVarName] === undefined) {
+                    // Don't warn if the env var itself is missing (e.g., ARBITRUM_WETH_USDC_10000_ADDRESS wasn't set)
+                    // logger.debug(`[Config V3 Pools] Env var ${envVarName} not found for ${group.name} (${fee}bps).`);
+                 } else {
+                    logger.warn(`[Config V3 Pools] Skipping ${group.name} (${fee}bps): Invalid address in env var ${envVarName} (Value: ${process.env[envVarName]}).`);
+                 }
             }
         }
     }
@@ -148,9 +162,14 @@ function loadConfig() {
     // Process SushiSwap Pools
     const rawSushiPools = networkSpecificConfig.SUSHISWAP_POOLS || [];
     logger.debug(`[Config Sushi Pools] Found ${rawSushiPools.length} Sushi pool definitions in ${networkName}.js`);
+
+    // *** ADDED DEBUG LOG HERE ***
+    console.log("DEBUG: Available TOKENS keys before Sushi loop:", Object.keys(baseConfig.TOKENS));
+
      for (const poolInfo of rawSushiPools) {
-         const token0 = TOKENS[poolInfo.token0Symbol];
-         const token1 = TOKENS[poolInfo.token1Symbol];
+         // Use the TOKENS object from the baseConfig
+         const token0 = baseConfig.TOKENS[poolInfo.token0Symbol];
+         const token1 = baseConfig.TOKENS[poolInfo.token1Symbol];
          if (!token0 || !token1) {
              logger.warn(`[Config Sushi Pools] Skipping group ${poolInfo.name}: Invalid token symbols ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}. Ensure they exist in constants/tokens.js`);
              continue;
@@ -162,7 +181,6 @@ function loadConfig() {
              continue;
          }
          const poolAddress = ConfigHelpers.Validators.validateAndNormalizeAddress(process.env[envVarName], envVarName);
-         // console.log(`DEBUG: Checking Sushi Pool Env Var: ${envVarName}, Value: ${process.env[envVarName]}, Validated Address: ${poolAddress}`); // Temporary debug log
          if (poolAddress && poolAddress !== ethers.ZeroAddress) {
               if (loadedPoolAddresses.has(poolAddress.toLowerCase())) {
                   logger.warn(`[Config Sushi Pools] Duplicate pool address ${poolAddress} for ${poolInfo.name}. Skipping.`);
@@ -180,16 +198,18 @@ function loadConfig() {
               });
               loadedPoolAddresses.add(poolAddress.toLowerCase());
               logger.debug(`[Config Sushi Pools] Loaded ${poolInfo.name}: ${poolAddress}`);
-              // console.log(`DEBUG: Added Sushi Pool: ${poolAddress}`); // Temporary debug log
          } else {
-             logger.warn(`[Config Sushi Pools] Skipping ${poolInfo.name}: Missing or invalid address in env var ${envVarName}.`);
+             // Only warn if the address wasn't found for a defined env var
+              if(process.env[envVarName] === undefined) {
+                  // logger.debug(`[Config Sushi Pools] Env var ${envVarName} not found for ${poolInfo.name}.`);
+              } else {
+                 logger.warn(`[Config Sushi Pools] Skipping ${poolInfo.name}: Invalid address in env var ${envVarName} (Value: ${process.env[envVarName]}).`);
+              }
          }
      }
-    // console.log(`DEBUG: Total pools loaded: ${allPoolConfigs.length}`); // Temporary debug log
 
     // --- Assign Processed Pools to Config ---
     baseConfig.POOL_CONFIGS = allPoolConfigs; // Store the combined list
-    // Update the helper function to use the new list
     baseConfig.getAllPoolConfigs = () => baseConfig.POOL_CONFIGS || [];
     // --- ---
 
@@ -213,53 +233,47 @@ try {
         'CHAIN_ID',
         'RPC_URLS',
         'PRIVATE_KEY',
-        'FLASH_SWAP_CONTRACT_ADDRESS', // Still check this, even if ZeroAddress is allowed initially
-        // 'TICKLENS_ADDRESS', // TickLens might be optional depending on finder strategy
-        'POOL_CONFIGS', // Check for POOL_CONFIGS now
+        'FLASH_SWAP_CONTRACT_ADDRESS',
+        // 'TICKLENS_ADDRESS', // Optional
+        'POOL_CONFIGS',
         'TOKENS'
     ];
     const missingEssential = essentialKeys.filter(key => {
-        const value = config?.[key]; // Use optional chaining
+        const value = config?.[key];
         if (value === undefined || value === null) return true;
         if (key === 'RPC_URLS' && (!Array.isArray(value) || value.length === 0)) return true;
-        // Allow ZeroAddress for FLASH_SWAP_CONTRACT_ADDRESS here, check might happen later if needed by logic
-        // if ((key === 'TICKLENS_ADDRESS' || key === 'FLASH_SWAP_CONTRACT_ADDRESS') && value === ethers.ZeroAddress) return true;
         if (key === 'POOL_CONFIGS' && (!Array.isArray(value) || value.length === 0)) {
-            // Specific check for empty pool list
              logger.error(`[Config Check] CRITICAL: ${key} is empty. No pools were loaded successfully. Check .env variables and config/${config.NAME}.js definitions.`);
              return true;
         }
         if (key === 'TOKENS' && (typeof value !== 'object' || Object.keys(value).length === 0)) return true;
+        // Allow ZeroAddress for FLASH_SWAP_CONTRACT_ADDRESS initially
         return false;
     });
 
     if (missingEssential.length > 0) {
-        // Error message improved to be more specific
         throw new Error(`[Config] CRITICAL: Missing or invalid essential config keys: ${missingEssential.join(', ')}. Check preceding logs, .env, and network config file.`);
     }
 
-    // Add check for TickLens only if it's not ZeroAddress and seems invalid (optional, basic check)
+    // Optional validation warnings
     if (config.TICKLENS_ADDRESS && config.TICKLENS_ADDRESS !== ethers.ZeroAddress && !ethers.isAddress(config.TICKLENS_ADDRESS)) {
          logger.warn(`[Config Check] TICKLENS_ADDRESS (${config.TICKLENS_ADDRESS}) looks invalid but is not ZeroAddress.`);
     }
-     // Add check for FlashSwap only if it's not ZeroAddress and seems invalid (optional, basic check)
     if (config.FLASH_SWAP_CONTRACT_ADDRESS && config.FLASH_SWAP_CONTRACT_ADDRESS !== ethers.ZeroAddress && !ethers.isAddress(config.FLASH_SWAP_CONTRACT_ADDRESS)) {
          logger.warn(`[Config Check] FLASH_SWAP_CONTRACT_ADDRESS (${config.FLASH_SWAP_CONTRACT_ADDRESS}) looks invalid but is not ZeroAddress.`);
     }
-
 
     logger.info(`[Config] Config loaded successfully: Network=${config.NAME}, ChainID=${config.CHAIN_ID}, Pools Loaded=${config.POOL_CONFIGS.length}`); // Log pool count
 } catch (error) {
     console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     console.error("!!! CRITICAL CONFIGURATION LOADING ERROR !!!");
     console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-    // Use logger if available, otherwise console.error
     const logError = logger?.error || console.error;
-    logError(`[Config Load Error] ${error.message}`); // Log the specific error message
-    console.error("Stack Trace:", error.stack);        // Always log stack to console for visibility
+    logError(`[Config Load Error] ${error.message}`);
+    console.error("Stack Trace:", error.stack);
     logError("!!! Application cannot continue. Exiting. !!!");
-    process.exit(1); // <-- *** THIS IS THE IMPORTANT ADDITION ***
+    process.exit(1);
 }
 
 module.exports = config;
-console.log('[Config Top Level] module.exports reached.'); // This should only log if the try block succeeded
+console.log('[Config Top Level] module.exports reached.');
