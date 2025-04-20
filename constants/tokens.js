@@ -71,7 +71,7 @@ const _FRAX = createTokenWithMetadata(
 );
 
 const _GMX = createTokenWithMetadata(
-    ARBITRUM_CHAIN_ID, '0xfc5A1A6EB076a2C7140eC451cC31Ba958Ed97231', 18, 'GMX', 'GMX',
+    ARBITRUM_CHAIN_ID, '0xfc5a1a6eb076a2c7ad06ed22c90d7e710e35ad0a', 18, 'GMX', 'GMX',
     { canonicalSymbol: 'GMX', type: 'defi-perp' } // Type: DeFi / Perp Dex
 );
 
