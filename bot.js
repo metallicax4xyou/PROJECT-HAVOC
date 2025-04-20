@@ -1,5 +1,6 @@
 // /workspaces/arbitrum-flash/bot.js
 // --- VERSION CORRECTED TO PASS CONFIG/PROVIDER TO FlashSwapManager ---
+// --- ADDED DEBUG LOG BEFORE FlashSwapManager CREATION ---
 
 // --- Force .env loading FIRST ---
 console.log('[Bot Start] Attempting to load .env...');
@@ -48,6 +49,13 @@ async function main() {
 
         // 3. Initialize FlashSwapManager (Handles Signer, NonceManager, Contract)
         logger.info('[Main] Initializing Flash Swap Manager...');
+
+        // --- *** ADDED DEBUG LOG HERE *** ---
+        // Log object keys if config exists, otherwise log that it's falsy
+        logger.debug('[Main Debug] Passing config to FlashSwapManager:', config ? Object.keys(config) : 'Config is falsy!');
+        logger.debug('[Main Debug] Passing provider to FlashSwapManager:', !!provider); // Log true/false if provider exists
+        // --- *** END DEBUG LOG *** ---
+
         // --- *** CORRECTED LINE: Pass config and provider *** ---
         const flashSwapManager = new FlashSwapManager(config, provider);
         // --- *** END CORRECTION *** ---
