@@ -1,11 +1,13 @@
 // core/fetchers/uniswapV3Fetcher.js
+// --- Uses shared getCanonicalPairKey utility ---
 const { ethers } = require('ethers');
 const { ABIS } = require('../../constants/abis');
 const logger = require('../../utils/logger');
 const { ArbitrageError } = require('../../utils/errorHandler');
 const { Token } = require('@uniswap/sdk-core');
-const { TOKENS } = require('../../constants/tokens'); // Assuming TOKENS is exported correctly
+const { TOKENS } = require('../../constants/tokens');
 const { getTickSpacingFromFeeBps } = require('../scannerUtils');
+const { getCanonicalPairKey } = require('../../utils/pairUtils'); // <-- Import the utility
 
 const MAX_UINT128 = (1n << 128n) - 1n;
 
@@ -15,7 +17,7 @@ class UniswapV3Fetcher {
             throw new ArbitrageError('UniswapV3Fetcher requires a provider.', 'INITIALIZATION_ERROR');
         }
         this.provider = provider;
-        this.poolContractCache = {}; // Internal cache for V3 contracts
+        this.poolContractCache = {};
         logger.debug('[UniswapV3Fetcher] Initialized.');
     }
 
@@ -36,13 +38,13 @@ class UniswapV3Fetcher {
     }
 
     /**
-     * Fetches the state (slot0, liquidity) for a single Uniswap V3 pool.
+     * Fetches the state for a single Uniswap V3 pool.
      * @param {object} poolInfo Configuration object for the pool.
      * @returns {Promise<object|null>} Formatted pool state object or null on failure.
      */
     async fetchPoolState(poolInfo) {
         const address = poolInfo.address;
-        const networkTokens = TOKENS; // Assuming TOKENS is directly the object for the current network
+        const networkTokens = TOKENS; // Assumes TOKENS is pre-filtered for the correct network
         const logPrefix = `[UniswapV3Fetcher Pool ${address.substring(0,6)}]`;
         logger.debug(`${logPrefix} Fetching state (${poolInfo.groupName} ${poolInfo.fee}bps)`);
 
@@ -76,30 +78,23 @@ class UniswapV3Fetcher {
             // Resolve Token objects using the symbols from poolInfo
             const token0 = networkTokens[poolInfo.token0Symbol];
             const token1 = networkTokens[poolInfo.token1Symbol];
-            if (!(token0 instanceof Token) || !(token1 instanceof Token)) {
-                throw new Error(`${logPrefix} Could not resolve SDK Tokens for ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}.`);
+            if (!token0 || !token1) { // Check if tokens were found in TOKENS map
+                throw new Error(`${logPrefix} Could not resolve SDK Tokens for ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}. Check constants/tokens.js and pool config.`);
             }
 
-            // ---> MODIFIED PAIRKEY LOGIC + DEBUG LOGS <---
-            // Use canonicalSymbol if available, otherwise default to symbol
-            const canonicalSymbol0 = token0.canonicalSymbol || token0.symbol;
-            const canonicalSymbol1 = token1.canonicalSymbol || token1.symbol;
+            // ---> USE SHARED UTILITY FOR PAIRKEY <---
+            const pairKey = getCanonicalPairKey(token0, token1);
+            if (!pairKey) {
+                // Error already logged by utility, just need to handle the null return
+                throw new Error(`${logPrefix} Failed to generate canonical pair key for ${token0.symbol}/${token1.symbol}.`);
+            }
+            // ---> END PAIRKEY LOGIC <---
 
-             // TEMP DEBUG LOGGING
-             logger.debug(`${logPrefix} T0: ${token0.symbol} (Canon: ${token0.canonicalSymbol ?? 'N/A'}) -> Use: ${canonicalSymbol0}`);
-             logger.debug(`${logPrefix} T1: ${token1.symbol} (Canon: ${token1.canonicalSymbol ?? 'N/A'}) -> Use: ${canonicalSymbol1}`);
-             // END TEMP DEBUG LOGGING
-
-            // Generate pairKey based on sorted canonical symbols
-            const pairKey = canonicalSymbol0.toUpperCase() < canonicalSymbol1.toUpperCase()
-                ? `${canonicalSymbol0.toUpperCase()}-${canonicalSymbol1.toUpperCase()}`
-                : `${canonicalSymbol1.toUpperCase()}-${canonicalSymbol0.toUpperCase()}`;
-
-             // TEMP DEBUG LOGGING
-             logger.debug(`${logPrefix} Generated PairKey: ${pairKey}`);
-             // END TEMP DEBUG LOGGING
-            // ---> END MODIFIED PAIRKEY LOGIC <---
-
+            // TEMP DEBUG LOGGING (Keep for now as requested)
+            logger.debug(`${logPrefix} T0: ${token0.symbol} (Canon: ${token0.canonicalSymbol ?? 'N/A'})`);
+            logger.debug(`${logPrefix} T1: ${token1.symbol} (Canon: ${token1.canonicalSymbol ?? 'N/A'})`);
+            logger.debug(`${logPrefix} Generated PairKey: ${pairKey}`);
+            // END TEMP DEBUG LOGGING
 
             // Return the formatted state object
             return {
@@ -110,16 +105,17 @@ class UniswapV3Fetcher {
                 liquidity: currentLiquidity,
                 sqrtPriceX96: currentSqrtPriceX96,
                 tickSpacing: getTickSpacingFromFeeBps(poolInfo.fee),
-                token0: token0,
-                token1: token1,
-                token0Symbol: poolInfo.token0Symbol,
-                token1Symbol: poolInfo.token1Symbol,
+                token0: token0, // Keep original Token objects
+                token1: token1, // Keep original Token objects
+                token0Symbol: poolInfo.token0Symbol, // Keep original symbols
+                token1Symbol: poolInfo.token1Symbol, // Keep original symbols
                 groupName: poolInfo.groupName || 'N/A',
-                pairKey: pairKey,
+                pairKey: pairKey, // Use the key generated by the utility
             };
 
         } catch (error) {
             logger.warn(`${logPrefix} Failed to fetch/process state: ${error.message}`);
+            // Consider adding stack trace for harder errors: logger.error(error.stack);
             return null;
         }
     }
