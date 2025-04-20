@@ -1,49 +1,45 @@
 // core/finders/spatialFinder.js
-// --- VERSION 1.16: Refactored - Extracted _groupPoolsByPair ---
+// --- VERSION 1.19: Refactored - Uses external priceCalculation utilities ---
 
 const logger = require('../../utils/logger');
 const { handleError, ArbitrageError } = require('../../utils/errorHandler');
-const { getScaledPriceRatio, formatScaledBigIntForLogging } = require('../scannerUtils');
+const { getScaledPriceRatio, formatScaledBigIntForLogging } = require('../scannerUtils'); // Assuming path is correct
 
-// Constants (Keep these at the top)
-const BIGNUM_SCALE_DECIMALS = 36;
+// Import calculation functions from the new utility file
+const {
+    calculateV3Price,
+    calculateSushiPrice,
+    calculateEffectivePrices
+} = require('../calculation/priceCalculation'); // Adjust path if needed
+
+// Constants specific to this finder
+const BIGNUM_SCALE_DECIMALS = 36; // Should match the scale used in priceCalculation.js
 const BIGNUM_SCALE = 10n ** BigInt(BIGNUM_SCALE_DECIMALS);
-const PROFIT_THRESHOLD_SCALED = (10015n * BIGNUM_SCALE) / 10000n; // 1.0015 (0.15%)
-const TEN_THOUSAND = 10000n;
+const PROFIT_THRESHOLD_SCALED = (10015n * BIGNUM_SCALE) / 10000n; // 1.0015 (0.15%) threshold for post-fee profit
 
 class SpatialFinder {
     constructor() {
-        logger.info('[SpatialFinder V1.16] Initialized.');
+        logger.info('[SpatialFinder V1.19] Initialized.');
     }
 
     /**
      * Groups live pool states by token pair key and DEX type.
-     * @param {Map<string, object>} livePoolStatesMap - Map of pool address to pool state object.
-     * @returns {object} An object where keys are pairKeys and values contain arrays of uniswapV3 and sushiswap pools.
      * @private
      */
     _groupPoolsByPair(livePoolStatesMap) {
-        const logPrefix = '[SpatialFinder V1.16 _groupPoolsByPair]';
+        const logPrefix = '[SpatialFinder V1.19 _groupPoolsByPair]';
         const poolsByPair = {};
         const poolAddresses = livePoolStatesMap ? Object.keys(livePoolStatesMap) : [];
-        logger.debug(`${logPrefix} Grouping ${poolAddresses.length} fetched pool states...`);
+        logger.debug(`${logPrefix} Grouping ${poolAddresses.length} states...`);
 
-        if (poolAddresses.length === 0) {
-            logger.info(`${logPrefix} No live pool states provided.`);
-            return poolsByPair; // Return empty object
-        }
+        if (poolAddresses.length === 0) { return poolsByPair; }
 
         for (const address of poolAddresses) {
             const poolState = livePoolStatesMap[address];
-            if (!poolState || !poolState.pairKey) {
-                logger.warn(`${logPrefix} Skipping pool ${address}: Missing state or pairKey.`);
-                continue;
-            }
-
+            if (!poolState || !poolState.pairKey) { continue; } // Skip invalid states
             if (!poolsByPair[poolState.pairKey]) {
                 poolsByPair[poolState.pairKey] = { uniswapV3: [], sushiswap: [] };
             }
-
             if (poolState.dex === 'UniswapV3') {
                 poolsByPair[poolState.pairKey].uniswapV3.push(poolState);
             } else if (poolState.dex === 'SushiSwap') {
@@ -51,126 +47,156 @@ class SpatialFinder {
             }
         }
 
-        // Log the grouping results clearly
-        logger.debug(`${logPrefix} --- Final Grouping Structure ---`);
-        for (const key in poolsByPair) {
-            if (poolsByPair.hasOwnProperty(key)) {
-                 logger.debug(`  PairKey: '${key}' | V3 Count: ${poolsByPair[key].uniswapV3.length} | Sushi Count: ${poolsByPair[key].sushiswap.length}`);
-            }
-        }
-        logger.debug(`--- END GROUPING ---`);
+        logger.debug(`${logPrefix} Grouping complete. ${Object.keys(poolsByPair).length} pairs found.`);
         return poolsByPair;
     }
 
-    // --- Price Calculation Helpers ---
-    // (Keep _calculateV3Price and _calculateSushiPrice as they are for now)
-    _calculateV3Price(poolState) { /* ... existing V3 price logic ... */ }
-    _calculateSushiPrice(poolState) { /* ... existing Sushi price logic ... */ }
+    /**
+     * Checks for a profitable spatial arbitrage opportunity between two pools based on effective prices.
+     * @private
+     * @returns {object|null} An opportunity object if found, otherwise null.
+     */
+    _checkSpatialOpportunity(effectivePrices, v3Pool, sushiPool, priceV3_scaled, priceSushi_scaled, compareLogPrefix) {
+        const { sushiBuy, v3Sell, v3Buy, sushiSell } = effectivePrices;
+        let opportunity = null;
+        let foundOpp = false; // Flag to check if any direction is profitable
+
+        // Log effective prices before checking threshold
+        logger.debug(`${compareLogPrefix}`);
+        logger.debug(`  Raw Prices   | V3: ${formatScaledBigIntForLogging(priceV3_scaled)} | Sushi: ${formatScaledBigIntForLogging(priceSushi_scaled)}`);
+        logger.debug(`  Sushi->V3 Eff| Buy Sushi Cost: ${formatScaledBigIntForLogging(sushiBuy)} | Sell V3 Receive: ${formatScaledBigIntForLogging(v3Sell)}`);
+        logger.debug(`  V3->Sushi Eff| Buy V3 Cost:    ${formatScaledBigIntForLogging(v3Buy)} | Sell Sushi Receive: ${formatScaledBigIntForLogging(sushiSell)}`);
 
 
-    // --- Main findOpportunities Method (Modified) ---
+        // Check Opportunity: Buy Sushi -> Sell V3
+        if (v3Sell * BIGNUM_SCALE > sushiBuy * PROFIT_THRESHOLD_SCALED) {
+            const profitRatio = getScaledPriceRatio(v3Sell, sushiBuy, BIGNUM_SCALE_DECIMALS);
+            logger.info(`${compareLogPrefix} Opportunity Found: Buy Sushi -> Sell V3. Ratio: ${profitRatio.toFixed(6)} > Threshold`);
+            opportunity = {
+                type: 'spatial',
+                path: [sushiPool.address, v3Pool.address],
+                pools: [sushiPool, v3Pool],
+                direction: 'SushiToV3',
+                pairKey: v3Pool.pairKey,
+                priceV3Raw: priceV3_scaled, priceSushiRaw: priceSushi_scaled, // Keep raw prices for reference
+                effectiveBuyPrice: sushiBuy, effectiveSellPrice: v3Sell,
+                profitRatio: profitRatio, profitThreshold: PROFIT_THRESHOLD_SCALED
+            };
+            foundOpp = true;
+        }
+
+        // Check Opportunity: Buy V3 -> Sell Sushi
+        // Allow checking the second direction even if the first was found
+        if (sushiSell * BIGNUM_SCALE > v3Buy * PROFIT_THRESHOLD_SCALED) {
+            const profitRatio = getScaledPriceRatio(sushiSell, v3Buy, BIGNUM_SCALE_DECIMALS);
+            logger.info(`${compareLogPrefix} Opportunity Found: Buy V3 -> Sell Sushi. Ratio: ${profitRatio.toFixed(6)} > Threshold`);
+            // If an opportunity was already found, decide: overwrite, return both, or ignore?
+            // Current: Overwrite with V3->Sushi if it's also profitable. Consider returning an array if both needed.
+            opportunity = {
+                type: 'spatial',
+                path: [v3Pool.address, sushiPool.address],
+                pools: [v3Pool, sushiPool],
+                direction: 'V3ToSushi',
+                pairKey: v3Pool.pairKey,
+                priceV3Raw: priceV3_scaled, priceSushiRaw: priceSushi_scaled,
+                effectiveBuyPrice: v3Buy, effectiveSellPrice: sushiSell,
+                profitRatio: profitRatio, profitThreshold: PROFIT_THRESHOLD_SCALED
+            };
+            foundOpp = true;
+        }
+
+        if (!foundOpp) {
+             logger.debug(`${compareLogPrefix} No profitable opportunity found meeting threshold (${formatScaledBigIntForLogging(PROFIT_THRESHOLD_SCALED)}).`);
+        }
+
+        return opportunity; // Return the latest found opportunity object or null
+    }
+
+
+    /**
+     * Main method to find spatial arbitrage opportunities.
+     * @param {Map<string, object>} livePoolStatesMap - Map of pool address to pool state object.
+     * @returns {Array<object>} A list of potential arbitrage opportunities.
+     */
     findOpportunities(livePoolStatesMap) {
-        const logPrefix = '[SpatialFinder V1.16]';
-        logger.info(`${logPrefix} Starting spatial (UniV3 vs SushiSwap) opportunity scan...`);
+        const logPrefix = '[SpatialFinder V1.19]';
+        logger.info(`${logPrefix} Starting spatial scan...`);
         const opportunities = [];
-        const checkedPairings = new Set(); // Keep track of checked V3-Sushi pairs
+        const checkedPairings = new Set(); // Avoid duplicate V3-Sushi checks
 
-        // Step 1: Group pools using the new helper method
         const poolsByPair = this._groupPoolsByPair(livePoolStatesMap);
-
-        // Step 2: Iterate through pairs and compare
         const pairKeysToCompare = Object.keys(poolsByPair);
-        logger.debug(`${logPrefix} Starting comparisons across ${pairKeysToCompare.length} unique pairs found in grouping.`);
+        logger.debug(`${logPrefix} Comparing across ${pairKeysToCompare.length} unique pairs.`);
 
         if (pairKeysToCompare.length === 0) {
-            logger.info(`${logPrefix} No pairs found with pools on both Uniswap V3 and SushiSwap.`);
-            // Fall through to return empty opportunities array
+            logger.info(`${logPrefix} No pairs found on both DEXs.`);
+            return opportunities; // Early exit
         }
 
         for (const pairKey of pairKeysToCompare) {
             const pairPools = poolsByPair[pairKey];
+            if (pairPools.uniswapV3.length === 0 || pairPools.sushiswap.length === 0) { continue; } // Skip incomplete pairs
+            logger.debug(`${logPrefix} <<< Comparing Pair: ${pairKey} >>>`);
 
-            // Skip if the pair doesn't exist on both DEXs
-            if (pairPools.uniswapV3.length === 0 || pairPools.sushiswap.length === 0) {
-                logger.debug(`${logPrefix} Skipping pair ${pairKey}: Not present on both DEXs.`);
-                continue;
-            }
-            logger.debug(`${logPrefix} <<<>>> Proceeding with comparison for pair: ${pairKey} <<<>>>`);
-
-            // Compare every V3 pool with every SushiSwap pool for the same pair
             for (const v3Pool of pairPools.uniswapV3) {
                 for (const sushiPool of pairPools.sushiswap) {
-                    // Generate a unique ID for this specific V3-Sushi pairing
                     const pairingId = `${v3Pool.address}-${sushiPool.address}`;
-                    if (checkedPairings.has(pairingId)) {
-                        logger.trace(`${logPrefix} Skipping already checked pairing: ${pairingId}`);
-                        continue;
-                    }
+                    if (checkedPairings.has(pairingId)) { continue; }
                     checkedPairings.add(pairingId);
-
-                    const compareLogPrefix = `${logPrefix} Compare [${pairKey}] V3(${v3Pool.fee}bps @ ${v3Pool.address.substring(0,6)}) vs Sushi(@ ${sushiPool.address.substring(0,6)}):`;
+                    const compareLogPrefix = `${logPrefix} Cmp [${pairKey}] V3(${v3Pool.fee}bps @ ${v3Pool.address.substring(0,6)}) vs Sushi(@ ${sushiPool.address.substring(0,6)}):`;
 
                     try {
-                        // --- Calculate Raw Prices ---
-                        const priceV3_scaled = this._calculateV3Price(v3Pool);
-                        const priceSushi_scaled = this._calculateSushiPrice(sushiPool);
+                        // 1. Calculate Raw Prices (using external utility)
+                        const priceV3_scaled = calculateV3Price(v3Pool);
+                        const priceSushi_scaled = calculateSushiPrice(sushiPool);
 
-                        // Validate raw prices before proceeding
-                        logger.debug(`${compareLogPrefix} Raw Price Check | V3_scaled: ${formatScaledBigIntForLogging(priceV3_scaled, BIGNUM_SCALE_DECIMALS)}, Sushi_scaled: ${formatScaledBigIntForLogging(priceSushi_scaled, BIGNUM_SCALE_DECIMALS)}`);
-                        if (priceV3_scaled === null || priceSushi_scaled === null || priceV3_scaled <= 0n || priceSushi_scaled <= 0n) {
-                             logger.warn(`${compareLogPrefix} Skipping comparison due to null or non-positive raw price.`);
-                             continue;
+                        if (priceV3_scaled === null || priceSushi_scaled === null) {
+                             logger.warn(`${compareLogPrefix} Skipping: Could not calculate valid raw prices.`);
+                             continue; // Cannot proceed without raw prices
+                         }
+                         // Non-positive checks (optional here if handled in calc functions)
+                         if (priceV3_scaled <= 0n || priceSushi_scaled <= 0n) {
+                            logger.warn(`${compareLogPrefix} Skipping: Non-positive raw price detected.`);
+                            continue;
                          }
 
-                        // --- Effective Price Calculation (Still inline - will refactor next) ---
-                        // ... (existing effective price calculation logic) ...
-                        logger.debug(`${compareLogPrefix} Preparing values for effective price calc...`);
-                        let v3FeeBps, sushiFeeBps, divisorSushi, divisorV3;
-                        try {
-                             v3FeeBps = BigInt(v3Pool.fee); sushiFeeBps = BigInt(sushiPool.fee);
-                             divisorSushi = (TEN_THOUSAND - sushiFeeBps); divisorV3 = (TEN_THOUSAND - v3FeeBps);
-                             if (divisorSushi <= 0n || divisorV3 <= 0n || TEN_THOUSAND <= 0n || BIGNUM_SCALE <= 0n) { throw new ArbitrageError(`Invalid fee divisor detected`); }
-                             logger.debug(`${compareLogPrefix} Fees and Divisors OK | V3 Fee: ${v3FeeBps}, Sushi Fee: ${sushiFeeBps}, DivV3: ${divisorV3}, DivSushi: ${divisorSushi}`);
-                        } catch (feeError) { logger.error(`${compareLogPrefix} Error preparing fee values: ${feeError.message}`); handleError(feeError, `SpatialFeePrep ${pairKey}`); continue; }
 
-                        let effectiveSushiBuyPrice_scaled, effectiveV3SellPrice_scaled, effectiveV3BuyPrice_scaled, effectiveSushiSellPrice_scaled;
-                        let calcError = null;
-                        // (Existing try/catch blocks for each effective price calculation)
-                        try { /* effectiveSushiBuyPrice_scaled calc */ } catch (e) { calcError = e; /* log */ }
-                        if (!calcError) try { /* effectiveV3SellPrice_scaled calc */ } catch (e) { calcError = e; /* log */ }
-                        if (!calcError) try { /* effectiveV3BuyPrice_scaled calc */ } catch (e) { calcError = e; /* log */ }
-                        if (!calcError) try { /* effectiveSushiSellPrice_scaled calc */ } catch (e) { calcError = e; /* log */ }
-                        if (calcError) { logger.warn(`${compareLogPrefix} Skipping profitability check due to effective price calculation error.`); handleError(calcError, `SpatialEffectivePriceCalc ${pairKey}`); continue; }
-                        logger.debug(`${compareLogPrefix} Effective price calculation completed.`);
-                         // --- END Effective Price Calculation (Inline Block) ---
+                        // 2. Calculate Effective Prices (using external utility)
+                        const effectivePrices = calculateEffectivePrices(v3Pool, sushiPool, priceV3_scaled, priceSushi_scaled);
+
+                        if (!effectivePrices) {
+                            logger.warn(`${compareLogPrefix} Skipping: Could not calculate effective prices.`);
+                            continue; // Error logged in utility function
+                        }
 
 
-                        // --- Log Calculated Prices ---
-                        logger.debug(`${compareLogPrefix}`);
-                        logger.debug(`  Raw Prices   | V3: ${formatScaledBigIntForLogging(priceV3_scaled, BIGNUM_SCALE_DECIMALS)} | Sushi: ${formatScaledBigIntForLogging(priceSushi_scaled, BIGNUM_SCALE_DECIMALS)}`);
-                        logger.debug(`  Sushi->V3 Eff| Buy Sushi Cost: ${formatScaledBigIntForLogging(effectiveSushiBuyPrice_scaled, BIGNUM_SCALE_DECIMALS)} | Sell V3 Receive: ${formatScaledBigIntForLogging(effectiveV3SellPrice_scaled, BIGNUM_SCALE_DECIMALS)}`);
-                        logger.debug(`  V3->Sushi Eff| Buy V3 Cost:    ${formatScaledBigIntForLogging(effectiveV3BuyPrice_scaled, BIGNUM_SCALE_DECIMALS)} | Sell Sushi Receive: ${formatScaledBigIntForLogging(effectiveSushiSellPrice_scaled, BIGNUM_SCALE_DECIMALS)}`);
+                        // 3. Check for Opportunity (using internal helper)
+                        const opportunity = this._checkSpatialOpportunity(
+                            effectivePrices,
+                            v3Pool,
+                            sushiPool,
+                            priceV3_scaled,
+                            priceSushi_scaled,
+                            compareLogPrefix
+                        );
 
-
-                        // --- Profitability Check (Still inline - will refactor next) ---
-                        // ... (existing profitability check logic using PROFIT_THRESHOLD_SCALED) ...
-                        let foundOpp = false;
-                        if (effectiveV3SellPrice_scaled * BIGNUM_SCALE > effectiveSushiBuyPrice_scaled * PROFIT_THRESHOLD_SCALED) { /* push opp */ foundOpp = true; }
-                        if (effectiveSushiSellPrice_scaled * BIGNUM_SCALE > effectiveV3BuyPrice_scaled * PROFIT_THRESHOLD_SCALED) { /* push opp */ foundOpp = true; }
-                        if (!foundOpp) { logger.debug(`${compareLogPrefix} No profitable opportunity found meeting threshold.`); }
-                        // --- END Profitability Check (Inline Block) ---
+                        if (opportunity) {
+                            opportunities.push(opportunity);
+                        }
 
                     } catch (outerError) {
-                         logger.error(`${compareLogPrefix} Outer error during comparison: ${outerError.message}`);
-                         handleError(outerError, `SpatialComparison ${pairKey} ${pairingId}`);
+                         // Catch unexpected errors during the comparison loop for this pair
+                         logger.error(`${compareLogPrefix} Outer error during comparison: ${outerError.message} ${outerError.stack}`);
+                         handleError(outerError, `SpatialComparisonLoop ${pairKey} ${pairingId}`);
+                         // Continue to next pair, don't crash the whole finder
                     }
                 } // End Sushi loop
             } // End V3 loop
         } // End pair loop
 
-        logger.info(`${logPrefix} Scan finished. Found ${opportunities.length} potential spatial opportunities passing initial filter.`);
+        logger.info(`${logPrefix} Scan finished. Found ${opportunities.length} potential opportunities passing initial filter.`);
         return opportunities;
-    }
+    } // End findOpportunities
 
 } // End Class
 
