@@ -1,8 +1,8 @@
 // config/arbitrum.js
-// --- FINALIZED CONFIG + Added explicit feeTier property to V3 Pools ---
+// --- ADDED MIN_PROFIT_THRESHOLDS object ---
 
 // --- Chainlink Feed Addresses ---
-const CHAINLINK_FEEDS = {
+const CHAINLINK_FEEDS = { // Verify these if used
     'USDC/ETH': '0x50834F3163758fcC1Df9973b6e91f0F0F0434AD3',
     'USDT/ETH': '0x0A599A8555303467150f2aA046764Fa435551F76',
     'ARB/ETH': '0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6',
@@ -14,87 +14,27 @@ const CHAINLINK_FEEDS = {
 
 // --- Define Uniswap V3 Pool Groups to monitor ---
 const UNISWAP_V3_POOLS = [
-    // --- Existing ---
-    {
-        name: 'WETH_USDC_V3',
-        token0Symbol: 'WETH', token1Symbol: 'USDC', borrowTokenSymbol: 'WETH',
-        feeTierToEnvMap: {
-            '100': 'ARBITRUM_WETH_USDC_100_ADDRESS',
-            '500': 'ARBITRUM_WETH_USDC_500_ADDRESS',
-            '3000': 'ARBITRUM_WETH_USDC_3000_ADDRESS',
-        },
-        // Explicit fee tiers for easier access later
-        feeTiers: [100, 500, 3000]
-    },
-    {
-        name: 'WBTC_WETH_V3',
-        token0Symbol: 'WBTC', token1Symbol: 'WETH', borrowTokenSymbol: 'WETH',
-        feeTierToEnvMap: { '500': 'ARBITRUM_WBTC_WETH_500_ADDRESS' },
-        feeTiers: [500] // Added explicit fee tier
-    },
-    {
-        name: 'WETH_USDT_V3',
-        token0Symbol: 'WETH', token1Symbol: 'USDT', borrowTokenSymbol: 'WETH',
-        feeTierToEnvMap: { '500': 'ARBITRUM_WETH_USDT_500_ADDRESS' },
-        feeTiers: [500] // Added explicit fee tier
-    },
-    {
-        name: 'USDC_USDT_V3',
-        token0Symbol: 'USDC', token1Symbol: 'USDT', borrowTokenSymbol: 'USDC',
-        feeTierToEnvMap: { '100': 'ARBITRUM_USDC_USDT_100_ADDRESS' },
-        feeTiers: [100] // Added explicit fee tier
-    },
-     {
-        name: 'USDC_DAI_V3',
-        token0Symbol: 'USDC', token1Symbol: 'DAI', borrowTokenSymbol: 'USDC',
-        feeTierToEnvMap: { '100': 'ARBITRUM_USDC_DAI_100_ADDRESS' },
-        feeTiers: [100] // Added explicit fee tier
-    },
-    // --- Added ---
-    {
-        name: 'FRAX_USDT_V3',
-        token0Symbol: 'FRAX', token1Symbol: 'USDT', borrowTokenSymbol: 'USDT',
-        feeTierToEnvMap: { '500': 'ARBITRUM_FRAX_USDT_500_ADDRESS' },
-        feeTiers: [500] // Added explicit fee tier
-    },
-    {
-        name: 'WETH_LINK_V3',
-        token0Symbol: 'WETH', token1Symbol: 'LINK', borrowTokenSymbol: 'WETH',
-        feeTierToEnvMap: {
-            '3000': 'ARBITRUM_WETH_LINK_3000_ADDRESS',
-            '10000': 'ARBITRUM_WETH_LINK_10000_ADDRESS',
-        },
-        feeTiers: [3000, 10000] // Added explicit fee tiers
-    },
-    {
-        name: 'GMX_WETH_V3',
-        token0Symbol: 'GMX', token1Symbol: 'WETH', borrowTokenSymbol: 'WETH',
-        feeTierToEnvMap: {
-            '3000': 'ARBITRUM_GMX_WETH_3000_ADDRESS',
-            '10000': 'ARBITRUM_GMX_WETH_10000_ADDRESS',
-        },
-        feeTiers: [3000, 10000] // Added explicit fee tiers
-    },
-    {
-        name: 'MAGIC_WETH_V3',
-        token0Symbol: 'MAGIC', token1Symbol: 'WETH', borrowTokenSymbol: 'WETH',
-         feeTierToEnvMap: { '3000': 'ARBITRUM_MAGIC_WETH_3000_ADDRESS' },
-         feeTiers: [3000] // Added explicit fee tier
-     },
+    { name: 'WETH_USDC_V3', token0Symbol: 'WETH', token1Symbol: 'USDC', borrowTokenSymbol: 'WETH', feeTiers: [100, 500, 3000], feeTierToEnvMap: { '100': 'ARBITRUM_WETH_USDC_100_ADDRESS', '500': 'ARBITRUM_WETH_USDC_500_ADDRESS', '3000': 'ARBITRUM_WETH_USDC_3000_ADDRESS' } },
+    { name: 'WBTC_WETH_V3', token0Symbol: 'WBTC', token1Symbol: 'WETH', borrowTokenSymbol: 'WETH', feeTiers: [500], feeTierToEnvMap: { '500': 'ARBITRUM_WBTC_WETH_500_ADDRESS' } },
+    { name: 'WETH_USDT_V3', token0Symbol: 'WETH', token1Symbol: 'USDT', borrowTokenSymbol: 'WETH', feeTiers: [500], feeTierToEnvMap: { '500': 'ARBITRUM_WETH_USDT_500_ADDRESS' } },
+    { name: 'USDC_USDT_V3', token0Symbol: 'USDC', token1Symbol: 'USDT', borrowTokenSymbol: 'USDC', feeTiers: [100], feeTierToEnvMap: { '100': 'ARBITRUM_USDC_USDT_100_ADDRESS' } },
+    { name: 'USDC_DAI_V3', token0Symbol: 'USDC', token1Symbol: 'DAI', borrowTokenSymbol: 'USDC', feeTiers: [100], feeTierToEnvMap: { '100': 'ARBITRUM_USDC_DAI_100_ADDRESS' } },
+    { name: 'FRAX_USDT_V3', token0Symbol: 'FRAX', token1Symbol: 'USDT', borrowTokenSymbol: 'USDT', feeTiers: [500], feeTierToEnvMap: { '500': 'ARBITRUM_FRAX_USDT_500_ADDRESS' } },
+    { name: 'WETH_LINK_V3', token0Symbol: 'WETH', token1Symbol: 'LINK', borrowTokenSymbol: 'WETH', feeTiers: [3000, 10000], feeTierToEnvMap: { '3000': 'ARBITRUM_WETH_LINK_3000_ADDRESS', '10000': 'ARBITRUM_WETH_LINK_10000_ADDRESS' } },
+    { name: 'GMX_WETH_V3', token0Symbol: 'GMX', token1Symbol: 'WETH', borrowTokenSymbol: 'WETH', feeTiers: [3000, 10000], feeTierToEnvMap: { '3000': 'ARBITRUM_GMX_WETH_3000_ADDRESS', '10000': 'ARBITRUM_GMX_WETH_10000_ADDRESS' } },
+    { name: 'MAGIC_WETH_V3', token0Symbol: 'MAGIC', token1Symbol: 'WETH', borrowTokenSymbol: 'WETH', feeTiers: [3000], feeTierToEnvMap: { '3000': 'ARBITRUM_MAGIC_WETH_3000_ADDRESS' } },
 ];
 
 // --- Define SushiSwap (V2 Style) Pools ---
-// Sushi V2 pools typically have a fixed fee (0.3% = 3000 bps)
 const SUSHISWAP_POOLS = [
-    { name: 'WETH_USDCe_SUSHI', token0Symbol: 'WETH', token1Symbol: 'USDC.e', poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDC_E_ADDRESS', fee: 3000 },
-    { name: 'WBTC_WETH_SUSHI', token0Symbol: 'WBTC', token1Symbol: 'WETH', poolAddressEnv: 'ARBITRUM_SUSHI_WBTC_WETH_ADDRESS', fee: 3000 },
-    { name: 'ARB_WETH_SUSHI', token0Symbol: 'ARB', token1Symbol: 'WETH', poolAddressEnv: 'ARBITRUM_SUSHI_ARB_WETH_ADDRESS', fee: 3000 },
-    { name: 'WETH_USDT_SUSHI', token0Symbol: 'WETH', token1Symbol: 'USDT', poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDT_ADDRESS', fee: 3000 },
-    { name: 'WETH_LINK_SUSHI', token0Symbol: 'WETH', token1Symbol: 'LINK', poolAddressEnv: 'ARBITRUM_SUSHI_WETH_LINK_ADDRESS', fee: 3000 },
-    { name: 'GMX_WETH_SUSHI', token0Symbol: 'GMX', token1Symbol: 'WETH', poolAddressEnv: 'ARBITRUM_SUSHI_GMX_WETH_ADDRESS', fee: 3000 },
-    { name: 'MAGIC_WETH_SUSHI', token0Symbol: 'MAGIC', token1Symbol: 'WETH', poolAddressEnv: 'ARBITRUM_SUSHI_MAGIC_WETH_ADDRESS', fee: 3000 },
+    { name: 'WETH_USDCe_SUSHI', token0Symbol: 'WETH', token1Symbol: 'USDC.e', fee: 3000, poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDC_E_ADDRESS' },
+    { name: 'WBTC_WETH_SUSHI', token0Symbol: 'WBTC', token1Symbol: 'WETH', fee: 3000, poolAddressEnv: 'ARBITRUM_SUSHI_WBTC_WETH_ADDRESS' },
+    { name: 'ARB_WETH_SUSHI', token0Symbol: 'ARB', token1Symbol: 'WETH', fee: 3000, poolAddressEnv: 'ARBITRUM_SUSHI_ARB_WETH_ADDRESS' },
+    { name: 'WETH_USDT_SUSHI', token0Symbol: 'WETH', token1Symbol: 'USDT', fee: 3000, poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDT_ADDRESS' },
+    { name: 'WETH_LINK_SUSHI', token0Symbol: 'WETH', token1Symbol: 'LINK', fee: 3000, poolAddressEnv: 'ARBITRUM_SUSHI_WETH_LINK_ADDRESS' },
+    { name: 'GMX_WETH_SUSHI', token0Symbol: 'GMX', token1Symbol: 'WETH', fee: 3000, poolAddressEnv: 'ARBITRUM_SUSHI_GMX_WETH_ADDRESS' },
+    { name: 'MAGIC_WETH_SUSHI', token0Symbol: 'MAGIC', token1Symbol: 'WETH', fee: 3000, poolAddressEnv: 'ARBITRUM_SUSHI_MAGIC_WETH_ADDRESS' },
 ];
-
 
 // --- Placeholder for other DEXs ---
 const CAMELOT_POOLS = [ /* TODO: Add Camelot pools here later */ ];
@@ -107,7 +47,20 @@ const ARBITRUM_CONFIG = {
     CAMELOT_POOLS: CAMELOT_POOLS,
 
     // --- Global Settings ---
-    MIN_PROFIT_THRESHOLD_ETH: '0.000000000000000001',
+    // *** REPLACED MIN_PROFIT_THRESHOLD_ETH with MIN_PROFIT_THRESHOLDS object ***
+    MIN_PROFIT_THRESHOLDS: {
+        NATIVE: '0.001',      // Min profit in WETH (or native gas token) - e.g., 0.001 WETH
+        USDC: '10.0',         // Min profit in USDC - e.g., $10.00
+        USDT: '10.0',         // Min profit in USDT - e.g., $10.00
+        DAI: '10.0',          // Min profit in DAI - e.g., $10.00
+        WBTC: '0.0002',       // Min profit in WBTC - e.g., 0.0002 WBTC
+        ARB: '10.0',          // Min profit in ARB - e.g., 10 ARB
+        // Add others like LINK, GMX, MAGIC if they can be profit tokens
+        // LINK: '0.5',       // e.g., 0.5 LINK
+        // GMX: '0.5',        // e.g., 0.5 GMX
+        // FRAX: '10.0',      // e.g., $10.00 FRAX
+        DEFAULT: '0.0005'     // Default min profit in NATIVE token if specific threshold isn't set
+    },
     MAX_GAS_GWEI: '0.5',
     GAS_ESTIMATE_BUFFER_PERCENT: 20,
     FALLBACK_GAS_LIMIT: '3000000',
