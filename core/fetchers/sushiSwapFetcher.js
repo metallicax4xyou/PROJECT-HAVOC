@@ -1,11 +1,10 @@
 // core/fetchers/sushiSwapFetcher.js
-// --- Uses shared getCanonicalPairKey utility ---
 const { ethers } = require('ethers');
 const logger = require('../../utils/logger');
 const { ArbitrageError } = require('../../utils/errorHandler');
-const { Token } = require('@uniswap/sdk-core');
+const { Token } = require('@uniswap/sdk-core'); // Keep for type checking if needed
 const { TOKENS } = require('../../constants/tokens');
-const { getCanonicalPairKey } = require('../../utils/pairUtils'); // <-- Import the utility
+const { getCanonicalPairKey } = require('../../utils/pairUtils');
 
 const SUSHI_PAIR_ABI = [
     "function getReserves() external view returns (uint112 _reserve0, uint112 _reserve1, uint32 _blockTimestampLast)",
@@ -14,17 +13,20 @@ const SUSHI_PAIR_ABI = [
 ];
 
 class SushiSwapFetcher {
-    constructor(provider) {
-        if (!provider) {
-            throw new ArbitrageError('SushiSwapFetcher requires a provider.', 'INITIALIZATION_ERROR');
+     // Constructor now accepts the main config object
+    constructor(config) {
+        if (!config || !config.PRIMARY_RPC_URL) {
+            throw new ArbitrageError('SushiSwapFetcher requires a config object with PRIMARY_RPC_URL.', 'INITIALIZATION_ERROR');
         }
-        this.provider = provider;
+        this.provider = config.provider || new ethers.JsonRpcProvider(config.PRIMARY_RPC_URL);
+        this.config = config;
         this.poolContractCache = {};
         logger.debug('[SushiSwapFetcher] Initialized.');
     }
 
     _getPoolContract(poolAddress) {
-        const lowerCaseAddress = poolAddress.toLowerCase();
+       // ... (no change needed in this helper) ...
+       const lowerCaseAddress = poolAddress.toLowerCase();
         if (!this.poolContractCache[lowerCaseAddress]) {
             try {
                 this.poolContractCache[lowerCaseAddress] = new ethers.Contract(
@@ -40,26 +42,35 @@ class SushiSwapFetcher {
 
     /**
      * Fetches the state for a single SushiSwap (V2 style) pool.
-     * @param {object} poolInfo Configuration object for the pool.
-     * @returns {Promise<object|null>} Formatted pool state object or null on failure.
+      * @param {string} address The pool address.
+      * @param {Array<string>} pair Array containing the canonical symbols [tokenASymbol, tokenBSymbol].
+      * @returns {Promise<{success: boolean, poolData: object|null, error: string|null}>} Result object.
      */
-    async fetchPoolState(poolInfo) {
-        const address = poolInfo.address;
-        const networkTokens = TOKENS; // Assumes TOKENS is pre-filtered for the correct network
+    async fetchPoolData(address, pair) { // Renamed method and changed arguments
         const logPrefix = `[SushiSwapFetcher Pool ${address.substring(0,6)}]`;
-        logger.debug(`${logPrefix} Fetching state (${poolInfo.groupName})`);
+
+        const poolInfo = this.config.POOL_CONFIGS?.find(p => p.address.toLowerCase() === address.toLowerCase());
+        if (!poolInfo) {
+             logger.warn(`${logPrefix} Could not find pool info in config for address ${address}.`);
+             return { success: false, poolData: null, error: 'Pool info not found in config' };
+        }
+        const { fee, token0Symbol, token1Symbol, groupName } = poolInfo;
+
+        logger.debug(`${logPrefix} Fetching state (${groupName})`);
 
         try {
-            const poolContract = this._getPoolContract(address);
-            const reservesResult = await Promise.allSettled([
-                 poolContract.getReserves({ blockTag: 'latest' })
-            ]);
-
-            const reservesSettle = reservesResult[0];
-            if (reservesSettle.status !== 'fulfilled') {
-                 throw new Error(`RPC call failed for getReserves: ${reservesSettle.reason?.message || 'Unknown Error'}`);
+             // Resolve Token objects
+             const token0 = this.config.TOKENS[token0Symbol];
+             const token1 = this.config.TOKENS[token1Symbol];
+            if (!token0 || !token1) {
+                const errorMsg = `Could not resolve SDK Tokens for ${token0Symbol}/${token1Symbol}.`;
+                logger.error(`${logPrefix} ${errorMsg}`);
+                return { success: false, poolData: null, error: errorMsg };
             }
-            const reserves = reservesSettle.value;
+
+            const poolContract = this._getPoolContract(address);
+            // Use callStatic for view functions for safety, though direct call is common
+            const reserves = await poolContract.getReserves({ blockTag: 'latest' });
 
             if (!reserves || typeof reserves._reserve0 === 'undefined' || typeof reserves._reserve1 === 'undefined') {
                 throw new Error(`Invalid Reserves Data received from RPC.`);
@@ -68,54 +79,41 @@ class SushiSwapFetcher {
             const reserve0 = BigInt(reserves._reserve0);
             const reserve1 = BigInt(reserves._reserve1);
 
+            // It's okay for pools to have 0 reserves initially or if drained, log but don't error
             if (reserve0 === 0n || reserve1 === 0n) {
-                throw new Error(`Zero reserves found (${reserve0}, ${reserve1}).`);
+                logger.debug(`${logPrefix} Zero reserves found (${reserve0}, ${reserve1}). Pool might be inactive.`);
             }
 
-            // Resolve Token objects using the symbols from poolInfo
-            const token0 = networkTokens[poolInfo.token0Symbol];
-            const token1 = networkTokens[poolInfo.token1Symbol];
-             if (!token0 || !token1) { // Check if tokens were found in TOKENS map
-                throw new Error(`${logPrefix} Could not resolve SDK Tokens for ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}. Check constants/tokens.js and pool config.`);
-            }
-
-            // ---> USE SHARED UTILITY FOR PAIRKEY <---
             const pairKey = getCanonicalPairKey(token0, token1);
-             if (!pairKey) {
-                // Error already logged by utility, just need to handle the null return
+            if (!pairKey) {
                 throw new Error(`${logPrefix} Failed to generate canonical pair key for ${token0.symbol}/${token1.symbol}.`);
             }
-            // ---> END PAIRKEY LOGIC <---
 
-            // TEMP DEBUG LOGGING (Keep for now as requested)
-            logger.debug(`${logPrefix} T0: ${token0.symbol} (Canon: ${token0.canonicalSymbol ?? 'N/A'})`);
-            logger.debug(`${logPrefix} T1: ${token1.symbol} (Canon: ${token1.canonicalSymbol ?? 'N/A'})`);
-            logger.debug(`${logPrefix} Generated PairKey: ${pairKey}`);
-            // END TEMP DEBUG LOGGING
-
-            // Return the formatted state object
-            return {
+            const poolData = {
                 address: address,
                 dexType: 'sushiswap',
-                fee: poolInfo.fee, // Sushi fee (e.g., 30 bps) - Make sure this is set correctly in config
+                fee: fee, // Use fee from found poolInfo
                 reserve0: reserve0,
                 reserve1: reserve1,
-                token0: token0, // Keep original Token objects
-                token1: token1, // Keep original Token objects
-                token0Symbol: poolInfo.token0Symbol, // Keep original symbols
-                token1Symbol: poolInfo.token1Symbol, // Keep original symbols
-                groupName: poolInfo.groupName || 'N/A',
-                pairKey: pairKey, // Use the key generated by the utility
-                sqrtPriceX96: null, // V3 specific fields
-                liquidity: null,
-                tick: null,
-                tickSpacing: null,
+                token0: token0, // Actual token object
+                token1: token1, // Actual token object
+                token0Symbol: token0Symbol,
+                token1Symbol: token1Symbol,
+                groupName: groupName || 'N/A',
+                pairKey: pairKey,
+                sqrtPriceX96: null, liquidity: null, tick: null, tickSpacing: null, // V3 specific
+                timestamp: Date.now()
             };
+             return { success: true, poolData: poolData, error: null };
 
         } catch (error) {
-            logger.warn(`${logPrefix} Failed to fetch/process state: ${error.message}`);
-             // Consider adding stack trace for harder errors: logger.error(error.stack);
-            return null;
+            // Handle potential reverts specifically if needed (e.g., pool doesn't exist)
+             if (error.code === 'CALL_EXCEPTION') {
+                 logger.warn(`${logPrefix} Call exception fetching state (pool might not exist or RPC issue): ${error.reason}`);
+             } else {
+                 logger.warn(`${logPrefix} Failed to fetch/process state: ${error.message}`);
+             }
+            return { success: false, poolData: null, error: error.message };
         }
     }
 }
