@@ -6,12 +6,15 @@ const logger = require('./utils/logger');
 const ErrorHandler = require('./utils/errorHandler'); // Keep your error handler if needed
 const { TOKENS } = require('./constants/tokens'); // Import TOKENS for validation
 const { validateTokenConfig } = require('./utils/tokenUtils'); // Use your token validator
-const { loadConfig } = require('./config'); // Assuming config/index.js exports loadConfig
 const { getProvider } = require('./utils/provider');
 const { getSigner, getFlashSwapManager } = require('./core/flashSwapManager'); // Assuming FlashSwapManager setup
 
 // --- Corrected Import for ArbitrageEngine ---
 const ArbitrageEngine = require('./core/arbitrageEngine'); // Use this style for module.exports
+
+// --- Corrected Import for Config ---
+// Since config/index.js appears to load and export the object directly:
+const config = require('./config'); // Import the already loaded config object
 
 // --- Graceful Shutdown ---
 let isShuttingDown = false;
@@ -25,8 +28,7 @@ async function gracefulShutdown(signal) {
     if (arbitrageEngineInstance) {
         logger.info("Stopping Arbitrage Engine...");
         try {
-            // Use the stop method from the ArbitrageEngine class we defined
-            arbitrageEngineInstance.stop(); // Assuming stop is synchronous in our version
+            arbitrageEngineInstance.stop();
             logger.info("Arbitrage Engine stopped.");
         } catch (error) {
             logger.error("Error stopping Arbitrage Engine:", error);
@@ -40,13 +42,12 @@ async function gracefulShutdown(signal) {
     process.exit(0);
 }
 
-// --- Global Error Handlers (Keep yours if preferred) ---
+// --- Global Error Handlers ---
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('uncaughtException', (error, origin) => {
     logger.error('--- UNCAUGHT EXCEPTION ---', { error: error?.message, origin, stack: error?.stack });
     ErrorHandler.handleError(error, `UncaughtException (${origin})`);
-    // Consider attempting graceful shutdown MAYBE, but often better to exit quickly
     process.exit(1);
 });
 process.on('unhandledRejection', (reason, promise) => {
@@ -65,83 +66,73 @@ async function main() {
     logger.info('>>> PROJECT HAVOC ARBITRAGE BOT STARTING <<<');
     logger.info('==============================================');
 
-    let config;
-    let provider;
-    let signer;
-    let flashSwapManager;
+    // Config is already loaded via the require('./config') above
+    // No need for provider, signer, flashSwapManager vars here, they are setup below
 
     try {
         // 1. Validate Token Config First
         logger.info('[Main] Validating token configuration...');
         try {
-            // Use your validator function
             validateTokenConfig(TOKENS); // Throws on error
             logger.info('[Main] Token configuration validated successfully.');
         } catch (validationError) {
             logger.error(`[Main CRITICAL] Token Config Validation Failed: ${validationError.message}`);
             ErrorHandler.handleError(validationError, 'TokenValidation');
-            process.exit(1); // Exit if tokens are invalid
+            process.exit(1);
         }
 
-        // 2. Load Main Configuration
-        logger.info('[Main] Loading main configuration...');
-        // Use the loadConfig function from config/index.js
-        config = loadConfig();
-        logger.info(`[Main] Configuration loaded. Validating essential bot config...`);
-
-        // Essential config validation
+        // 2. Validate Loaded Main Configuration
+        logger.info('[Main] Validating essential bot configuration from loaded config object...');
+        // Essential config validation using the 'config' object loaded at the top
         if (!config || !config.NETWORK_RPC_URL || !config.PRIVATE_KEY || !config.FLASH_SWAP_CONTRACT_ADDRESS || !config.POOL_CONFIGS || config.POOL_CONFIGS.length === 0) {
-            logger.error('[Main CRITICAL] Essential configuration missing after loadConfig!', {
+            logger.error('[Main CRITICAL] Essential configuration missing in the loaded config object!', {
+                 configExists: !!config,
                  hasRpcUrl: !!config?.NETWORK_RPC_URL,
                  hasPrivateKey: !!config?.PRIVATE_KEY,
                  hasFlashSwapAddr: !!config?.FLASH_SWAP_CONTRACT_ADDRESS,
                  hasPoolConfigs: Array.isArray(config?.POOL_CONFIGS),
                  poolConfigLength: config?.POOL_CONFIGS?.length
             });
-            throw new Error("Essential configuration (RPC URL, Private Key, FlashSwap Address, Pool Configs) missing or invalid after loading.");
+            throw new Error("Essential configuration (RPC URL, Private Key, FlashSwap Address, Pool Configs) missing or invalid in loaded object.");
         }
+        // *** REMOVED line: config = loadConfig(); // This was the error source ***
         logger.info('[Main] Essential bot configuration validated.');
 
 
         // 3. Setup Provider
         logger.info('[Main] Getting Provider instance...');
-        provider = getProvider(config.NETWORK_RPC_URL); // Pass RPC URL
+        const provider = getProvider(config.NETWORK_RPC_URL); // Use loaded config
         const network = await provider.getNetwork();
         logger.info(`[Main] Provider connected to network: ${network.name} (Chain ID: ${network.chainId})`);
 
 
         // 4. Setup Signer & FlashSwapManager
         logger.info('[Main] Initializing Flash Swap Manager...');
-        signer = getSigner(config.PRIVATE_KEY, provider);
+        const signer = getSigner(config.PRIVATE_KEY, provider); // Use loaded config
         const signerAddress = await signer.getAddress();
         logger.info(`[Main] Signer obtained for address: ${signerAddress}`);
-        // Pass necessary args to getFlashSwapManager (adjust if needed)
-        flashSwapManager = getFlashSwapManager(config.FLASH_SWAP_CONTRACT_ADDRESS, signer);
+        // Use loaded config
+        const flashSwapManager = getFlashSwapManager(config.FLASH_SWAP_CONTRACT_ADDRESS, signer);
         logger.info(`[Main] Flash Swap Manager initialized for contract: ${config.FLASH_SWAP_CONTRACT_ADDRESS}`);
 
 
-        // 5. Initialize Arbitrage Engine (Corrected Instantiation)
+        // 5. Initialize Arbitrage Engine
         logger.info('[Main] Initializing Arbitrage Engine...');
-
-        // Check if ArbitrageEngine was loaded correctly (it should be a function/class)
         if (typeof ArbitrageEngine !== 'function') {
              logger.error(`[Main CRITICAL] ArbitrageEngine was not loaded correctly! typeof ArbitrageEngine: ${typeof ArbitrageEngine}. Value:`, ArbitrageEngine);
-             throw new Error("Failed to load ArbitrageEngine constructor. Check require path and export in core/arbitrageEngine.js.");
+             throw new Error("Failed to load ArbitrageEngine constructor.");
         }
-
-        // Instantiate using the constructor we defined (takes config only)
+        // Instantiate using the loaded config object
         arbitrageEngineInstance = new ArbitrageEngine(config);
         logger.info('[Main] Arbitrage Engine initialized.');
 
-        // No separate engine.initialize() call needed for the version we're using
 
-        // Setup listener for results (optional)
+        // Setup listener for results
         arbitrageEngineInstance.on('profitableOpportunities', (trades) => {
             logger.info(`[Main EVENT] Received ${trades.length} profitable opportunities.`);
             if (flashSwapManager && !config.DRY_RUN && trades.length > 0) {
                 logger.info("[Main] DRY_RUN is false. Forwarding trades for potential execution...");
-                // Call your execution logic here, e.g.:
-                // flashSwapManager.executeTrades(trades);
+                // flashSwapManager.executeTrades(trades); // Your execution logic
             } else if (config.DRY_RUN) {
                  logger.info("[Main] DRY_RUN is true. Logging opportunities, skipping execution.");
             }
@@ -149,7 +140,6 @@ async function main() {
 
         // 6. Start the Engine
         logger.info('[Main] Starting Arbitrage Engine cycle...');
-        // Call the start method from our ArbitrageEngine class
         await arbitrageEngineInstance.start();
 
         logger.info('');
@@ -159,7 +149,7 @@ async function main() {
 
     } catch (error) {
         logger.error('!!! BOT FAILED TO START OR CRASHED DURING STARTUP !!!');
-        ErrorHandler.handleError(error, 'MainProcessStartup'); // Use your handler
+        ErrorHandler.handleError(error, 'MainProcessStartup');
         logger.error('Exiting due to critical startup error...');
         process.exit(1);
     }
@@ -167,8 +157,6 @@ async function main() {
 
 // Execute main function
 main().catch(error => {
-    // This catches errors *if* the main async function itself rejects
-    // (e.g., an await fails without a try/catch inside main)
     logger.error("!!! UNEXPECTED CRITICAL ERROR BUBBLED UP FROM MAIN EXECUTION !!!");
     ErrorHandler.handleError(error, 'MainExecutionCatch');
     process.exit(1);
