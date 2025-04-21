@@ -1,14 +1,14 @@
 // config/index.js
-// --- VERSION WITH DEBUG LOGS BEFORE EXPORT ---
+// --- VERSION WITH INLINE POOL PROCESSING & DEBUG LOGS ---
 
 require('dotenv').config();
 const { ethers } = require('ethers');
-const { Token } = require('@uniswap/sdk-core'); // Assuming this is still needed somewhere
+const { Token } = require('@uniswap/sdk-core');
 let logger; try { logger = require('../utils/logger'); } catch (e) { console.error("No logger"); logger = console; }
 
-const ConfigHelpers = require('./helpers'); // Assuming ./helpers/index.js exports { Validators, PoolProcessing }
+const ConfigHelpers = require('./helpers'); // Still need Validators from here
 const { getNetworkMetadata } = require('./networks');
-const { PROTOCOL_ADDRESSES } = require('../constants/addresses'); // Assuming paths are correct
+const { PROTOCOL_ADDRESSES } = require('../constants/addresses');
 const { TOKENS } = require('../constants/tokens');
 
 function loadConfig() {
@@ -24,10 +24,9 @@ function loadConfig() {
     const validatedFlashSwapAddress = ConfigHelpers.Validators.validateAndNormalizeAddress(process.env[flashSwapEnvKey], flashSwapEnvKey);
     const tickLensEnvKey = `${networkName.toUpperCase()}_TICKLENS_ADDRESS`;
     const validatedTickLensAddress = ConfigHelpers.Validators.validateAndNormalizeAddress(process.env[tickLensEnvKey], tickLensEnvKey);
-     // Parse Boolean Flags (assuming parseBoolean handles 'true'/'false' strings)
-     const uniswapV3Enabled = ConfigHelpers.Validators.parseBoolean(process.env.UNISWAP_V3_ENABLED, false);
-     const sushiswapEnabled = ConfigHelpers.Validators.parseBoolean(process.env.SUSHISWAP_ENABLED, false);
-     const dodoEnabled = ConfigHelpers.Validators.parseBoolean(process.env.DODO_ENABLED, false);
+    const uniswapV3Enabled = ConfigHelpers.Validators.parseBoolean(process.env.UNISWAP_V3_ENABLED, false);
+    const sushiswapEnabled = ConfigHelpers.Validators.parseBoolean(process.env.SUSHISWAP_ENABLED, false);
+    const dodoEnabled = ConfigHelpers.Validators.parseBoolean(process.env.DODO_ENABLED, false);
 
 
     const networkMetadata = getNetworkMetadata(networkName);
@@ -43,101 +42,195 @@ function loadConfig() {
     // Other Env Vars
     const cycleIntervalMs = ConfigHelpers.Validators.safeParseInt(process.env.CYCLE_INTERVAL_MS, 'CYCLE_INTERVAL_MS', 5000);
     const slippageToleranceBps = ConfigHelpers.Validators.safeParseInt(process.env.SLIPPAGE_TOLERANCE_BPS, 'SLIPPAGE_TOLERANCE_BPS', 10);
-    const isDryRun = ConfigHelpers.Validators.parseBoolean(process.env.DRY_RUN, true); // Default DRY_RUN to true
+    const isDryRun = ConfigHelpers.Validators.parseBoolean(process.env.DRY_RUN, true);
     const stopOnFirst = ConfigHelpers.Validators.parseBoolean(process.env.STOP_ON_FIRST_EXECUTION, false);
-    const maxGasGwei = ConfigHelpers.Validators.safeParseInt(process.env.MAX_GAS_GWEI, 'MAX_GAS_GWEI', 10); // Example default
-     const gasBufferPercent = ConfigHelpers.Validators.safeParseInt(process.env.GAS_ESTIMATE_BUFFER_PERCENT, 'GAS_ESTIMATE_BUFFER_PERCENT', 20); // Example default
-     const fallbackGasLimit = ConfigHelpers.Validators.safeParseInt(process.env.FALLBACK_GAS_LIMIT, 'FALLBACK_GAS_LIMIT', 1500000); // Example default
-     const profitBufferPercent = ConfigHelpers.Validators.safeParseInt(process.env.PROFIT_BUFFER_PERCENT, 'PROFIT_BUFFER_PERCENT', 5); // Example default
+    // Read other settings from env or use defaults from network file if env is missing
+    const maxGasGwei = ConfigHelpers.Validators.safeParseInt(process.env.MAX_GAS_GWEI, 'MAX_GAS_GWEI', networkSpecificConfig.MAX_GAS_GWEI || 10);
+    const gasBufferPercent = ConfigHelpers.Validators.safeParseInt(process.env.GAS_ESTIMATE_BUFFER_PERCENT, 'GAS_ESTIMATE_BUFFER_PERCENT', networkSpecificConfig.GAS_ESTIMATE_BUFFER_PERCENT || 20);
+    const fallbackGasLimit = ConfigHelpers.Validators.safeParseInt(process.env.FALLBACK_GAS_LIMIT, 'FALLBACK_GAS_LIMIT', networkSpecificConfig.FALLBACK_GAS_LIMIT || 1500000);
+    const profitBufferPercent = ConfigHelpers.Validators.safeParseInt(process.env.PROFIT_BUFFER_PERCENT, 'PROFIT_BUFFER_PERCENT', networkSpecificConfig.PROFIT_BUFFER_PERCENT || 5);
 
 
     const baseConfig = {
         NAME: networkMetadata.NAME, CHAIN_ID: networkMetadata.CHAIN_ID, NATIVE_CURRENCY_SYMBOL: networkMetadata.NATIVE_SYMBOL, EXPLORER_URL: networkMetadata.EXPLORER_URL,
         TOKENS: TOKENS,
         RPC_URLS: validatedRpcUrls, PRIMARY_RPC_URL: validatedRpcUrls[0], PRIVATE_KEY: validatedPrivateKey, FLASH_SWAP_CONTRACT_ADDRESS: validatedFlashSwapAddress || ethers.ZeroAddress, TICKLENS_ADDRESS: validatedTickLensAddress || ethers.ZeroAddress,
-        // Add parsed env vars
         CYCLE_INTERVAL_MS: cycleIntervalMs, SLIPPAGE_TOLERANCE_BPS: slippageToleranceBps, DRY_RUN: isDryRun, STOP_ON_FIRST_EXECUTION: stopOnFirst,
-        // Add DEX enable flags directly from parsed env vars
-         UNISWAP_V3_ENABLED: uniswapV3Enabled,
-         SUSHISWAP_ENABLED: sushiswapEnabled,
-         DODO_ENABLED: dodoEnabled,
-         // Add other parsed settings
-         MAX_GAS_GWEI: maxGasGwei,
-         GAS_ESTIMATE_BUFFER_PERCENT: gasBufferPercent,
-         FALLBACK_GAS_LIMIT: fallbackGasLimit,
-         PROFIT_BUFFER_PERCENT: profitBufferPercent,
-         // Add protocol addresses
+        UNISWAP_V3_ENABLED: uniswapV3Enabled, SUSHISWAP_ENABLED: sushiswapEnabled, DODO_ENABLED: dodoEnabled,
+        MAX_GAS_GWEI: maxGasGwei, GAS_ESTIMATE_BUFFER_PERCENT: gasBufferPercent, FALLBACK_GAS_LIMIT: fallbackGasLimit, PROFIT_BUFFER_PERCENT: profitBufferPercent,
         FACTORY_ADDRESS: PROTOCOL_ADDRESSES.UNISWAP_V3_FACTORY, QUOTER_ADDRESS: PROTOCOL_ADDRESSES.QUOTER_V2,
-        // provider will be added later in bot.js
+        // provider will be added later in bot.js if needed there
     };
     logger.debug('[loadConfig] Base config object created (Env Vars + Network Meta).');
 
-    // --- Merge Global Settings from network file ---
-    // Keys handled specifically by pool processing loops or other logic later
-    const handledKeys = ['UNISWAP_V3_POOLS', 'SUSHISWAP_POOLS', 'CAMELOT_POOLS', 'DODO_POOLS', 'CHAINLINK_FEEDS', 'MIN_PROFIT_THRESHOLDS'];
-    for (const key in networkSpecificConfig) {
-        // Only merge if not handled specifically AND not already set in baseConfig from env vars
-        if (!handledKeys.includes(key) && !(key in baseConfig)) {
-             baseConfig[key] = networkSpecificConfig[key];
-             logger.debug(`[Config Merge] Merged global setting from ${networkName}.js: ${key}`);
-        } else if (handledKeys.includes(key)) {
-             logger.debug(`[Config Merge] Skipping merge for handled key: ${key}`);
-        } else {
-             logger.debug(`[Config Merge] Skipping merge for key already set from env: ${key}`);
-        }
+    // --- Merge Required Settings from network file ---
+    // Ensure MIN_PROFIT_THRESHOLDS and CHAINLINK_FEEDS exist and are valid objects
+    if (!networkSpecificConfig.MIN_PROFIT_THRESHOLDS || typeof networkSpecificConfig.MIN_PROFIT_THRESHOLDS !== 'object' || !networkSpecificConfig.MIN_PROFIT_THRESHOLDS.NATIVE || !networkSpecificConfig.MIN_PROFIT_THRESHOLDS.DEFAULT) {
+        throw new Error(`Invalid MIN_PROFIT_THRESHOLDS definition in ${networkName}.js`);
     }
-    // --- Explicitly merge MIN_PROFIT_THRESHOLDS and CHAINLINK_FEEDS ---
-    // Ensure MIN_PROFIT_THRESHOLDS is valid (required by ProfitCalculator)
-     if (!networkSpecificConfig.MIN_PROFIT_THRESHOLDS || typeof networkSpecificConfig.MIN_PROFIT_THRESHOLDS !== 'object' || !networkSpecificConfig.MIN_PROFIT_THRESHOLDS.NATIVE || !networkSpecificConfig.MIN_PROFIT_THRESHOLDS.DEFAULT) {
-         logger.error(`[Config Merge] CRITICAL: MIN_PROFIT_THRESHOLDS definition in ${networkName}.js is missing, invalid, or lacks NATIVE/DEFAULT keys.`);
-         // Throw error as ProfitCalculator requires this structure
-         throw new Error(`Invalid MIN_PROFIT_THRESHOLDS definition in ${networkName}.js`);
-     }
-     baseConfig.MIN_PROFIT_THRESHOLDS = networkSpecificConfig.MIN_PROFIT_THRESHOLDS;
+    baseConfig.MIN_PROFIT_THRESHOLDS = networkSpecificConfig.MIN_PROFIT_THRESHOLDS;
 
-    // Ensure CHAINLINK_FEEDS is valid (required by ProfitCalculator)
-     if (!networkSpecificConfig.CHAINLINK_FEEDS || typeof networkSpecificConfig.CHAINLINK_FEEDS !== 'object' || Object.keys(networkSpecificConfig.CHAINLINK_FEEDS).length === 0) {
-          logger.error(`[Config Merge] CRITICAL: CHAINLINK_FEEDS definition in ${networkName}.js is missing, invalid, or empty.`);
-          // Throw error as ProfitCalculator requires this structure
-          throw new Error(`Invalid or empty CHAINLINK_FEEDS definition in ${networkName}.js`);
-      }
-     baseConfig.CHAINLINK_FEEDS = networkSpecificConfig.CHAINLINK_FEEDS;
-
+    if (!networkSpecificConfig.CHAINLINK_FEEDS || typeof networkSpecificConfig.CHAINLINK_FEEDS !== 'object' || Object.keys(networkSpecificConfig.CHAINLINK_FEEDS).length === 0) {
+        throw new Error(`Invalid or empty CHAINLINK_FEEDS definition in ${networkName}.js`);
+    }
+    baseConfig.CHAINLINK_FEEDS = networkSpecificConfig.CHAINLINK_FEEDS;
     logger.debug(`[Config Merge] Merged MIN_PROFIT_THRESHOLDS: ${Object.keys(baseConfig.MIN_PROFIT_THRESHOLDS).length} entries`);
     logger.debug(`[Config Merge] Merged CHAINLINK_FEEDS: ${Object.keys(baseConfig.CHAINLINK_FEEDS).length} entries`);
 
-    // Ensure Sushi Router is present if needed
+    // Merge Sushi Router Address
     baseConfig.SUSHISWAP_ROUTER_ADDRESS = process.env[`${networkName.toUpperCase()}_SUSHISWAP_ROUTER_ADDRESS`] || networkSpecificConfig.SUSHISWAP_ROUTER_ADDRESS || null;
-    logger.debug('[loadConfig] Merged global settings from network file.');
+    logger.debug(`[Config Merge] SUSHISWAP_ROUTER_ADDRESS: ${baseConfig.SUSHISWAP_ROUTER_ADDRESS || 'Not Set'}`);
     // --- End Merge ---
 
-    // --- Process POOLS ---
+    // --- *** INLINE POOL PROCESSING LOGIC *** ---
+    logger.debug('[loadConfig] Starting INLINE pool processing...');
     const allPoolConfigs = [];
-    const loadedPoolAddresses = new Set();
+    const loadedPoolAddresses = new Set(); // Track duplicates
 
-    // Use helper functions if they exist in ConfigHelpers.PoolProcessing
-    const poolProcessor = ConfigHelpers.PoolProcessing || {};
-
+    // --- Process Uniswap V3 Pools ---
     if (baseConfig.UNISWAP_V3_ENABLED && networkSpecificConfig.UNISWAP_V3_POOLS) {
-         logger.debug(`[loadConfig] Processing V3 Pools...`);
-         if (typeof poolProcessor.processV3Pools === 'function') {
-             poolProcessor.processV3Pools(networkSpecificConfig.UNISWAP_V3_POOLS, baseConfig.TOKENS, loadedPoolAddresses, allPoolConfigs);
-         } else { logger.warn('[loadConfig] processV3Pools helper not found in ConfigHelpers.PoolProcessing.'); }
+        logger.debug(`[Config V3] Processing ${networkSpecificConfig.UNISWAP_V3_POOLS.length} V3 pool groups...`);
+        for (const group of networkSpecificConfig.UNISWAP_V3_POOLS) {
+            const token0 = baseConfig.TOKENS[group.token0Symbol];
+            const token1 = baseConfig.TOKENS[group.token1Symbol];
+            if (!token0 || !token1) {
+                logger.warn(`[Config V3 Detail] -> Skipping Group ${group.name}: Invalid symbols ${group.token0Symbol}/${group.token1Symbol}.`);
+                continue;
+            }
+            // Ensure pair array uses canonical symbols
+            const pairSymbols = [token0.canonicalSymbol || token0.symbol, token1.canonicalSymbol || token1.symbol];
+
+            for (const feeTierStr in group.feeTierToEnvMap) {
+                const envVarName = group.feeTierToEnvMap[feeTierStr];
+                if (!envVarName) continue;
+                const fee = parseInt(feeTierStr, 10);
+                if (isNaN(fee)) {
+                    logger.warn(`[Config V3 Detail] -> Skipping Fee Tier "${feeTierStr}" for ${group.name}: Invalid fee format.`);
+                    continue;
+                }
+                const poolAddress = ConfigHelpers.Validators.validateAndNormalizeAddress(process.env[envVarName], envVarName);
+                if (poolAddress && poolAddress !== ethers.ZeroAddress) {
+                    const lowerCaseAddress = poolAddress.toLowerCase();
+                    if (loadedPoolAddresses.has(lowerCaseAddress)) {
+                        logger.warn(`[Config V3 Detail] -> Skipping Duplicate Address ${poolAddress} for ${group.name} Fee ${fee}.`);
+                        continue;
+                    }
+                    allPoolConfigs.push({
+                        address: poolAddress,
+                        dexType: 'uniswapV3',
+                        fee: fee,
+                        token0Symbol: group.token0Symbol, // Keep original for reference if needed
+                        token1Symbol: group.token1Symbol, // Keep original for reference if needed
+                        pair: pairSymbols, // Use canonical symbols for pair array
+                        groupName: group.name,
+                        // Add any other V3 specific info if needed by fetcher later
+                    });
+                    loadedPoolAddresses.add(lowerCaseAddress);
+                    logger.debug(`[Config V3 Detail] -> OK: Loaded ${group.name} (${fee}bps): ${poolAddress}`);
+                } else if (process.env[envVarName] !== undefined) {
+                    logger.warn(`[Config V3 Detail] -> Skipping: Invalid/missing address for env var ${envVarName} in ${group.name}.`);
+                }
+            }
+        }
+    } else if (baseConfig.UNISWAP_V3_ENABLED) {
+        logger.warn("[Config V3] Uniswap V3 is enabled but no UNISWAP_V3_POOLS defined in network config.");
     }
 
+    // --- Process SushiSwap Pools ---
     if (baseConfig.SUSHISWAP_ENABLED && networkSpecificConfig.SUSHISWAP_POOLS) {
-         logger.debug(`[loadConfig] Processing Sushi Pools...`);
-          if (typeof poolProcessor.processSushiPools === 'function') {
-             poolProcessor.processSushiPools(networkSpecificConfig.SUSHISWAP_POOLS, baseConfig.TOKENS, loadedPoolAddresses, allPoolConfigs);
-          } else { logger.warn('[loadConfig] processSushiPools helper not found in ConfigHelpers.PoolProcessing.'); }
+        logger.debug(`[Config Sushi] Processing ${networkSpecificConfig.SUSHISWAP_POOLS.length} Sushi pool definitions...`);
+        for (const poolInfo of networkSpecificConfig.SUSHISWAP_POOLS) {
+            const token0 = baseConfig.TOKENS[poolInfo.token0Symbol];
+            const token1 = baseConfig.TOKENS[poolInfo.token1Symbol];
+            if (!token0 || !token1) {
+                logger.warn(`[Config Sushi Detail] -> Skipping Pool ${poolInfo.name}: Invalid symbols ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}.`);
+                continue;
+            }
+            const pairSymbols = [token0.canonicalSymbol || token0.symbol, token1.canonicalSymbol || token1.symbol];
+            const envVarName = poolInfo.poolAddressEnv;
+            if (!envVarName) {
+                logger.warn(`[Config Sushi Detail] -> Skipping Pool ${poolInfo.name}: Missing 'poolAddressEnv'.`);
+                continue;
+            }
+            const poolAddress = ConfigHelpers.Validators.validateAndNormalizeAddress(process.env[envVarName], envVarName);
+            if (poolAddress && poolAddress !== ethers.ZeroAddress) {
+                 const lowerCaseAddress = poolAddress.toLowerCase();
+                if (loadedPoolAddresses.has(lowerCaseAddress)) {
+                    logger.warn(`[Config Sushi Detail] -> Skipping Duplicate Address ${poolAddress} for ${poolInfo.name}.`);
+                    continue;
+                }
+                const feeBps = poolInfo.fee; // Sushi typically 0.3% = 3000 bps? Verify per pool if needed.
+                 if (typeof feeBps !== 'number' || isNaN(feeBps)) { logger.warn(`[Config Sushi Detail] -> Pool ${poolInfo.name}: Invalid or missing 'fee' property (${feeBps}). Fetcher may need default.`); }
+
+                allPoolConfigs.push({
+                    address: poolAddress,
+                    dexType: 'sushiswap',
+                    fee: feeBps,
+                    token0Symbol: poolInfo.token0Symbol,
+                    token1Symbol: poolInfo.token1Symbol,
+                    pair: pairSymbols,
+                    groupName: poolInfo.name,
+                });
+                loadedPoolAddresses.add(lowerCaseAddress);
+                logger.debug(`[Config Sushi Detail] -> OK: Loaded ${poolInfo.name}: ${poolAddress}`);
+            } else if (process.env[envVarName] !== undefined) {
+                logger.warn(`[Config Sushi Detail] -> Skipping: Invalid/missing address for env var ${envVarName} in ${poolInfo.name}.`);
+            }
+        }
+    } else if (baseConfig.SUSHISWAP_ENABLED) {
+        logger.warn("[Config Sushi] SushiSwap is enabled but no SUSHISWAP_POOLS defined in network config.");
     }
 
+    // --- Process DODO Pools ---
     if (baseConfig.DODO_ENABLED && networkSpecificConfig.DODO_POOLS) {
-         logger.debug(`[loadConfig] Processing DODO Pools...`);
-         if (typeof poolProcessor.processDodoPools === 'function') {
-             poolProcessor.processDodoPools(networkSpecificConfig.DODO_POOLS, baseConfig.TOKENS, loadedPoolAddresses, allPoolConfigs);
-         } else { logger.warn('[loadConfig] processDodoPools helper not found in ConfigHelpers.PoolProcessing.'); }
-     }
+        logger.debug(`[Config DODO] Processing ${networkSpecificConfig.DODO_POOLS.length} DODO pool definitions...`);
+        for (const poolInfo of networkSpecificConfig.DODO_POOLS) {
+            const token0 = baseConfig.TOKENS[poolInfo.token0Symbol];
+            const token1 = baseConfig.TOKENS[poolInfo.token1Symbol];
+            if (!token0 || !token1) {
+                 logger.warn(`[Config DODO Detail] -> Skipping Pool ${poolInfo.name}: Invalid symbols ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}.`);
+                 continue;
+            }
+             const pairSymbols = [token0.canonicalSymbol || token0.symbol, token1.canonicalSymbol || token1.symbol];
+            if (!poolInfo.baseTokenSymbol || (poolInfo.baseTokenSymbol !== poolInfo.token0Symbol && poolInfo.baseTokenSymbol !== poolInfo.token1Symbol)) {
+                 logger.warn(`[Config DODO Detail] -> Skipping Pool ${poolInfo.name}: Invalid or missing 'baseTokenSymbol'.`);
+                 continue;
+            }
+            const envVarName = poolInfo.poolAddressEnv;
+            if (!envVarName) {
+                 logger.warn(`[Config DODO Detail] -> Skipping Pool ${poolInfo.name}: Missing 'poolAddressEnv'.`);
+                 continue;
+            }
+            const poolAddress = ConfigHelpers.Validators.validateAndNormalizeAddress(process.env[envVarName], envVarName);
+            if (poolAddress && poolAddress !== ethers.ZeroAddress) {
+                const lowerCaseAddress = poolAddress.toLowerCase();
+                if (loadedPoolAddresses.has(lowerCaseAddress)) {
+                    logger.warn(`[Config DODO Detail] -> Skipping Duplicate Address ${poolAddress} for ${poolInfo.name}.`);
+                    continue;
+                }
+                const feeBps = poolInfo.fee;
+                 if (feeBps !== undefined && (typeof feeBps !== 'number' || isNaN(feeBps))) { logger.warn(`[Config DODO Detail] Pool ${poolInfo.name}: Invalid 'fee' property (${feeBps}). Fetcher may use default.`); }
+
+                allPoolConfigs.push({
+                    address: poolAddress,
+                    dexType: 'dodo',
+                    fee: feeBps, // Pass fee if specified
+                    token0Symbol: poolInfo.token0Symbol,
+                    token1Symbol: poolInfo.token1Symbol,
+                    pair: pairSymbols, // Use canonical symbols
+                    baseTokenSymbol: poolInfo.baseTokenSymbol, // DODO fetcher needs this
+                    groupName: poolInfo.name,
+                });
+                loadedPoolAddresses.add(lowerCaseAddress);
+                logger.debug(`[Config DODO Detail] -> OK: Loaded ${poolInfo.name}: ${poolAddress}`);
+            } else if (process.env[envVarName] !== undefined) {
+                logger.warn(`[Config DODO Detail] -> Skipping: Invalid/missing address for env var ${envVarName} in ${poolInfo.name}.`);
+            }
+        }
+    } else if (baseConfig.DODO_ENABLED) {
+         logger.warn("[Config DODO] DODO is enabled but no DODO_POOLS defined in network config.");
+    }
+    // --- *** END INLINE POOL PROCESSING *** ---
 
     baseConfig.POOL_CONFIGS = allPoolConfigs;
 
@@ -152,24 +245,22 @@ function loadConfig() {
     logger.debug(`[loadConfig] DODO_ENABLED: ${baseConfig.DODO_ENABLED}`);
     logger.debug(`[loadConfig] CHAINLINK_FEEDS type: ${typeof baseConfig.CHAINLINK_FEEDS}, keys: ${baseConfig.CHAINLINK_FEEDS ? Object.keys(baseConfig.CHAINLINK_FEEDS).length : 'N/A'}`);
     logger.debug(`[loadConfig] MIN_PROFIT_THRESHOLDS type: ${typeof baseConfig.MIN_PROFIT_THRESHOLDS}, keys: ${baseConfig.MIN_PROFIT_THRESHOLDS ? Object.keys(baseConfig.MIN_PROFIT_THRESHOLDS).length : 'N/A'}`);
-    logger.debug(`[loadConfig] POOL_CONFIGS length: ${baseConfig.POOL_CONFIGS?.length}`);
+    logger.debug(`[loadConfig] POOL_CONFIGS length: ${baseConfig.POOL_CONFIGS?.length}`); // Log final count
     logger.debug("-----------------------------------------");
     // --- *** END DEBUG LOG *** ---
 
-    logger.debug(`[loadConfig] Exiting loadConfig successfully with ${allPoolConfigs.length} pools.`);
+    logger.info(`[loadConfig] Exiting loadConfig successfully with ${allPoolConfigs.length} pools loaded.`);
     return baseConfig;
 }
 
 
 // --- Load and Export Config ---
-// This part immediately calls loadConfig when the file is required
 let config;
-console.log('[Config] Attempting to call loadConfig inside try block...'); // Log moved here
+console.log('[Config] Attempting to call loadConfig inside try block...');
 try {
-    config = loadConfig(); // Call the function defined above
+    config = loadConfig();
 
-    // Minimal validation after loadConfig returns
-    // Note: loadConfig itself now throws errors for critical missing fields like CHAINLINK_FEEDS
+    // Final validation after loadConfig returns
     const essentialKeys = [ 'NAME', 'CHAIN_ID', 'RPC_URLS', 'PRIVATE_KEY', 'FLASH_SWAP_CONTRACT_ADDRESS', 'POOL_CONFIGS', 'TOKENS', 'NATIVE_CURRENCY_SYMBOL', 'CHAINLINK_FEEDS', 'MIN_PROFIT_THRESHOLDS'];
     const missingEssential = essentialKeys.filter(key => !(key in config) || config[key] === null || config[key] === undefined );
 
@@ -177,17 +268,22 @@ try {
         logger.error(`[Config Export] CRITICAL: Final config object missing essential keys after loadConfig returned: ${missingEssential.join(', ')}`);
         throw new Error(`[Config] CRITICAL: Final config object missing essential keys: ${missingEssential.join(', ')}`);
     }
-    if (!Array.isArray(config.POOL_CONFIGS)) { // POOL_CONFIGS must be an array
+    if (!Array.isArray(config.POOL_CONFIGS)) {
          throw new Error(`[Config] CRITICAL: POOL_CONFIGS is not an array after loading.`);
     }
+    // Add a check: if any DEX is enabled, POOL_CONFIGS should ideally not be empty
+    if ((config.UNISWAP_V3_ENABLED || config.SUSHISWAP_ENABLED || config.DODO_ENABLED) && config.POOL_CONFIGS.length === 0) {
+         logger.warn(`[Config Export] WARNING: DEXs are enabled but POOL_CONFIGS is empty. Check pool definitions in ${config.NAME}.js and associated .env variables.`);
+    }
+
     logger.info(`[Config Export] Config loaded successfully: Network=${config.NAME}, Pools Loaded=${config.POOL_CONFIGS.length}`);
 
 } catch (error) {
     const msg = `[Config Export] CRITICAL FAILURE during config loading: ${error.message}`;
     logger.error(msg, error);
     console.error(msg, error);
-    throw new Error(msg); // Re-throw
+    throw new Error(msg);
 }
 
-module.exports = config; // Export the loaded config object
+module.exports = config;
 console.log('[Config Top Level] module.exports reached.');
