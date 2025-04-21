@@ -1,31 +1,34 @@
 // core/fetchers/uniswapV3Fetcher.js
-// --- Uses shared getCanonicalPairKey utility ---
 const { ethers } = require('ethers');
 const { ABIS } = require('../../constants/abis');
 const logger = require('../../utils/logger');
 const { ArbitrageError } = require('../../utils/errorHandler');
-const { Token } = require('@uniswap/sdk-core');
+const { Token } = require('@uniswap/sdk-core'); // Keep for type checking if needed
 const { TOKENS } = require('../../constants/tokens');
 const { getTickSpacingFromFeeBps } = require('../scannerUtils');
-const { getCanonicalPairKey } = require('../../utils/pairUtils'); // <-- Import the utility
+const { getCanonicalPairKey } = require('../../utils/pairUtils');
 
 const MAX_UINT128 = (1n << 128n) - 1n;
 
 class UniswapV3Fetcher {
-    constructor(provider) {
-        if (!provider) {
-            throw new ArbitrageError('UniswapV3Fetcher requires a provider.', 'INITIALIZATION_ERROR');
+    // Constructor now accepts the main config object
+    constructor(config) {
+        if (!config || !config.PRIMARY_RPC_URL) {
+            throw new ArbitrageError('UniswapV3Fetcher requires a config object with PRIMARY_RPC_URL.', 'INITIALIZATION_ERROR');
         }
-        this.provider = provider;
+        // Create provider internally if needed, or reuse if passed via config
+        this.provider = config.provider || new ethers.JsonRpcProvider(config.PRIMARY_RPC_URL); // Use augmented provider or create new
+        this.config = config; // Store config for accessing pool details
         this.poolContractCache = {};
         logger.debug('[UniswapV3Fetcher] Initialized.');
     }
 
     _getPoolContract(poolAddress) {
+        // ... (no change needed in this helper) ...
         const lowerCaseAddress = poolAddress.toLowerCase();
         if (!this.poolContractCache[lowerCaseAddress]) {
             try {
-                if (!ABIS || !ABIS.UniswapV3Pool) { throw new Error("UniswapV3Pool ABI not found in constants/abis."); }
+                if (!ABIS || !ABIS.UniswapV3Pool) { throw new Error("UniswapV3Pool ABI not found."); }
                 this.poolContractCache[lowerCaseAddress] = new ethers.Contract(
                     poolAddress, ABIS.UniswapV3Pool, this.provider
                 );
@@ -39,16 +42,37 @@ class UniswapV3Fetcher {
 
     /**
      * Fetches the state for a single Uniswap V3 pool.
-     * @param {object} poolInfo Configuration object for the pool.
-     * @returns {Promise<object|null>} Formatted pool state object or null on failure.
+     * @param {string} address The pool address.
+     * @param {Array<string>} pair Array containing the canonical symbols [tokenASymbol, tokenBSymbol].
+     * @returns {Promise<{success: boolean, poolData: object|null, error: string|null}>} Result object.
      */
-    async fetchPoolState(poolInfo) {
-        const address = poolInfo.address;
-        const networkTokens = TOKENS; // Assumes TOKENS is pre-filtered for the correct network
+    async fetchPoolData(address, pair) { // Renamed method and changed arguments
         const logPrefix = `[UniswapV3Fetcher Pool ${address.substring(0,6)}]`;
-        logger.debug(`${logPrefix} Fetching state (${poolInfo.groupName} ${poolInfo.fee}bps)`);
+
+        // Find the corresponding poolInfo from the main config
+        // This is less efficient than passing poolInfo directly, but aligns with current PoolScanner structure
+        const poolInfo = this.config.POOL_CONFIGS?.find(p => p.address.toLowerCase() === address.toLowerCase());
+
+        if (!poolInfo) {
+             logger.warn(`${logPrefix} Could not find pool info in config for address ${address}. Cannot determine fee/symbols.`);
+             return { success: false, poolData: null, error: 'Pool info not found in config' };
+        }
+        // Destructure needed info
+        const { fee, token0Symbol, token1Symbol, groupName } = poolInfo;
+
+        logger.debug(`${logPrefix} Fetching state (${groupName} ${fee}bps)`);
 
         try {
+            // Resolve Token objects using the symbols from poolInfo
+            // Ensure TOKENS has been loaded and contains the network's tokens
+             const token0 = this.config.TOKENS[token0Symbol];
+             const token1 = this.config.TOKENS[token1Symbol];
+            if (!token0 || !token1) {
+                const errorMsg = `Could not resolve SDK Tokens for ${token0Symbol}/${token1Symbol}. Check constants/tokens.js.`;
+                logger.error(`${logPrefix} ${errorMsg}`);
+                return { success: false, poolData: null, error: errorMsg };
+            }
+
             const poolContract = this._getPoolContract(address);
             const [slot0Result, liquidityResult] = await Promise.allSettled([
                 poolContract.slot0({ blockTag: 'latest' }),
@@ -56,7 +80,7 @@ class UniswapV3Fetcher {
             ]);
 
             if (slot0Result.status !== 'fulfilled' || liquidityResult.status !== 'fulfilled') {
-                const reason = slot0Result.reason?.message || liquidityResult.reason?.message || 'Unknown Error';
+                const reason = slot0Result.reason?.message || liquidityResult.reason?.message || 'Unknown RPC Error';
                 throw new Error(`RPC call failed: ${reason}`);
             }
             const slot0 = slot0Result.value;
@@ -71,52 +95,42 @@ class UniswapV3Fetcher {
             const currentTick = Number(slot0.tick);
 
             if (currentLiquidity > MAX_UINT128) {
-                logger.warn(`${logPrefix} Liquidity ${currentLiquidity} exceeds MAX_UINT128.`);
-                return null;
+                logger.warn(`${logPrefix} Liquidity ${currentLiquidity} exceeds MAX_UINT128. Treating as invalid.`);
+                return { success: false, poolData: null, error: 'Liquidity exceeds MAX_UINT128' };
+            }
+            if (currentLiquidity === 0n) {
+                 logger.debug(`${logPrefix} Pool has zero liquidity.`);
+                 // Still return data, but let downstream handle zero liquidity
             }
 
-            // Resolve Token objects using the symbols from poolInfo
-            const token0 = networkTokens[poolInfo.token0Symbol];
-            const token1 = networkTokens[poolInfo.token1Symbol];
-            if (!token0 || !token1) { // Check if tokens were found in TOKENS map
-                throw new Error(`${logPrefix} Could not resolve SDK Tokens for ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}. Check constants/tokens.js and pool config.`);
-            }
 
-            // ---> USE SHARED UTILITY FOR PAIRKEY <---
+            // Use the already resolved token objects
             const pairKey = getCanonicalPairKey(token0, token1);
             if (!pairKey) {
-                // Error already logged by utility, just need to handle the null return
                 throw new Error(`${logPrefix} Failed to generate canonical pair key for ${token0.symbol}/${token1.symbol}.`);
             }
-            // ---> END PAIRKEY LOGIC <---
 
-            // TEMP DEBUG LOGGING (Keep for now as requested)
-            logger.debug(`${logPrefix} T0: ${token0.symbol} (Canon: ${token0.canonicalSymbol ?? 'N/A'})`);
-            logger.debug(`${logPrefix} T1: ${token1.symbol} (Canon: ${token1.canonicalSymbol ?? 'N/A'})`);
-            logger.debug(`${logPrefix} Generated PairKey: ${pairKey}`);
-            // END TEMP DEBUG LOGGING
-
-            // Return the formatted state object
-            return {
+            const poolData = {
                 address: address,
                 dexType: 'uniswapV3',
-                fee: poolInfo.fee,
+                fee: fee, // Use fee from found poolInfo
                 tick: currentTick,
                 liquidity: currentLiquidity,
                 sqrtPriceX96: currentSqrtPriceX96,
-                tickSpacing: getTickSpacingFromFeeBps(poolInfo.fee),
-                token0: token0, // Keep original Token objects
-                token1: token1, // Keep original Token objects
-                token0Symbol: poolInfo.token0Symbol, // Keep original symbols
-                token1Symbol: poolInfo.token1Symbol, // Keep original symbols
-                groupName: poolInfo.groupName || 'N/A',
-                pairKey: pairKey, // Use the key generated by the utility
+                tickSpacing: getTickSpacingFromFeeBps(fee),
+                token0: token0, // Actual token object
+                token1: token1, // Actual token object
+                token0Symbol: token0Symbol, // Keep original symbols
+                token1Symbol: token1Symbol, // Keep original symbols
+                groupName: groupName || 'N/A',
+                pairKey: pairKey,
+                timestamp: Date.now()
             };
+            return { success: true, poolData: poolData, error: null };
 
         } catch (error) {
             logger.warn(`${logPrefix} Failed to fetch/process state: ${error.message}`);
-            // Consider adding stack trace for harder errors: logger.error(error.stack);
-            return null;
+            return { success: false, poolData: null, error: error.message };
         }
     }
 }
