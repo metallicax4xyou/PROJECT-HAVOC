@@ -1,5 +1,5 @@
 // constants/abis.js
-// Using CommonJS
+// Using CommonJS - Updated to include DODO ABIs
 
 const logger = require('../utils/logger'); // Use logger for safe loading
 
@@ -18,22 +18,37 @@ function safeRequire(path) {
 const FlashSwapABI = safeRequire('../abis/FlashSwap.json');
 const IUniswapV3PoolABI = safeRequire('../abis/IUniswapV3Pool.json');
 const IQuoterV2ABI = safeRequire('../abis/IQuoterV2.json');
-const TickLensABI = safeRequire('../abis/TickLens.json'); // Load TickLens ABI
+const TickLensABI = safeRequire('../abis/TickLens.json');
+
+// --- NEW DODO ABIs ---
+const DODOZooABI = safeRequire('../abis/DODOZoo.json');
+const DODOV1V2PoolABI = safeRequire('../abis/DODOV1V2Pool.json');
+// --- --------------- ---
+
 
 const ABIS = {
   FlashSwap: FlashSwapABI,
-  UniswapV3Pool: IUniswapV3PoolABI,
+  UniswapV3Pool: IUniswapV3PoolABI, // Keep consistent name if used elsewhere
+  IUniswapV3Pool: IUniswapV3PoolABI, // Explicitly add interface name if needed
   IQuoterV2: IQuoterV2ABI,
-  TickLens: TickLensABI, // Add TickLens ABI
+  TickLens: TickLensABI,
+  // --- NEW DODO ABIs ---
+  DODOZoo: DODOZooABI,
+  DODOV1V2Pool: DODOV1V2PoolABI,
+  // --- --------------- ---
 };
 
 // Optional: Log loaded ABIs for verification
-// logger.debug(`[ABI Load] Loaded ABIs: ${Object.keys(ABIS).filter(k => ABIS[k] !== null).join(', ')}`);
-// Object.keys(ABIS).forEach(key => {
-//     if (!ABIS[key]) {
-//         logger.warn(`[ABI Load] WARNING: ABI for "${key}" failed to load.`);
-//     }
-// });
+// Filter out nulls before joining
+const loadedAbiKeys = Object.keys(ABIS).filter(k => ABIS[k] !== null);
+logger.debug(`[ABI Load] Loaded ABIs: ${loadedAbiKeys.join(', ')}`);
+
+// Check for any failed loads
+Object.keys(ABIS).forEach(key => {
+    if (!ABIS[key]) {
+        logger.warn(`[ABI Load] WARNING: ABI for "${key}" failed to load.`);
+    }
+});
 
 
 module.exports = {
