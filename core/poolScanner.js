@@ -1,18 +1,19 @@
 // /workspaces/arbitrum-flash/core/poolScanner.js
-// --- REFACTORED VERSION 2.1 ---
-// Added robust error handling for individual fetcher calls within Promise.all
+// --- REFACTORED VERSION 2.2 --- Added Camelot Fetcher ---
 
 const logger = require('../utils/logger');
-const { ArbitrageError, handleError } = require('../utils/errorHandler'); // Correct import assuming handleError is exported
+const { ArbitrageError, handleError } = require('../utils/errorHandler');
 
 // --- Import Fetchers ---
 const UniswapV3Fetcher = require('./fetchers/uniswapV3Fetcher');
 const SushiSwapFetcher = require('./fetchers/sushiSwapFetcher');
-// --- ---
+const CamelotFetcher = require('./fetchers/camelotFetcher'); // <-- Import Camelot Fetcher
+// --- Add imports for other fetchers (DODO, Balancer, etc.) here later ---
 
 class PoolScanner {
     constructor(config, provider) {
-        logger.debug(`[PoolScanner v2.1] Initializing...`); // Updated version
+        const logPrefix = '[PoolScanner v2.2]'; // Updated version
+        logger.debug(`${logPrefix} Initializing...`);
         if (!config || !provider) {
             throw new ArbitrageError('PoolScanner requires config and provider.', 'INITIALIZATION_ERROR');
         }
@@ -23,11 +24,13 @@ class PoolScanner {
         try {
             this.v3Fetcher = new UniswapV3Fetcher(provider);
             this.sushiFetcher = new SushiSwapFetcher(provider);
+            this.camelotFetcher = new CamelotFetcher(provider); // <-- Instantiate Camelot Fetcher
+            // --- Instantiate other fetchers here later ---
         } catch (fetcherError) {
-            logger.error(`[PoolScanner v2.1] Failed to initialize fetchers: ${fetcherError.message}`);
+            logger.error(`${logPrefix} Failed to initialize fetchers: ${fetcherError.message}`);
             throw fetcherError;
         }
-        logger.info(`[PoolScanner v2.1] Initialized with V3 and Sushi Fetchers.`);
+        logger.info(`${logPrefix} Initialized with V3, Sushi, and Camelot Fetchers.`);
     }
 
     /**
@@ -38,22 +41,31 @@ class PoolScanner {
      * @returns {Promise<object|null>} Resolves with the pool state or null if an error occurred.
      */
     async safeFetchWrapper(fetcherPromise, poolInfo) {
-        const poolDesc = `${poolInfo.dexType} pool ${poolInfo.address} (${poolInfo.token0Symbol}/${poolInfo.token1Symbol})`;
+        // Use dexType and address/name for description
+        const poolDesc = `${poolInfo.dexType || 'Unknown DEX'} pool ${poolInfo.address || poolInfo.name || 'N/A'} (${poolInfo.token0Symbol || '?'}/${poolInfo.token1Symbol || '?'})`;
         try {
             const state = await fetcherPromise;
-            // Optional: Add basic validation on the returned state if needed
             if (state && state.address) {
                  logger.debug(`[PoolScanner SafeFetch] Successfully fetched ${poolDesc}`);
                  return state;
-            } else {
+            } else if (state === null) {
+                 // Fetcher explicitly returned null (likely logged its own warning)
+                 logger.debug(`[PoolScanner SafeFetch] Fetcher for ${poolDesc} returned null.`);
+                 return null;
+            }
+             else {
                  // This case might indicate the fetcher resolved successfully but returned invalid data
-                 logger.warn(`[PoolScanner SafeFetch] Fetcher for ${poolDesc} returned null or invalid state.`);
+                 logger.warn(`[PoolScanner SafeFetch] Fetcher for ${poolDesc} resolved but returned invalid/incomplete state.`);
                  return null;
             }
         } catch (error) {
             logger.error(`[PoolScanner SafeFetch] Error fetching ${poolDesc}: ${error.message}`);
-            // Use global handler for unexpected fetcher errors
-             if (typeof handleError === 'function') handleError(error, `PoolScanner.Fetcher.${poolInfo.dexType}`);
+             // Use global handler for unexpected fetcher errors - check if handleError exists
+             if (typeof handleError === 'function') {
+                handleError(error, `PoolScanner.Fetcher.${poolInfo.dexType || 'Unknown'}`);
+            } else {
+                console.error("Emergency Log: handleError function not found in PoolScanner.safeFetchWrapper");
+            }
             return null; // Resolve with null on error to prevent Promise.all rejection
         }
     }
@@ -64,7 +76,7 @@ class PoolScanner {
      * @returns {Promise<object>} A map of poolAddress.toLowerCase() to its live state object, or an empty object if fetch fails critically.
      */
     async fetchPoolStates(poolInfos) {
-        const logPrefix = "[PoolScanner v2.1 fetchPoolStates]"; // Consistent prefix
+        const logPrefix = "[PoolScanner v2.2 fetchPoolStates]"; // Updated version
         logger.debug(`${logPrefix} Received ${poolInfos?.length ?? 0} poolInfos to fetch.`);
         if (!poolInfos || poolInfos.length === 0) {
             logger.warn(`${logPrefix} No pool configurations provided.`);
@@ -81,14 +93,21 @@ class PoolScanner {
             }
 
             let fetcherPromise;
-            // Delegate to the appropriate fetcher
+            // Delegate to the appropriate fetcher based on dexType
             if (poolInfo.dexType === 'uniswapV3') {
                 logger.debug(`${logPrefix} Creating V3 fetch promise for ${poolInfo.address}`);
                 fetcherPromise = this.v3Fetcher.fetchPoolState(poolInfo);
             } else if (poolInfo.dexType === 'sushiswap') {
                 logger.debug(`${logPrefix} Creating Sushi fetch promise for ${poolInfo.address}`);
                 fetcherPromise = this.sushiFetcher.fetchPoolState(poolInfo);
-            } else {
+            } else if (poolInfo.dexType === 'camelot') { // <-- Add delegation for Camelot
+                logger.debug(`${logPrefix} Creating Camelot fetch promise for ${poolInfo.address}`);
+                fetcherPromise = this.camelotFetcher.fetchPoolState(poolInfo);
+            // --- Add 'else if' blocks for other dexTypes here later ---
+            // else if (poolInfo.dexType === 'dodo') { ... }
+            // else if (poolInfo.dexType === 'balancer') { ... }
+            }
+             else {
                 logger.warn(`${logPrefix} Skipping pool ${poolInfo.address}: Unsupported dexType '${poolInfo.dexType}'`);
                 continue; // Skip if dexType is unknown
             }
@@ -108,36 +127,46 @@ class PoolScanner {
 
         try {
             // Execute all wrapped fetch requests concurrently
-            // Promise.all will now only reject if safeFetchWrapper itself has a critical bug (unlikely)
             const results = await Promise.all(fetchPromises);
             logger.info(`${logPrefix} Promise.all completed successfully.`);
 
             // Process results (results array contains state objects or null)
              logger.debug(`${logPrefix} Processing ${results.length} results from Promise.all...`);
+            let successCount = 0;
             for (const state of results) {
-                if (state && state.address) { // Check if fetch was successful (not null)
+                if (state && state.address) { // Check if fetch was successful and returned valid state
+                    // Use lowercase address as key for consistency
                     livePoolStates[state.address.toLowerCase()] = state;
+                    successCount++;
                 }
                 // Individual errors were logged inside safeFetchWrapper
             }
         } catch (error) { // Catch errors from Promise.all itself (should be very rare now)
             logger.error(`${logPrefix} CRITICAL UNEXPECTED Error during Promise.all execution: ${error.message}`);
-             if (typeof handleError === 'function') handleError(error, 'PoolScanner.fetchPoolStates.PromiseAll');
-            // Optionally clear results if Promise.all fails catastrophically
-            // return {};
-            // Or try to proceed with any results gathered before the error (if possible, depends on error)
+             if (typeof handleError === 'function') {
+                 handleError(error, 'PoolScanner.fetchPoolStates.PromiseAll');
+            } else {
+                 console.error("Emergency Log: handleError function not found in PoolScanner.fetchPoolStates catch block");
+            }
+            // Depending on severity, maybe return partial results or empty object
+            // return livePoolStates; // Return whatever was collected
+            return {}; // Return empty on critical failure
         }
 
-        const finalCount = Object.keys(livePoolStates).length;
+        const finalCount = Object.keys(livePoolStates).length; // Count successful fetches
 
         logger.info(`${logPrefix} Successfully gathered states for ${finalCount} out of ${attemptedCount} attempted pools.`);
         if (finalCount < attemptedCount) {
              logger.warn(`${logPrefix} ${attemptedCount - finalCount} pools failed during fetch/processing. Check preceding logs for errors.`);
         }
-        logger.debug(`${logPrefix} Returning livePoolStates map.`);
+        logger.debug(`${logPrefix} Returning livePoolStates map with ${finalCount} entries.`);
         return livePoolStates;
     } // --- End fetchPoolStates ---
 
 } // --- END PoolScanner Class ---
 
+// Ensure PoolScanner is exported correctly if used elsewhere directly
+// If only used by ArbitrageEngine, internal export might be fine.
+// Common pattern:
 module.exports = { PoolScanner };
+// Or just: module.exports = PoolScanner; depending on usage.
