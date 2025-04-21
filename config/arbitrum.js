@@ -1,5 +1,5 @@
 // config/arbitrum.js
-// --- DODO POOLS TEMPORARILY COMMENTED OUT FOR DEBUGGING ---
+// --- FINAL CONFIG with DODO POOLS ENABLED ---
 
 // --- Chainlink Feed Addresses ---
 const CHAINLINK_FEEDS = { // Verify these if used
@@ -41,26 +41,26 @@ const CAMELOT_POOLS = [
     // { name: 'GMX_WETH_CAMELOT', token0Symbol: 'GMX', token1Symbol: 'WETH', dexType: 'camelot', fee: 3000, poolAddressEnv: 'ARBITRUM_CAMELOT_GMX_WETH_ADDRESS' }, // Example
 ];
 
-// --- *** Define DODO Pools - COMMENTED OUT FOR DEBUGGING *** ---
+// --- *** Define DODO Pools - ENABLED *** ---
 const DODO_POOLS = [
-    // { // Temporarily commented out
-    //     name: 'WETH_USDCE_DODO',     // Use USDC.e based on our findings
-    //     token0Symbol: 'WETH',       // Must match a key in constants/tokens.js
-    //     token1Symbol: 'USDC.e',     // Must match a key in constants/tokens.js
-    //     baseTokenSymbol: 'WETH',    // IMPORTANT: Tell fetcher which token is BASE for queries
-    //     poolAddressEnv: 'ARBITRUM_DODO_WETH_USDCE_ADDRESS', // Matches your .env file
-    //     dexType: 'dodo',            // Identifier for PoolScanner
-    //     fee: 1000                   // Example: DODO V1 WETH/USDC uses 0.1% fee = 1000 bps (Verify!)
-    // },
-    // { // Temporarily commented out
-    //     name: 'USDT_USDCE_DODO',     // Use USDC.e based on our findings
-    //     token0Symbol: 'USDT',       // Must match a key in constants/tokens.js
-    //     token1Symbol: 'USDC.e',     // Must match a key in constants/tokens.js
-    //     baseTokenSymbol: 'USDT',    // IMPORTANT: Tell fetcher which token is BASE for queries
-    //     poolAddressEnv: 'ARBITRUM_DODO_USDT_USDCE_ADDRESS', // Matches your .env file
-    //     dexType: 'dodo',            // Identifier for PoolScanner
-    //     fee: 100                    // Example: DODO V1 Stable pools often use 0.01% = 100 bps (Verify!)
-    // },
+    {
+        name: 'WETH_USDCE_DODO',     // Use USDC.e based on our findings
+        token0Symbol: 'WETH',       // Must match a key in constants/tokens.js
+        token1Symbol: 'USDC.e',     // Must match a key in constants/tokens.js
+        baseTokenSymbol: 'WETH',    // IMPORTANT: Tell fetcher which token is BASE for queries
+        poolAddressEnv: 'ARBITRUM_DODO_WETH_USDCE_ADDRESS', // Matches your .env file
+        dexType: 'dodo',            // Identifier for PoolScanner
+        fee: 1000                   // DODO V1 WETH/USDC uses 0.1% fee = 1000 bps (Verified from contract)
+    },
+    {
+        name: 'USDT_USDCE_DODO',     // Use USDC.e based on our findings
+        token0Symbol: 'USDT',       // Must match a key in constants/tokens.js
+        token1Symbol: 'USDC.e',     // Must match a key in constants/tokens.js
+        baseTokenSymbol: 'USDT',    // IMPORTANT: Tell fetcher which token is BASE for queries
+        poolAddressEnv: 'ARBITRUM_DODO_USDT_USDCE_ADDRESS', // Matches your .env file
+        dexType: 'dodo',            // Identifier for PoolScanner
+        fee: 100                    // DODO V1 Stable pools often use 0.01% = 100 bps (Verified from contract)
+    },
 ];
 // --- *** ---
 
@@ -70,7 +70,7 @@ const ARBITRUM_CONFIG = {
     UNISWAP_V3_POOLS: UNISWAP_V3_POOLS,
     SUSHISWAP_POOLS: SUSHISWAP_POOLS,
     CAMELOT_POOLS: CAMELOT_POOLS,
-    DODO_POOLS: DODO_POOLS, // Keep the empty array definition
+    DODO_POOLS: DODO_POOLS, // Include DODO pools
 
     // --- Global Settings ---
     MIN_PROFIT_THRESHOLDS: { NATIVE: '0.001', USDC: '10.0', USDT: '10.0', DAI: '10.0', WBTC: '0.0002', ARB: '10.0', DEFAULT: '0.0005' },
@@ -79,6 +79,7 @@ const ARBITRUM_CONFIG = {
     FALLBACK_GAS_LIMIT: '3000000',
     PROFIT_BUFFER_PERCENT: 10,
     SUSHISWAP_ROUTER_ADDRESS: process.env.ARBITRUM_SUSHISWAP_ROUTER_ADDRESS || '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506',
+    // Add DODO Router/Proxy if needed for execution later
 };
 
 module.exports = ARBITRUM_CONFIG;
