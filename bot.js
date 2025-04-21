@@ -13,7 +13,6 @@ const { getSigner, getFlashSwapManager } = require('./core/flashSwapManager'); /
 const ArbitrageEngine = require('./core/arbitrageEngine'); // Use this style for module.exports
 
 // --- Corrected Import for Config ---
-// Since config/index.js appears to load and export the object directly:
 const config = require('./config'); // Import the already loaded config object
 
 // --- Graceful Shutdown ---
@@ -66,9 +65,6 @@ async function main() {
     logger.info('>>> PROJECT HAVOC ARBITRAGE BOT STARTING <<<');
     logger.info('==============================================');
 
-    // Config is already loaded via the require('./config') above
-    // No need for provider, signer, flashSwapManager vars here, they are setup below
-
     try {
         // 1. Validate Token Config First
         logger.info('[Main] Validating token configuration...');
@@ -81,37 +77,42 @@ async function main() {
             process.exit(1);
         }
 
-        // 2. Validate Loaded Main Configuration
+        // 2. Validate Loaded Main Configuration (Corrected RPC URL Check)
         logger.info('[Main] Validating essential bot configuration from loaded config object...');
-        // Essential config validation using the 'config' object loaded at the top
-        if (!config || !config.NETWORK_RPC_URL || !config.PRIVATE_KEY || !config.FLASH_SWAP_CONTRACT_ADDRESS || !config.POOL_CONFIGS || config.POOL_CONFIGS.length === 0) {
+        // *** Corrected the check here to use config.RPC_URLS ***
+        const hasRpcUrls = config && Array.isArray(config.RPC_URLS) && config.RPC_URLS.length > 0;
+        const hasPrivateKey = config && !!config.PRIVATE_KEY;
+        const hasFlashSwapAddr = config && !!config.FLASH_SWAP_CONTRACT_ADDRESS;
+        const hasPoolConfigs = config && Array.isArray(config.POOL_CONFIGS) && config.POOL_CONFIGS.length > 0;
+
+        if (!config || !hasRpcUrls || !hasPrivateKey || !hasFlashSwapAddr || !hasPoolConfigs) {
             logger.error('[Main CRITICAL] Essential configuration missing in the loaded config object!', {
                  configExists: !!config,
-                 hasRpcUrl: !!config?.NETWORK_RPC_URL,
-                 hasPrivateKey: !!config?.PRIVATE_KEY,
-                 hasFlashSwapAddr: !!config?.FLASH_SWAP_CONTRACT_ADDRESS,
-                 hasPoolConfigs: Array.isArray(config?.POOL_CONFIGS),
-                 poolConfigLength: config?.POOL_CONFIGS?.length
+                 hasRpcUrls: hasRpcUrls, // Use the calculated boolean
+                 rpcUrlsValue: config?.RPC_URLS, // Log the actual value for debugging
+                 hasPrivateKey: hasPrivateKey,
+                 hasFlashSwapAddr: hasFlashSwapAddr,
+                 hasPoolConfigs: hasPoolConfigs,
+                 poolConfigLength: config?.POOL_CONFIGS?.length ?? 0
             });
-            throw new Error("Essential configuration (RPC URL, Private Key, FlashSwap Address, Pool Configs) missing or invalid in loaded object.");
+            throw new Error("Essential configuration (RPC_URLS, PRIVATE_KEY, FLASH_SWAP_CONTRACT_ADDRESS, POOL_CONFIGS) missing or invalid in loaded object.");
         }
-        // *** REMOVED line: config = loadConfig(); // This was the error source ***
         logger.info('[Main] Essential bot configuration validated.');
 
 
-        // 3. Setup Provider
+        // 3. Setup Provider (Using the primary URL from the array)
         logger.info('[Main] Getting Provider instance...');
-        const provider = getProvider(config.NETWORK_RPC_URL); // Use loaded config
+        // Pass the RPC_URLS array to getProvider, assuming it handles FallbackProvider setup
+        const provider = getProvider(config.RPC_URLS);
         const network = await provider.getNetwork();
         logger.info(`[Main] Provider connected to network: ${network.name} (Chain ID: ${network.chainId})`);
 
 
         // 4. Setup Signer & FlashSwapManager
         logger.info('[Main] Initializing Flash Swap Manager...');
-        const signer = getSigner(config.PRIVATE_KEY, provider); // Use loaded config
+        const signer = getSigner(config.PRIVATE_KEY, provider);
         const signerAddress = await signer.getAddress();
         logger.info(`[Main] Signer obtained for address: ${signerAddress}`);
-        // Use loaded config
         const flashSwapManager = getFlashSwapManager(config.FLASH_SWAP_CONTRACT_ADDRESS, signer);
         logger.info(`[Main] Flash Swap Manager initialized for contract: ${config.FLASH_SWAP_CONTRACT_ADDRESS}`);
 
@@ -119,11 +120,10 @@ async function main() {
         // 5. Initialize Arbitrage Engine
         logger.info('[Main] Initializing Arbitrage Engine...');
         if (typeof ArbitrageEngine !== 'function') {
-             logger.error(`[Main CRITICAL] ArbitrageEngine was not loaded correctly! typeof ArbitrageEngine: ${typeof ArbitrageEngine}. Value:`, ArbitrageEngine);
+             logger.error(`[Main CRITICAL] ArbitrageEngine constructor not found!`);
              throw new Error("Failed to load ArbitrageEngine constructor.");
         }
-        // Instantiate using the loaded config object
-        arbitrageEngineInstance = new ArbitrageEngine(config);
+        arbitrageEngineInstance = new ArbitrageEngine(config); // Pass the whole config
         logger.info('[Main] Arbitrage Engine initialized.');
 
 
