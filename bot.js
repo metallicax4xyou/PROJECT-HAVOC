@@ -8,8 +8,11 @@ const { TOKENS } = require('./constants/tokens');
 const { validateTokenConfig } = require('./utils/tokenUtils');
 const { getProvider } = require('./utils/provider');
 
+// --- ADDED ethers import ---
+const { ethers } = require('ethers'); // Import the main ethers library
+
 // --- Import the FlashSwapManager CLASS ---
-const FlashSwapManager = require('./core/flashSwapManager'); // Import the class
+const FlashSwapManager = require('./core/flashSwapManager');
 
 // --- Import ArbitrageEngine CLASS ---
 const ArbitrageEngine = require('./core/arbitrageEngine');
@@ -78,6 +81,7 @@ async function main() {
         logger.info('[Main] Validating essential bot configuration...');
         const hasRpcUrls = config && Array.isArray(config.RPC_URLS) && config.RPC_URLS.length > 0;
         const hasPrivateKey = config && !!config.PRIVATE_KEY;
+        // Use the imported ethers here
         const hasFlashSwapAddr = config && !!config.FLASH_SWAP_CONTRACT_ADDRESS && config.FLASH_SWAP_CONTRACT_ADDRESS !== ethers.ZeroAddress;
         const hasPoolConfigs = config && Array.isArray(config.POOL_CONFIGS) && config.POOL_CONFIGS.length > 0;
 
@@ -93,19 +97,18 @@ async function main() {
         const network = await provider.getNetwork();
         logger.info(`[Main] Provider connected to network: ${network.name} (Chain ID: ${network.chainId})`);
 
-        // 4. Instantiate FlashSwapManager (Corrected)
+        // 4. Instantiate FlashSwapManager
         logger.info('[Main] Initializing Flash Swap Manager instance...');
-        // Check if the CLASS was imported correctly
         if (typeof FlashSwapManager !== 'function' || !FlashSwapManager.prototype) {
-             throw new TypeError(`FlashSwapManager was not loaded correctly as a class. Check export in core/flashSwapManager.js. Typeof: ${typeof FlashSwapManager}`);
+             throw new TypeError(`FlashSwapManager was not loaded correctly as a class.`);
         }
-        // Create an INSTANCE of the class, passing config and provider
         flashSwapManagerInstance = new FlashSwapManager(config, provider);
-        // Get signer details from the instance
-        const signer = flashSwapManagerInstance.getSigner(); // Call method on instance
-        const signerAddress = await flashSwapManagerInstance.getSignerAddress(); // Call method on instance
+        const signer = flashSwapManagerInstance.getSigner();
+        const signerAddress = await flashSwapManagerInstance.getSignerAddress();
         logger.info(`[Main] Flash Swap Manager initialized. Signer Address: ${signerAddress}`);
-        logger.info(`[Main] Using FlashSwap contract at: ${flashSwapManagerInstance.getFlashSwapContract().address}`);
+        // Log contract address safely
+        const contractAddr = flashSwapManagerInstance.getFlashSwapContract()?.address;
+        logger.info(`[Main] Using FlashSwap contract at: ${contractAddr || 'Not Initialized'}`);
 
 
         // 5. Initialize Arbitrage Engine
@@ -113,13 +116,12 @@ async function main() {
         if (typeof ArbitrageEngine !== 'function') {
              throw new TypeError(`ArbitrageEngine constructor not found!`);
         }
-        arbitrageEngineInstance = new ArbitrageEngine(config); // Pass config
+        arbitrageEngineInstance = new ArbitrageEngine(config);
         logger.info('[Main] Arbitrage Engine initialized.');
 
         // Setup listener for results
         arbitrageEngineInstance.on('profitableOpportunities', (trades) => {
             logger.info(`[Main EVENT] Received ${trades.length} profitable opportunities.`);
-            // Use the flashSwapManagerInstance for execution
             if (flashSwapManagerInstance && !config.DRY_RUN && trades.length > 0) {
                 logger.info("[Main] DRY_RUN is false. Forwarding trades for potential execution...");
                 // Example: flashSwapManagerInstance.executeTrades(trades);
