@@ -1,57 +1,55 @@
 // core/arbitrageEngine.js
-// --- VERSION PASSING config AND provider SEPARATELY to ProfitCalculator ---
 const { EventEmitter } = require('events');
 const { ethers } = require('ethers');
 const PoolScanner = require('./poolScanner');
-const ProfitCalculator = require('./profitCalculator'); // Keep require
+const ProfitCalculator = require('./profitCalculator');
 const SpatialFinder = require('./finders/spatialFinder');
 const logger = require('../utils/logger');
 const { ArbitrageError } = require('../utils/errorHandler');
 
 class ArbitrageEngine extends EventEmitter {
-    // Constructor accepts config and provider separately
     constructor(config, provider) {
         super();
         logger.info('Initializing ArbitrageEngine components...');
 
-        // --- Validate Inputs ---
         if (!config || typeof config !== 'object') { throw new ArbitrageError('InitializationError', 'ArbitrageEngine: Invalid config object.'); }
         if (!provider) { throw new ArbitrageError('InitializationError', 'ArbitrageEngine: Provider instance required.'); }
+        if (!config.provider) {
+             logger.warn('[ArbitrageEngine] Provider instance was not found inside config. Augmenting.');
+             config.provider = provider;
+        }
 
-        this.config = config; // Store config
-        this.provider = provider; // Store provider
-
+        this.config = config;
+        this.provider = provider;
         this.isRunning = false;
         this.cycleInterval = null;
         this.isCycleRunning = false;
 
-        // Initialize core components
         try {
-            this.poolScanner = new PoolScanner(config); // PoolScanner only needs config
-
-            // --- *** Pass config AND provider SEPARATELY to ProfitCalculator *** ---
-            this.profitCalculator = new ProfitCalculator(this.config, this.provider);
-            // --- *** ---
-
-            this.spatialFinder = new SpatialFinder(config); // SpatialFinder only needs config
-
+            this.poolScanner = new PoolScanner(config);
+            this.profitCalculator = new ProfitCalculator(this.config, this.provider); // Pass both
+            this.spatialFinder = new SpatialFinder(config);
         } catch (error) {
             logger.error(`[ArbitrageEngine] CRITICAL ERROR during component initialization: ${error.message}`, error);
             throw new ArbitrageError('InitializationError', `Failed to initialize core components: ${error.message}`, error);
         }
 
-        // --- Keep debug logging for pool configs ---
+        // --- Updated Debug Logging ---
         const poolConfigs = this.config.POOL_CONFIGS || [];
         const totalPools = poolConfigs.length;
         logger.debug(`[ArbitrageEngine] Loaded ${totalPools} pools from config. Checking sample dexTypes...`);
         poolConfigs.slice(0, Math.min(5, totalPools)).forEach((pool, i) => {
-             logger.debug(`[ArbitrageEngine] Pool Config [${i}]: Pair=${pool.pair?.join('/') || 'N/A'}, dexType='${pool.dexType}' (Addr: ${pool.address})`);
+            // Use symbols for pair logging
+             const pairStr = `${pool.pair?.[0]?.symbol || '?'}/${pool.pair?.[1]?.symbol || '?'}`;
+             logger.debug(`[ArbitrageEngine] Pool Config [${i}]: Pair=${pairStr}, dexType='${pool.dexType}' (Addr: ${pool.address})`);
          });
          if (totalPools > 5) {
              logger.debug('[ArbitrageEngine] Checking last 5 pools...');
              poolConfigs.slice(Math.max(0, totalPools - 5)).forEach((pool, i) => {
                  const originalIndex = Math.max(0, totalPools - 5) + i;
-                 logger.debug(`[ArbitrageEngine] Pool Config [${originalIndex}]: Pair=${pool.pair?.join('/') || 'N/A'}, dexType='${pool.dexType}' (Addr: ${pool.address})`);
+                  // Use symbols for pair logging
+                 const pairStr = `${pool.pair?.[0]?.symbol || '?'}/${pool.pair?.[1]?.symbol || '?'}`;
+                 logger.debug(`[ArbitrageEngine] Pool Config [${originalIndex}]: Pair=${pairStr}, dexType='${pool.dexType}' (Addr: ${pool.address})`);
              });
          }
         // --- END DEBUG LOGGING ---
@@ -59,8 +57,8 @@ class ArbitrageEngine extends EventEmitter {
         logger.info('ArbitrageEngine initialized successfully');
     }
 
-    // --- start(), stop(), runCycle() methods remain unchanged ---
     async start() {
+        // ... (start logic unchanged) ...
         if (this.isRunning) { logger.warn('Engine already running.'); return; }
         this.isRunning = true;
         logger.info('Starting Arbitrage Engine...');
@@ -73,6 +71,7 @@ class ArbitrageEngine extends EventEmitter {
       }
 
       stop() {
+        // ... (stop logic unchanged) ...
         if (!this.isRunning && !this.cycleInterval) { logger.warn('Engine already stopped.'); return; }
         logger.info('Stopping Arbitrage Engine...');
         this.isRunning = false;
@@ -82,35 +81,35 @@ class ArbitrageEngine extends EventEmitter {
       }
 
     async runCycle() {
+        // ... (cycle lock logic unchanged) ...
         if (!this.isRunning) { logger.info('Engine is stopped, skipping cycle.'); return; }
         if (this.isCycleRunning) { logger.warn('Previous cycle still running, skipping.'); return; }
         this.isCycleRunning = true;
-
         logger.info('Starting new arbitrage cycle...');
         const cycleStartTime = Date.now();
 
         try {
           logger.info('Fetching pool states...');
           if (!this.poolScanner) throw new Error("PoolScanner is not initialized.");
-          const { poolStates, pairRegistry } = await this.poolScanner.fetchPoolStates();
+          const { poolStates, pairRegistry } = await this.poolScanner.fetchPoolStates(); // This should return actual states now
           logger.info(`Fetched ${poolStates.length} pool states.`);
           logger.debug(`Pair Registry size after fetch: ${pairRegistry?.size || 'N/A'}`);
 
           if (poolStates.length === 0 && Object.keys(this.poolScanner.fetchers || {}).length > 0) {
                logger.warn("No pool states fetched, but fetchers ARE initialized. Check RPC/Network or pool errors.");
-          } else if (poolStates.length === 0 && Object.keys(this.poolScanner.fetchers || {}).length === 0) {
+          } else if (poolStates.length === 0) {
               logger.warn("No pool states fetched AND no fetchers seem initialized. Check DEX enable flags.");
           }
 
           if (this.spatialFinder && pairRegistry) {
-              this.spatialFinder.updatePairRegistry(pairRegistry);
+              this.spatialFinder.updatePairRegistry(pairRegistry); // Update finder's registry
               logger.debug("[ArbitrageEngine] Updated SpatialFinder pair registry.");
-          }
+          } else if (!this.spatialFinder) { logger.warn("[ArbitrageEngine] SpatialFinder not initialized."); }
 
           let spatialOpportunities = [];
           if (this.spatialFinder && poolStates.length > 0) {
               logger.info('Finding spatial arbitrage opportunities...');
-              spatialOpportunities = this.spatialFinder.findArbitrage(poolStates);
+              spatialOpportunities = this.spatialFinder.findArbitrage(poolStates); // Find arbs
               logger.info(`Found ${spatialOpportunities.length} potential spatial opportunities.`);
           }
 
@@ -121,13 +120,17 @@ class ArbitrageEngine extends EventEmitter {
           let profitableTrades = [];
           if (allOpportunities.length > 0 && this.profitCalculator) {
             logger.info(`Calculating profitability for ${allOpportunities.length} opportunities...`);
-            // If ProfitCalculator.calculate becomes async, add await here
+             // Profit calc might be async later
             profitableTrades = this.profitCalculator.calculate(allOpportunities);
             logger.info(`Found ${profitableTrades.length} profitable trades.`);
 
             if (profitableTrades.length > 0) {
                 profitableTrades.forEach((trade, index) => {
-                    const pathDesc = trade.path?.map(p => `${p.dex}(${p.pair?.join('/')})`).join('->') || 'N/A';
+                    // Log using symbols for pairs
+                    const pathDesc = trade.path?.map(p => {
+                         const pairStr = `${p.pair?.[0]?.symbol || '?'}/${p.pair?.[1]?.symbol || '?'}`;
+                         return `${p.dex}(${pairStr})`;
+                    }).join('->') || 'N/A';
                     const profitPerc = trade.profitPercentage?.toFixed(4) || 'N/A';
                     logger.info(`Profitable Trade [${index + 1}]: Type: ${trade.type}, Path: ${pathDesc}, In: ${trade.amountIn} ${trade.tokenIn}, Out: ${trade.amountOut} ${trade.tokenOut}, Profit: ${trade.profitAmount} ${trade.tokenIn} (${profitPerc}%)`);
                 });
@@ -142,10 +145,11 @@ class ArbitrageEngine extends EventEmitter {
 
         } catch (error) {
           logger.error('Error during arbitrage cycle:', error);
+          // Maybe stop on critical errors?
         } finally {
             const cycleEndTime = Date.now();
             logger.info(`Arbitrage cycle finished. Duration: ${cycleEndTime - cycleStartTime}ms`);
-            this.isCycleRunning = false;
+            this.isCycleRunning = false; // Release lock
         }
       }
 }
