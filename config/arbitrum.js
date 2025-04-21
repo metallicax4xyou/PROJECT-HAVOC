@@ -1,5 +1,5 @@
 // config/arbitrum.js
-// --- ADDED DODO_POOLS section ---
+// --- DODO POOLS TEMPORARILY COMMENTED OUT FOR DEBUGGING ---
 
 // --- Chainlink Feed Addresses ---
 const CHAINLINK_FEEDS = { // Verify these if used
@@ -41,35 +41,25 @@ const CAMELOT_POOLS = [
     // { name: 'GMX_WETH_CAMELOT', token0Symbol: 'GMX', token1Symbol: 'WETH', dexType: 'camelot', fee: 3000, poolAddressEnv: 'ARBITRUM_CAMELOT_GMX_WETH_ADDRESS' }, // Example
 ];
 
-// --- *** Define DODO Pools *** ---
+// --- *** Define DODO Pools - COMMENTED OUT FOR DEBUGGING *** ---
 const DODO_POOLS = [
-    {
-        name: 'WETH_USDCE_DODO',     // Use USDC.e based on our findings
-        token0Symbol: 'WETH',       // Must match a key in constants/tokens.js
-        token1Symbol: 'USDC.e',     // Must match a key in constants/tokens.js
-        baseTokenSymbol: 'WETH',    // IMPORTANT: Tell fetcher which token is BASE for queries
-        poolAddressEnv: 'ARBITRUM_DODO_WETH_USDCE_ADDRESS', // Matches your .env file
-        dexType: 'dodo',            // Identifier for PoolScanner
-        fee: 1000                   // Example: DODO V1 WETH/USDC uses 0.1% fee = 1000 bps (Verify!)
-    },
-    {
-        name: 'USDT_USDCE_DODO',     // Use USDC.e based on our findings
-        token0Symbol: 'USDT',       // Must match a key in constants/tokens.js
-        token1Symbol: 'USDC.e',     // Must match a key in constants/tokens.js
-        baseTokenSymbol: 'USDT',    // IMPORTANT: Tell fetcher which token is BASE for queries
-        poolAddressEnv: 'ARBITRUM_DODO_USDT_USDCE_ADDRESS', // Matches your .env file
-        dexType: 'dodo',            // Identifier for PoolScanner
-        fee: 100                    // Example: DODO V1 Stable pools often use 0.01% = 100 bps (Verify!)
-    },
-    // Add other DODO pools here if addresses are found (e.g., WBTC/WETH)
-    // {
-    //     name: 'WBTC_WETH_DODO',
-    //     token0Symbol: 'WBTC',
-    //     token1Symbol: 'WETH',
-    //     baseTokenSymbol: 'WBTC', // Or WETH? Need to confirm pool details
-    //     poolAddressEnv: 'ARBITRUM_DODO_WBTC_WETH_ADDRESS', // Add to .env if found
-    //     dexType: 'dodo',
-    //     fee: 3000 // Example, verify fee
+    // { // Temporarily commented out
+    //     name: 'WETH_USDCE_DODO',     // Use USDC.e based on our findings
+    //     token0Symbol: 'WETH',       // Must match a key in constants/tokens.js
+    //     token1Symbol: 'USDC.e',     // Must match a key in constants/tokens.js
+    //     baseTokenSymbol: 'WETH',    // IMPORTANT: Tell fetcher which token is BASE for queries
+    //     poolAddressEnv: 'ARBITRUM_DODO_WETH_USDCE_ADDRESS', // Matches your .env file
+    //     dexType: 'dodo',            // Identifier for PoolScanner
+    //     fee: 1000                   // Example: DODO V1 WETH/USDC uses 0.1% fee = 1000 bps (Verify!)
+    // },
+    // { // Temporarily commented out
+    //     name: 'USDT_USDCE_DODO',     // Use USDC.e based on our findings
+    //     token0Symbol: 'USDT',       // Must match a key in constants/tokens.js
+    //     token1Symbol: 'USDC.e',     // Must match a key in constants/tokens.js
+    //     baseTokenSymbol: 'USDT',    // IMPORTANT: Tell fetcher which token is BASE for queries
+    //     poolAddressEnv: 'ARBITRUM_DODO_USDT_USDCE_ADDRESS', // Matches your .env file
+    //     dexType: 'dodo',            // Identifier for PoolScanner
+    //     fee: 100                    // Example: DODO V1 Stable pools often use 0.01% = 100 bps (Verify!)
     // },
 ];
 // --- *** ---
@@ -80,21 +70,15 @@ const ARBITRUM_CONFIG = {
     UNISWAP_V3_POOLS: UNISWAP_V3_POOLS,
     SUSHISWAP_POOLS: SUSHISWAP_POOLS,
     CAMELOT_POOLS: CAMELOT_POOLS,
-    DODO_POOLS: DODO_POOLS, // *** Add DODO_POOLS to export ***
+    DODO_POOLS: DODO_POOLS, // Keep the empty array definition
 
     // --- Global Settings ---
-    MIN_PROFIT_THRESHOLDS: {
-        NATIVE: '0.001', USDC: '10.0', USDT: '10.0', DAI: '10.0', WBTC: '0.0002', ARB: '10.0', DEFAULT: '0.0005'
-    },
+    MIN_PROFIT_THRESHOLDS: { NATIVE: '0.001', USDC: '10.0', USDT: '10.0', DAI: '10.0', WBTC: '0.0002', ARB: '10.0', DEFAULT: '0.0005' },
     MAX_GAS_GWEI: '0.5',
     GAS_ESTIMATE_BUFFER_PERCENT: 20,
     FALLBACK_GAS_LIMIT: '3000000',
     PROFIT_BUFFER_PERCENT: 10,
-
-    // Define Router Addresses
     SUSHISWAP_ROUTER_ADDRESS: process.env.ARBITRUM_SUSHISWAP_ROUTER_ADDRESS || '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506',
-    // Add DODO Router/Proxy if needed for execution later
-    // DODOV2Proxy: '0x88CBf433471A0CD8240D2a12354362988b4593E5', // Example address from docs
 };
 
 module.exports = ARBITRUM_CONFIG;
