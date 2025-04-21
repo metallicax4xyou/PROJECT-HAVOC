@@ -1,31 +1,25 @@
 // core/arbitrageEngine.js
+// --- VERSION PASSING config AND provider SEPARATELY to ProfitCalculator ---
 const { EventEmitter } = require('events');
-const { ethers } = require('ethers'); // Keep ethers if needed
+const { ethers } = require('ethers');
 const PoolScanner = require('./poolScanner');
-const ProfitCalculator = require('./profitCalculator'); // Keep this require
-const SpatialFinder = require('./finders/spatialFinder'); // Adjust path if needed
+const ProfitCalculator = require('./profitCalculator'); // Keep require
+const SpatialFinder = require('./finders/spatialFinder');
 const logger = require('../utils/logger');
-const { ArbitrageError } = require('../utils/errorHandler'); // Adjust path if needed
+const { ArbitrageError } = require('../utils/errorHandler');
 
 class ArbitrageEngine extends EventEmitter {
-    // Constructor accepts config (expected to contain provider) and provider separately
-    constructor(config, provider) { // Added provider back as separate arg for clarity
+    // Constructor accepts config and provider separately
+    constructor(config, provider) {
         super();
         logger.info('Initializing ArbitrageEngine components...');
 
         // --- Validate Inputs ---
         if (!config || typeof config !== 'object') { throw new ArbitrageError('InitializationError', 'ArbitrageEngine: Invalid config object.'); }
         if (!provider) { throw new ArbitrageError('InitializationError', 'ArbitrageEngine: Provider instance required.'); }
-        // Check if provider is ALSO inside config (as required by ProfitCalculator)
-        if (!config.provider) {
-             logger.warn('[ArbitrageEngine] Provider instance was not found *inside* the config object. Augmenting config object now.');
-             config.provider = provider; // Ensure provider is in config for ProfitCalculator
-        } else if (config.provider !== provider) {
-             logger.warn('[ArbitrageEngine] Provider passed separately differs from provider found inside config object. Using the one passed separately for engine context.');
-        }
 
-        this.config = config; // Store the (potentially augmented) config
-        this.provider = provider; // Store provider for potential direct use by engine
+        this.config = config; // Store config
+        this.provider = provider; // Store provider
 
         this.isRunning = false;
         this.cycleInterval = null;
@@ -33,13 +27,13 @@ class ArbitrageEngine extends EventEmitter {
 
         // Initialize core components
         try {
-            this.poolScanner = new PoolScanner(config);
+            this.poolScanner = new PoolScanner(config); // PoolScanner only needs config
 
-            // --- ProfitCalculator uses the config object (which MUST contain provider) ---
-            this.profitCalculator = new ProfitCalculator(this.config);
-            // --- ---
+            // --- *** Pass config AND provider SEPARATELY to ProfitCalculator *** ---
+            this.profitCalculator = new ProfitCalculator(this.config, this.provider);
+            // --- *** ---
 
-            this.spatialFinder = new SpatialFinder(config);
+            this.spatialFinder = new SpatialFinder(config); // SpatialFinder only needs config
 
         } catch (error) {
             logger.error(`[ArbitrageEngine] CRITICAL ERROR during component initialization: ${error.message}`, error);
@@ -53,7 +47,7 @@ class ArbitrageEngine extends EventEmitter {
         poolConfigs.slice(0, Math.min(5, totalPools)).forEach((pool, i) => {
              logger.debug(`[ArbitrageEngine] Pool Config [${i}]: Pair=${pool.pair?.join('/') || 'N/A'}, dexType='${pool.dexType}' (Addr: ${pool.address})`);
          });
-         if (totalPools > 5) { /* ... log last 5 ... */
+         if (totalPools > 5) {
              logger.debug('[ArbitrageEngine] Checking last 5 pools...');
              poolConfigs.slice(Math.max(0, totalPools - 5)).forEach((pool, i) => {
                  const originalIndex = Math.max(0, totalPools - 5) + i;
@@ -65,6 +59,7 @@ class ArbitrageEngine extends EventEmitter {
         logger.info('ArbitrageEngine initialized successfully');
     }
 
+    // --- start(), stop(), runCycle() methods remain unchanged ---
     async start() {
         if (this.isRunning) { logger.warn('Engine already running.'); return; }
         this.isRunning = true;
@@ -110,8 +105,6 @@ class ArbitrageEngine extends EventEmitter {
           if (this.spatialFinder && pairRegistry) {
               this.spatialFinder.updatePairRegistry(pairRegistry);
               logger.debug("[ArbitrageEngine] Updated SpatialFinder pair registry.");
-          } else if (!this.spatialFinder) {
-              logger.warn("[ArbitrageEngine] SpatialFinder not initialized.");
           }
 
           let spatialOpportunities = [];
@@ -128,9 +121,7 @@ class ArbitrageEngine extends EventEmitter {
           let profitableTrades = [];
           if (allOpportunities.length > 0 && this.profitCalculator) {
             logger.info(`Calculating profitability for ${allOpportunities.length} opportunities...`);
-            // Profit calculator might need async if it uses provider internally
-            // For now, assuming calculate is synchronous based on its code structure shown
-            // If calculate becomes async, add 'await' here.
+            // If ProfitCalculator.calculate becomes async, add await here
             profitableTrades = this.profitCalculator.calculate(allOpportunities);
             logger.info(`Found ${profitableTrades.length} profitable trades.`);
 
