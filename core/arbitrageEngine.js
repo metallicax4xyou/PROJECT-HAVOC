@@ -1,37 +1,43 @@
 // core/arbitrageEngine.js
 const { EventEmitter } = require('events');
-const { ethers } = require('ethers');
+const { ethers } = require('ethers'); // Keep ethers if needed
 const PoolScanner = require('./poolScanner');
 const ProfitCalculator = require('./profitCalculator'); // Keep this require
-const SpatialFinder = require('./finders/spatialFinder');
+const SpatialFinder = require('./finders/spatialFinder'); // Adjust path if needed
 const logger = require('../utils/logger');
-const { ArbitrageError } = require('../utils/errorHandler');
+const { ArbitrageError } = require('../utils/errorHandler'); // Adjust path if needed
 
 class ArbitrageEngine extends EventEmitter {
-    // Constructor still accepts config and provider separately
-    constructor(config, provider) {
+    // Constructor accepts config (expected to contain provider) and provider separately
+    constructor(config, provider) { // Added provider back as separate arg for clarity
         super();
         logger.info('Initializing ArbitrageEngine components...');
 
+        // --- Validate Inputs ---
         if (!config || typeof config !== 'object') { throw new ArbitrageError('InitializationError', 'ArbitrageEngine: Invalid config object.'); }
-        // Provider is now expected *inside* config for ProfitCalculator, but engine might use it directly too
         if (!provider) { throw new ArbitrageError('InitializationError', 'ArbitrageEngine: Provider instance required.'); }
-        if (!config.provider) { logger.warn('[ArbitrageEngine] Provider instance was not found *inside* the config object passed. This might cause issues if ProfitCalculator relies on it.')}
+        // Check if provider is ALSO inside config (as required by ProfitCalculator)
+        if (!config.provider) {
+             logger.warn('[ArbitrageEngine] Provider instance was not found *inside* the config object. Augmenting config object now.');
+             config.provider = provider; // Ensure provider is in config for ProfitCalculator
+        } else if (config.provider !== provider) {
+             logger.warn('[ArbitrageEngine] Provider passed separately differs from provider found inside config object. Using the one passed separately for engine context.');
+        }
 
-        this.config = config;
+        this.config = config; // Store the (potentially augmented) config
         this.provider = provider; // Store provider for potential direct use by engine
 
         this.isRunning = false;
         this.cycleInterval = null;
         this.isCycleRunning = false;
 
+        // Initialize core components
         try {
             this.poolScanner = new PoolScanner(config);
 
-            // --- *** CORRECTED INSTANTIATION FOR PROFIT CALCULATOR *** ---
-            // Pass only the config object, as ProfitCalculator expects 'provider' within it
+            // --- ProfitCalculator uses the config object (which MUST contain provider) ---
             this.profitCalculator = new ProfitCalculator(this.config);
-            // --- *** ---
+            // --- ---
 
             this.spatialFinder = new SpatialFinder(config);
 
@@ -40,19 +46,25 @@ class ArbitrageEngine extends EventEmitter {
             throw new ArbitrageError('InitializationError', `Failed to initialize core components: ${error.message}`, error);
         }
 
-        // Keep debug logging for pool configs
+        // --- Keep debug logging for pool configs ---
         const poolConfigs = this.config.POOL_CONFIGS || [];
         const totalPools = poolConfigs.length;
-        logger.debug(`[ArbitrageEngine] Loaded ${totalPools} pools. Checking sample dexTypes...`);
+        logger.debug(`[ArbitrageEngine] Loaded ${totalPools} pools from config. Checking sample dexTypes...`);
         poolConfigs.slice(0, Math.min(5, totalPools)).forEach((pool, i) => {
              logger.debug(`[ArbitrageEngine] Pool Config [${i}]: Pair=${pool.pair?.join('/') || 'N/A'}, dexType='${pool.dexType}' (Addr: ${pool.address})`);
          });
-         // Log last 5 if needed
+         if (totalPools > 5) { /* ... log last 5 ... */
+             logger.debug('[ArbitrageEngine] Checking last 5 pools...');
+             poolConfigs.slice(Math.max(0, totalPools - 5)).forEach((pool, i) => {
+                 const originalIndex = Math.max(0, totalPools - 5) + i;
+                 logger.debug(`[ArbitrageEngine] Pool Config [${originalIndex}]: Pair=${pool.pair?.join('/') || 'N/A'}, dexType='${pool.dexType}' (Addr: ${pool.address})`);
+             });
+         }
+        // --- END DEBUG LOGGING ---
 
         logger.info('ArbitrageEngine initialized successfully');
     }
 
-    // --- start(), stop(), runCycle() methods remain unchanged from the previous version ---
     async start() {
         if (this.isRunning) { logger.warn('Engine already running.'); return; }
         this.isRunning = true;
@@ -91,13 +103,15 @@ class ArbitrageEngine extends EventEmitter {
 
           if (poolStates.length === 0 && Object.keys(this.poolScanner.fetchers || {}).length > 0) {
                logger.warn("No pool states fetched, but fetchers ARE initialized. Check RPC/Network or pool errors.");
-          } else if (poolStates.length === 0) {
+          } else if (poolStates.length === 0 && Object.keys(this.poolScanner.fetchers || {}).length === 0) {
               logger.warn("No pool states fetched AND no fetchers seem initialized. Check DEX enable flags.");
           }
 
           if (this.spatialFinder && pairRegistry) {
               this.spatialFinder.updatePairRegistry(pairRegistry);
               logger.debug("[ArbitrageEngine] Updated SpatialFinder pair registry.");
+          } else if (!this.spatialFinder) {
+              logger.warn("[ArbitrageEngine] SpatialFinder not initialized.");
           }
 
           let spatialOpportunities = [];
@@ -114,14 +128,14 @@ class ArbitrageEngine extends EventEmitter {
           let profitableTrades = [];
           if (allOpportunities.length > 0 && this.profitCalculator) {
             logger.info(`Calculating profitability for ${allOpportunities.length} opportunities...`);
-            // Use the instance method - calculate() might be async if it uses provider
-            // Adjust if calculate becomes async
+            // Profit calculator might need async if it uses provider internally
+            // For now, assuming calculate is synchronous based on its code structure shown
+            // If calculate becomes async, add 'await' here.
             profitableTrades = this.profitCalculator.calculate(allOpportunities);
             logger.info(`Found ${profitableTrades.length} profitable trades.`);
 
             if (profitableTrades.length > 0) {
                 profitableTrades.forEach((trade, index) => {
-                    // Use optional chaining for safer logging
                     const pathDesc = trade.path?.map(p => `${p.dex}(${p.pair?.join('/')})`).join('->') || 'N/A';
                     const profitPerc = trade.profitPercentage?.toFixed(4) || 'N/A';
                     logger.info(`Profitable Trade [${index + 1}]: Type: ${trade.type}, Path: ${pathDesc}, In: ${trade.amountIn} ${trade.tokenIn}, Out: ${trade.amountOut} ${trade.tokenOut}, Profit: ${trade.profitAmount} ${trade.tokenIn} (${profitPerc}%)`);
