@@ -1,107 +1,170 @@
 // utils/priceFeed.js
 const { ethers } = require('ethers');
-const logger = require('./logger');
+const logger = require('./logger'); // Adjust path if needed
+const { ArbitrageError } = require('./errorHandler'); // Adjust path if needed
+const { TOKENS } = require('../constants/tokens'); // Adjust path if needed
 
-// Minimal ABI for Chainlink AggregatorV3Interface
+// Chainlink Aggregator V3 Interface ABI (minimal)
 const CHAINLINK_ABI = [
-    "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
-    "function decimals() view returns (uint8)"
+    "function latestRoundData() external view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
+    "function decimals() external view returns (uint8)"
 ];
 
+// Cache for feed contracts and decimals
+const feedContractCache = {};
+const feedDecimalsCache = {};
+
 /**
- * Fetches the latest price data for a given token symbol relative to ETH from Chainlink.
- * @param {string} tokenSymbol The symbol of the token (e.g., 'USDC', 'USDT'). Case-sensitive match with config.
- * @param {ethers.Provider} provider Ethers provider instance.
- * @param {object} networkConfig The loaded network configuration (e.g., from config/index.js). Must contain CHAINLINK_FEEDS.
- * @returns {Promise<{price: bigint, feedDecimals: number} | null>} Object containing the price (as BigInt) and feed decimals, or null if failed.
- * Price represents how much ETH 1 unit of the token is worth, scaled by feedDecimals.
+ * Gets the Chainlink price feed address for a given pair.
+ * Handles direct and inverse pairs (e.g., ETH/USD vs USD/ETH).
+ * @param {object} chainlinkFeedsConfig The CHAINLINK_FEEDS object from config.
+ * @param {string} baseSymbol The symbol of the base currency (e.g., 'USDC').
+ * @param {string} quoteSymbol The symbol of the quote currency (e.g., 'ETH').
+ * @returns {{feedAddress: string | null, inverse: boolean}}
  */
-async function getChainlinkPriceData(tokenSymbol, provider, networkConfig) {
-    if (!networkConfig || !networkConfig.CHAINLINK_FEEDS) {
-        logger.error('[PriceFeed] CHAINLINK_FEEDS not found in network configuration.');
-        return null;
-    }
+function getFeedAddress(chainlinkFeedsConfig, baseSymbol, quoteSymbol) {
+    const directKey = `${baseSymbol}/${quoteSymbol}`;
+    const inverseKey = `${quoteSymbol}/${baseSymbol}`;
 
-    // Handle native token (WETH is treated as ETH price = 1)
-    // Assumes NATIVE_SYMBOL is defined in the root config merged by config/index.js
-    if (tokenSymbol === (networkConfig.NATIVE_SYMBOL || 'WETH')) {
-        logger.debug(`[PriceFeed] Price requested for native token (${tokenSymbol}), returning 1 ETH.`);
-        // Return price = 1, decimals = 18 (standard ETH decimals)
-        // Price = 1 * 10^18, feedDecimals = 18. This means 1 Native Token = (10^18 / 10^18) ETH = 1 ETH
-        return { price: 10n ** 18n, feedDecimals: 18 };
+    if (chainlinkFeedsConfig[directKey]) {
+        return { feedAddress: chainlinkFeedsConfig[directKey], inverse: false };
+    } else if (chainlinkFeedsConfig[inverseKey]) {
+        return { feedAddress: chainlinkFeedsConfig[inverseKey], inverse: true };
+    } else {
+        logger.warn(`[PriceFeed] No Chainlink feed found for ${directKey} or ${inverseKey}`);
+        return { feedAddress: null, inverse: false };
     }
+}
 
-    const feedAddress = networkConfig.CHAINLINK_FEEDS[`${tokenSymbol}/ETH`]; // Assumes feeds vs ETH
-    if (!feedAddress) {
-        logger.warn(`[PriceFeed] Chainlink feed address not found for ${tokenSymbol}/ETH in configuration.`);
+/**
+ * Fetches the latest price from a Chainlink feed.
+ * @param {ethers.Provider} provider Ethers provider instance.
+ * @param {string} feedAddress The address of the Chainlink feed contract.
+ * @returns {Promise<{price: bigint, decimals: number} | null>} Price in feed's units or null on error.
+ */
+async function getChainlinkPriceData(provider, feedAddress) {
+    const logPrefix = `[PriceFeed ${feedAddress.substring(0, 6)}]`;
+    if (!provider || !feedAddress || !ethers.isAddress(feedAddress)) {
+        logger.error(`${logPrefix} Invalid provider or feed address.`);
         return null;
     }
 
     try {
-        const feedContract = new ethers.Contract(feedAddress, CHAINLINK_ABI, provider);
-        logger.debug(`[PriceFeed] Querying Chainlink feed for ${tokenSymbol}/ETH at ${feedAddress}`);
+        // Get contract instance from cache or create new
+        if (!feedContractCache[feedAddress]) {
+            feedContractCache[feedAddress] = new ethers.Contract(feedAddress, CHAINLINK_ABI, provider);
+        }
+        const feedContract = feedContractCache[feedAddress];
 
-        const [roundData, feedDecimals] = await Promise.all([
-            feedContract.latestRoundData(),
-            feedContract.decimals() // Fetch decimals directly from contract
-        ]);
+        // Get feed decimals from cache or fetch
+        let feedDecimals = feedDecimalsCache[feedAddress];
+        if (feedDecimals === undefined) {
+            feedDecimals = await feedContract.decimals();
+            feedDecimalsCache[feedAddress] = Number(feedDecimals); // Convert to number
+             logger.debug(`${logPrefix} Fetched feed decimals: ${feedDecimals}`);
+        }
 
+        // Fetch latest round data
+        const roundData = await feedContract.latestRoundData();
         // roundData = { roundId, answer (price), startedAt, updatedAt, answeredInRound }
-        const price = roundData.answer; // Price is int256, but usually positive
-        const decimals = Number(feedDecimals); // Convert uint8 to number
+        const price = BigInt(roundData.answer);
 
         if (price <= 0n) {
-             logger.warn(`[PriceFeed] Chainlink feed for ${tokenSymbol}/ETH returned non-positive price: ${price}`);
+             logger.warn(`${logPrefix} Chainlink feed returned non-positive price: ${price}`);
              return null;
         }
 
-        logger.debug(`[PriceFeed] Chainlink Data for ${tokenSymbol}/ETH: Price=${price}, Decimals=${decimals}`);
-        return { price, feedDecimals: decimals };
+         logger.debug(`${logPrefix} Fetched price: ${price} (Decimals: ${feedDecimals})`);
+        return { price: price, decimals: feedDecimals };
 
     } catch (error) {
-        logger.error(`[PriceFeed] Error fetching price for ${tokenSymbol}/ETH from ${feedAddress}: ${error.message}`);
-        // Optionally check error type (e.g., network error, contract call error)
+        logger.error(`${logPrefix} Error fetching Chainlink price: ${error.message}`);
         return null;
     }
 }
 
 /**
- * Converts an amount of a token (in its smallest unit) to its equivalent value in ETH (wei).
- * @param {bigint} amountTokenSmallestUnit The amount of the token in its smallest denomination (e.g., 1,000,000 for 1 USDC if decimals=6).
- * @param {number} tokenDecimals The number of decimals for the token.
- * @param {object} priceData The price data object from getChainlinkPriceData {price: bigint, feedDecimals: number}.
- * @returns {bigint | null} The equivalent value in wei, or null if conversion is not possible.
+ * Converts a token amount (in wei) to its equivalent value in the native currency (ETH wei).
+ * @param {bigint} amountWei The amount of the token in its own wei units.
+ * @param {object} token The token object (needs symbol, decimals).
+ * @param {object} chainlinkFeedsConfig The CHAINLINK_FEEDS object from config.
+ * @param {string} nativeSymbol The symbol of the native currency (e.g., 'ETH').
+ * @param {number} nativeDecimals The decimals of the native currency.
+ * @param {ethers.Provider} provider Ethers provider instance.
+ * @returns {Promise<bigint | null>} The equivalent value in native currency wei, or null on error.
  */
-function convertTokenAmountToWei(amountTokenSmallestUnit, tokenDecimals, priceData) {
-    if (!priceData || amountTokenSmallestUnit < 0n) {
+async function convertTokenAmountToNative(amountWei, token, chainlinkFeedsConfig, nativeSymbol, nativeDecimals, provider) {
+    const logPrefix = `[PriceFeedConvert ${token?.symbol}]`;
+    if (!amountWei || !token || !chainlinkFeedsConfig || !nativeSymbol || !nativeDecimals || !provider) {
+        logger.error(`${logPrefix} Invalid arguments for conversion.`);
         return null;
     }
 
-    const { price, feedDecimals } = priceData;
-    const EIGHTEEN_DECIMALS = 10n ** 18n; // Wei decimals
+    const tokenSymbol = token.symbol;
+    const tokenDecimals = token.decimals;
+
+    // If the token IS the native currency, no conversion needed
+    if (tokenSymbol === nativeSymbol) {
+        // Cross-check decimals - should match but log warning if not
+        if (tokenDecimals !== nativeDecimals) {
+             logger.warn(`${logPrefix} Native token decimal mismatch (${tokenDecimals} vs ${nativeDecimals}). Returning original amount.`);
+        }
+        return BigInt(amountWei);
+    }
+
+    // Find the appropriate Chainlink feed (Token/ETH or ETH/Token)
+    const { feedAddress, inverse } = getFeedAddress(chainlinkFeedsConfig, tokenSymbol, nativeSymbol);
+    if (!feedAddress) {
+        // Log warning if feed not found for non-native token
+        logger.warn(`${logPrefix} No Chainlink feed found to convert ${tokenSymbol} to ${nativeSymbol}. Cannot calculate native value.`);
+        return null;
+    }
+
+    // Get the price data from the feed
+    const priceData = await getChainlinkPriceData(provider, feedAddress);
+    if (!priceData) {
+         logger.warn(`${logPrefix} Failed to get price data from feed ${feedAddress}.`);
+        return null;
+    }
+
+    const price = priceData.price; // Price from feed (e.g., ETH per Token, or Token per ETH)
+    const feedDecimals = priceData.decimals; // Decimals of the price feed itself
 
     try {
-        // Formula: wei = (amountToken * price * 10^18) / (10^tokenDecimals * 10^feedDecimals)
-        const numerator = amountTokenSmallestUnit * price * EIGHTEEN_DECIMALS;
-        const denominator = (10n ** BigInt(tokenDecimals)) * (10n ** BigInt(feedDecimals));
+        let nativeValueWei;
+        const amount = BigInt(amountWei);
+        const scaleFactorToken = 10n ** BigInt(tokenDecimals);
+        const scaleFactorNative = 10n ** BigInt(nativeDecimals);
+        const scaleFactorFeed = 10n ** BigInt(feedDecimals);
 
-        if (denominator === 0n) {
-            logger.error('[PriceFeed] Price conversion denominator is zero, cannot convert.');
-            return null;
+        if (!inverse) {
+            // Feed is Token/ETH (e.g., USDC/ETH price is ETH per USDC)
+            // ValueETH = AmountToken * Price (ETH per Token)
+            // ValueETHWei = (AmountTokenWei / 10^tokenDec) * (PriceFeed / 10^feedDec) * 10^nativeDec
+            // ValueETHWei = (AmountTokenWei * PriceFeed * 10^nativeDec) / (10^tokenDec * 10^feedDec)
+            nativeValueWei = (amount * price * scaleFactorNative) / (scaleFactorToken * scaleFactorFeed);
+             logger.debug(`${logPrefix} Converted ${tokenSymbol}->${nativeSymbol} (Direct Feed): ${nativeValueWei} Wei`);
+        } else {
+            // Feed is ETH/Token (e.g., ETH/USDC price is USDC per ETH)
+            // ValueETH = AmountToken / Price (Token per ETH)
+            // ValueETHWei = (AmountTokenWei / 10^tokenDec) / (PriceFeed / 10^feedDec) * 10^nativeDec
+            // ValueETHWei = (AmountTokenWei * 10^feedDec * 10^nativeDec) / (10^tokenDec * PriceFeed)
+            const numerator = amount * scaleFactorFeed * scaleFactorNative;
+            const denominator = scaleFactorToken * price;
+            if (denominator === 0n) { throw new Error("Division by zero during inverse conversion."); }
+            nativeValueWei = numerator / denominator;
+             logger.debug(`${logPrefix} Converted ${tokenSymbol}->${nativeSymbol} (Inverse Feed): ${nativeValueWei} Wei`);
         }
 
-        const amountInWei = numerator / denominator;
-        return amountInWei;
+        return nativeValueWei;
 
     } catch (error) {
-        // Potential BigInt overflow if numbers are massive, though unlikely with typical token amounts/prices
-        logger.error(`[PriceFeed] Error during BigInt calculation for price conversion: ${error.message}`);
+        logger.error(`${logPrefix} Error during conversion calculation: ${error.message}`);
         return null;
     }
 }
 
-
 module.exports = {
-    getChainlinkPriceData,
-    convertTokenAmountToWei,
+    getChainlinkPriceData, // Export if needed directly elsewhere
+    convertTokenAmountToNative
 };
