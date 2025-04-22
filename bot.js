@@ -2,13 +2,14 @@
 require('dotenv').config();
 
 const logger = require('./utils/logger');
-const ErrorHandler = require('./utils/errorHandler'); // Keep require if ProfitCalc uses it
+const ErrorHandler = require('./utils/errorHandler');
 const { TOKENS } = require('./constants/tokens');
 const { validateTokenConfig } = require('./utils/tokenUtils');
 const { getProvider } = require('./utils/provider');
 const { ethers } = require('ethers');
 const FlashSwapManager = require('./core/flashSwapManager');
 const ArbitrageEngine = require('./core/arbitrageEngine');
+const SwapSimulator = require('./core/swapSimulator'); // *** IMPORT SwapSimulator ***
 const config = require('./config');
 
 // --- Graceful Shutdown (Keep as is) ---
@@ -28,26 +29,34 @@ async function main() {
     logger.info('\n==============================================');
     logger.info('>>> PROJECT HAVOC ARBITRAGE BOT STARTING <<<');
     logger.info('==============================================');
-    let flashSwapManagerInstance = null; let provider = null;
+    let flashSwapManagerInstance = null; let provider = null; let swapSimulatorInstance = null; // Add simulator instance var
     try {
         logger.info('[Main] Validating token configuration...');
         validateTokenConfig(TOKENS); logger.info('[Main] Token configuration validated.');
+
         logger.info('[Main] Getting Provider instance...');
         provider = getProvider(config.RPC_URLS);
         const network = await provider.getNetwork(); logger.info(`[Main] Provider connected to ${network.name} (ID: ${network.chainId})`);
         config.provider = provider; logger.debug('[Main] Added provider to config object.');
 
+        // *** Instantiate SwapSimulator ***
+        logger.info('[Main] Initializing Swap Simulator...');
+        if (typeof SwapSimulator !== 'function') { throw new TypeError(`SwapSimulator class not loaded.`); }
+        swapSimulatorInstance = new SwapSimulator(config, provider); // Pass config and provider
+        logger.info('[Main] Swap Simulator initialized.');
+        // *** --- ***
+
         logger.info('[Main] Initializing Flash Swap Manager instance...');
         if (typeof FlashSwapManager !== 'function') { throw new TypeError(`FlashSwapManager class not loaded.`); }
         flashSwapManagerInstance = new FlashSwapManager(config, provider);
         const signerAddress = await flashSwapManagerInstance.getSignerAddress(); logger.info(`[Main] Flash Swap Manager initialized. Signer: ${signerAddress}`);
-        // *** FIX: Use .target for address in Ethers v6 ***
-        const contractTarget = flashSwapManagerInstance.getFlashSwapContract()?.target;
-        logger.info(`[Main] Using FlashSwap contract at: ${contractTarget || 'Not Initialized'}`);
+        const contractTarget = flashSwapManagerInstance.getFlashSwapContract()?.target; logger.info(`[Main] Using FlashSwap contract at: ${contractTarget || 'Not Initialized'}`);
 
         logger.info('[Main] Initializing Arbitrage Engine...');
         if (typeof ArbitrageEngine !== 'function') { throw new TypeError(`ArbitrageEngine constructor not found!`); }
-        arbitrageEngineInstance = new ArbitrageEngine(config, provider); logger.info('[Main] Arbitrage Engine initialized.');
+        // *** Pass swapSimulatorInstance to ArbitrageEngine ***
+        arbitrageEngineInstance = new ArbitrageEngine(config, provider, swapSimulatorInstance);
+        logger.info('[Main] Arbitrage Engine initialized.');
 
         arbitrageEngineInstance.on('profitableOpportunities', (trades) => { /* ... unchanged ... */
              logger.info(`[Main EVENT] Received ${trades.length} profitable opportunities.`);
@@ -57,9 +66,11 @@ async function main() {
 
         logger.info('[Main] Starting Arbitrage Engine cycle...'); await arbitrageEngineInstance.start();
         logger.info('\n>>> BOT IS RUNNING <<<'); logger.info('(Press Ctrl+C to stop)'); logger.info('======================');
-    } catch (error) {
+    } catch (error) { /* ... unchanged error handling ... */
         const errorType = error instanceof Error ? error.constructor.name : 'UnknownError'; logger.error(`!!! BOT FAILED STARTUP !!! [Type: ${errorType}]`, error); ErrorHandler?.handleError(error, 'MainProcessStartup');
         logger.error('Exiting due to critical startup error...'); process.exit(1);
     }
 }
-main().catch(error => { const errorType = error instanceof Error ? error.constructor.name : 'UnknownError'; logger.error(`!!! UNEXPECTED CRITICAL ERROR IN MAIN !!! [Type: ${errorType}]`, error); ErrorHandler?.handleError(error, 'MainExecutionCatch'); process.exit(1); });
+main().catch(error => { /* ... unchanged error handling ... */
+     const errorType = error instanceof Error ? error.constructor.name : 'UnknownError'; logger.error(`!!! UNEXPECTED CRITICAL ERROR IN MAIN !!! [Type: ${errorType}]`, error); ErrorHandler?.handleError(error, 'MainExecutionCatch'); process.exit(1);
+});
