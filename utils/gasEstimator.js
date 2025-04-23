@@ -1,121 +1,101 @@
 // utils/gasEstimator.js
 const { ethers } = require('ethers');
-const logger = require('./logger'); // Adjust path if needed
-const { ArbitrageError } = require('./errorHandler'); // Adjust path if needed
+const logger = require('./logger');
+const { ArbitrageError } = require('./errorHandler');
 
 class GasEstimator {
     /**
-     * @param {object} config The main configuration object (needs FALLBACK_GAS_LIMIT, MAX_GAS_GWEI, etc.)
+     * @param {object} config The main configuration object (needs GAS_COST_ESTIMATES, MAX_GAS_GWEI, etc.)
      * @param {ethers.Provider} provider Ethers provider instance
      */
     constructor(config, provider) {
         logger.debug('[GasEstimator] Initializing...');
-        if (!config) { throw new ArbitrageError('GasEstimatorInit', 'Config object required.'); }
-        if (!provider) { throw new ArbitrageError('GasEstimatorInit', 'Provider instance required.'); }
+        if (!config) throw new ArbitrageError('GasEstimatorInit', 'Config object required.');
+        if (!provider) throw new ArbitrageError('GasEstimatorInit', 'Provider instance required.');
+        if (!config.GAS_COST_ESTIMATES || !config.GAS_COST_ESTIMATES.FLASH_SWAP_BASE) {
+            throw new ArbitrageError('GasEstimatorInit', 'Valid GAS_COST_ESTIMATES missing in config.');
+        }
 
         this.config = config;
         this.provider = provider;
+        this.gasEstimates = config.GAS_COST_ESTIMATES; // Store the estimates object
+        this.maxGasPriceGwei = ethers.parseUnits(String(config.MAX_GAS_GWEI || 10), 'gwei');
 
-        // Validate needed config values
-        this.fallbackGasLimit = BigInt(config.FALLBACK_GAS_LIMIT || 1500000); // Use config or default
-        this.maxGasPriceGwei = ethers.parseUnits(String(config.MAX_GAS_GWEI || 10), 'gwei'); // Use config or default
-
-        logger.info(`[GasEstimator] Initialized. Fallback Gas Limit: ${this.fallbackGasLimit}, Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`);
+        logger.info(`[GasEstimator] Initialized. Base Cost: ${this.gasEstimates.FLASH_SWAP_BASE}, Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`);
     }
 
-    /**
-     * Fetches current network fee data (EIP-1559 or legacy).
-     * @returns {Promise<ethers.FeeData | null>}
-     */
-    async getFeeData() {
+    async getFeeData() { /* ... unchanged ... */
         try {
             const feeData = await this.provider.getFeeData();
-            if (!feeData || (!feeData.gasPrice && (!feeData.maxFeePerGas || !feeData.maxPriorityFeePerGas))) {
-                logger.warn('[GasEstimator] Received incomplete fee data from provider.');
-                return null;
-            }
-            // Log fetched fees for debugging
-            // logger.debug(`[GasEstimator] Fetched Fee Data: GasPrice=${feeData.gasPrice ? ethers.formatUnits(feeData.gasPrice, 'gwei') : 'N/A'} Gwei, MaxFee=${feeData.maxFeePerGas ? ethers.formatUnits(feeData.maxFeePerGas, 'gwei') : 'N/A'} Gwei, MaxPriority=${feeData.maxPriorityFeePerGas ? ethers.formatUnits(feeData.maxPriorityFeePerGas, 'gwei') : 'N/A'} Gwei`);
+            if (!feeData || (!feeData.gasPrice && (!feeData.maxFeePerGas || !feeData.maxPriorityFeePerGas))) { logger.warn('[GasEstimator] Incomplete fee data.'); return null; }
             return feeData;
-        } catch (error) {
-            logger.error(`[GasEstimator] Error fetching fee data: ${error.message}`);
-            return null;
-        }
+        } catch (error) { logger.error(`[GasEstimator] Error fetching fee data: ${error.message}`); return null; }
     }
 
-     /**
-     * Determines the effective gas price to use based on fetched fee data and config limits.
-     * @param {ethers.FeeData} feeData The fetched fee data.
-     * @returns {bigint | null} The effective gas price in Wei, or null if unable to determine.
-     */
-    getEffectiveGasPrice(feeData) {
-        if (!feeData) return null;
-
-        let effectiveGasPrice = null;
-
-        // Prefer EIP-1559 fields if available
-        if (feeData.maxFeePerGas && feeData.maxPriorityFeePerGas) {
-             // Simple strategy: Use maxFeePerGas as the effective price cap for cost calculation
-             // More sophisticated strategies could use baseFee + maxPriorityFee etc.
-             effectiveGasPrice = feeData.maxFeePerGas;
-             logger.debug(`[GasEstimator] Using EIP-1559 maxFeePerGas: ${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei`);
-        }
-        // Fallback to legacy gasPrice
-        else if (feeData.gasPrice) {
-            effectiveGasPrice = feeData.gasPrice;
-            logger.debug(`[GasEstimator] Using legacy gasPrice: ${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei`);
-        } else {
-             logger.warn('[GasEstimator] Could not determine base gas price from fee data.');
-             return null;
-        }
-
-        // Apply Max Gas Price Cap from config
-        if (effectiveGasPrice > this.maxGasPriceGwei) {
-            logger.warn(`[GasEstimator] Current gas price (${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei) exceeds MAX_GAS_GWEI (${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei). Capping.`);
-            effectiveGasPrice = this.maxGasPriceGwei;
-        }
-
+    getEffectiveGasPrice(feeData) { /* ... unchanged ... */
+        if (!feeData) return null; let effectiveGasPrice = null;
+        if (feeData.maxFeePerGas && feeData.maxPriorityFeePerGas) { effectiveGasPrice = feeData.maxFeePerGas; logger.debug(`[GasEstimator] Using EIP-1559 maxFeePerGas: ${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei`); }
+        else if (feeData.gasPrice) { effectiveGasPrice = feeData.gasPrice; logger.debug(`[GasEstimator] Using legacy gasPrice: ${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei`); }
+        else { logger.warn('[GasEstimator] Cannot determine base gas price.'); return null; }
+        if (effectiveGasPrice > this.maxGasPriceGwei) { logger.warn(`[GasEstimator] Gas price capped to MAX_GAS_GWEI.`); effectiveGasPrice = this.maxGasPriceGwei; }
         return effectiveGasPrice;
     }
 
-
     /**
-     * Estimates the gas cost for a transaction (currently uses fallback limit).
-     * TODO: Implement actual estimation based on transaction details.
-     * @param {object} opportunityDetails (Optional) Details about the opportunity for future estimation logic.
+     * Estimates the gas cost for a transaction using per-hop estimates from config.
+     * @param {object} opportunity The opportunity object (needs path with dex types).
      * @returns {Promise<{ gasEstimate: bigint, effectiveGasPrice: bigint, totalCostWei: bigint } | null>} Gas cost details or null on failure.
      */
-    async estimateTxGasCost(opportunityDetails = {}) {
+    async estimateTxGasCost(opportunity) { // Renamed from estimateTxGasCost for clarity maybe? Let's keep estimateTxGasCost.
+        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey}]`;
         const feeData = await this.getFeeData();
-        if (!feeData) {
-            logger.error("[GasEstimator] Failed to get fee data, cannot estimate cost.");
-            return null;
-        }
+        if (!feeData) { logger.error(`${logPrefix} Failed to get fee data.`); return null; }
 
         const effectiveGasPrice = this.getEffectiveGasPrice(feeData);
-        if (!effectiveGasPrice || effectiveGasPrice <= 0n) {
-            logger.error("[GasEstimator] Failed to determine a valid effective gas price.");
-             return null;
+        if (!effectiveGasPrice || effectiveGasPrice <= 0n) { logger.error(`${logPrefix} Failed to get valid gas price.`); return null; }
+
+        // --- Calculate Gas Limit based on Path ---
+        let totalGasLimit = this.gasEstimates.FLASH_SWAP_BASE; // Start with base cost
+        if (!opportunity?.path || !Array.isArray(opportunity.path)) {
+             logger.warn(`${logPrefix} Opportunity path missing or invalid, using only base gas cost.`);
+        } else {
+             logger.debug(`${logPrefix} Calculating gas for path: ${opportunity.path.map(p=>p.dex).join('->')}`);
+             for (const step of opportunity.path) {
+                 let hopCost = 0n;
+                 switch (step.dex?.toLowerCase()) { // Use lowercase for safety
+                     case 'uniswapv3': hopCost = this.gasEstimates.UNISWAP_V3_SWAP; break;
+                     case 'sushiswap': hopCost = this.gasEstimates.SUSHISWAP_V2_SWAP; break;
+                     case 'dodo':      hopCost = this.gasEstimates.DODO_SWAP; break;
+                     // Add cases for other DEXs
+                     default: logger.warn(`${logPrefix} Unknown DEX type '${step.dex}' in path for gas estimation. Using 0.`);
+                 }
+                 if (!hopCost) { // Handle if estimate is missing in config
+                     logger.warn(`${logPrefix} Gas estimate missing for DEX type '${step.dex}'. Using 0.`);
+                     hopCost = 0n;
+                 }
+                 totalGasLimit += hopCost;
+             }
         }
+        // --- End Gas Limit Calculation ---
 
-        // --- Placeholder: Use Fallback Gas Limit ---
-        // TODO: Replace this with provider.estimateGas(tx) using encoded data
-        const gasLimitEstimate = this.fallbackGasLimit;
-        logger.debug(`[GasEstimator] Using fallback gas limit: ${gasLimitEstimate}`);
-        // --- End Placeholder ---
+        // Add buffer percentage from config
+         const bufferPercent = BigInt(this.config.GAS_ESTIMATE_BUFFER_PERCENT || 0); // Default 0 if missing
+         if (bufferPercent > 0n) {
+             const bufferAmount = (totalGasLimit * bufferPercent) / 100n;
+             totalGasLimit += bufferAmount;
+             logger.debug(`${logPrefix} Applied ${bufferPercent}% gas buffer. New Limit: ${totalGasLimit}`);
+         }
 
-        if (gasLimitEstimate <= 0n) {
-             logger.error("[GasEstimator] Invalid gas limit estimate.");
-             return null;
-        }
 
-        const totalCostWei = gasLimitEstimate * effectiveGasPrice;
-        logger.debug(`[GasEstimator] Estimated Cost: Limit=${gasLimitEstimate}, Price=${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei, Total=${ethers.formatEther(totalCostWei)} ETH`);
+        if (totalGasLimit <= 0n) { logger.error(`${logPrefix} Calculated gas limit is zero or negative.`); return null; }
+
+        const totalCostWei = totalGasLimit * effectiveGasPrice;
+        logger.debug(`${logPrefix} Estimated Gas: Limit=${totalGasLimit}, Price=${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei, Total Cost=${ethers.formatEther(totalCostWei)} ETH`);
 
         return {
-            gasEstimate: gasLimitEstimate,
-            effectiveGasPrice: effectiveGasPrice, // Price per gas unit in Wei
-            totalCostWei: totalCostWei // Total cost in Wei
+            gasEstimate: totalGasLimit,
+            effectiveGasPrice: effectiveGasPrice,
+            totalCostWei: totalCostWei
         };
     }
 }
