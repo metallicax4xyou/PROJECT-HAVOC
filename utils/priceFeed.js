@@ -4,11 +4,11 @@
 // Handles USDC.e aliasing.
 
 const { ethers } = require('ethers');
-const logger = require('./logger');
-const { ArbitrageError } = require('./errorHandler');
-const { TOKENS } = require('../constants/tokens');
+const logger = require('./logger'); // Adjust path if needed
+const { ArbitrageError } = require('./errorHandler'); // Adjust path if needed
+const { TOKENS } = require('../constants/tokens'); // Adjust path if needed
 
-// Chainlink ABI (minimal)
+// Chainlink Aggregator V3 Interface ABI (minimal)
 const CHAINLINK_ABI = [
     "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
     "function decimals() view returns (uint8)"
@@ -18,25 +18,27 @@ const CHAINLINK_ABI = [
 const feedContractCache = {};
 const feedDecimalsCache = {};
 
-// Precision constant for calculations
+// Precision constant for calculations using USD intermediate value
 const USD_PRICE_PRECISION = 10n**18n; // Use 18 decimals for intermediate USD value
 
 /**
  * Gets the Chainlink price feed address vs USD.
  * Handles aliases like USDC.e -> USDC.
+ * @param {object} chainlinkFeedsConfig The CHAINLINK_FEEDS object from config.
+ * @param {string} tokenSymbol The symbol of the token (e.g., 'USDC.e', 'ETH').
+ * @returns {string | null} The feed address string or null if not found.
  */
 function getFeedAddressVsUsd(chainlinkFeedsConfig, tokenSymbol) {
     let symbolForLookup = tokenSymbol;
 
     // --- ALIASING LOGIC ---
-    if (tokenSymbol === 'USDC.e' || tokenSymbol === 'USDC') symbolForLookup = 'USDC'; // Treat both as USDC
-    else if (tokenSymbol === 'WETH' || tokenSymbol === 'ETH') symbolForLookup = 'ETH'; // Treat WETH as ETH
-    else if (tokenSymbol === 'WBTC') symbolForLookup = 'WBTC'; // Keep WBTC as is
-    // Add other aliases if necessary (e.g., USDT.e -> USDT)
+    if (tokenSymbol === 'USDC.e') symbolForLookup = 'USDC'; // Treat USDC.e as USDC
+    else if (tokenSymbol === 'WETH') symbolForLookup = 'ETH'; // Treat WETH as ETH
+    // Add other aliases here if needed (e.g., USDT.e -> USDT)
 
-    const usdFeedKey = `${symbolForLookup}/USD`;
+    const usdFeedKey = `${symbolForLookup}/USD`; // Key format e.g., "ETH/USD", "USDC/USD"
 
-    if (chainlinkFeedsConfig[usdFeedKey]) {
+    if (chainlinkFeedsConfig && chainlinkFeedsConfig[usdFeedKey]) {
         logger.debug(`[PriceFeed] Found USD feed key: ${usdFeedKey} for original ${tokenSymbol}`);
         return chainlinkFeedsConfig[usdFeedKey];
     } else {
@@ -47,7 +49,10 @@ function getFeedAddressVsUsd(chainlinkFeedsConfig, tokenSymbol) {
 
 /**
  * Fetches the latest price from a Chainlink feed vs USD.
- * Returns price scaled to 18 decimals for consistency.
+ * Returns price scaled to 18 decimals (USD_PRICE_PRECISION) for consistent calculations.
+ * @param {ethers.Provider} provider Ethers provider instance.
+ * @param {string} feedAddress The address of the Chainlink feed contract.
+ * @returns {Promise<bigint | null>} Price scaled by 1e18, or null on error.
  */
 async function getUsdPriceDataScaled(provider, feedAddress) {
     const logPrefix = `[PriceFeed ${feedAddress.substring(0, 6)}]`;
@@ -57,31 +62,43 @@ async function getUsdPriceDataScaled(provider, feedAddress) {
     }
 
     try {
+        // Use cache or create new contract instance
         if (!feedContractCache[feedAddress]) {
             feedContractCache[feedAddress] = new ethers.Contract(feedAddress, CHAINLINK_ABI, provider);
         }
         const feedContract = feedContractCache[feedAddress];
 
+        // Use cache or fetch decimals
         let feedDecimals = feedDecimalsCache[feedAddress];
         if (feedDecimals === undefined) {
-            feedDecimals = Number(await feedContract.decimals());
+             // Use callStatic for safety on view functions if provider requires it, otherwise direct call is fine
+            feedDecimals = Number(await feedContract.decimals()); // Use Number() to convert uint8
             feedDecimalsCache[feedAddress] = feedDecimals;
-             logger.debug(`${logPrefix} Fetched feed decimals: ${feedDecimals}`);
+            logger.debug(`${logPrefix} Fetched feed decimals: ${feedDecimals}`);
         }
 
+        // Fetch latest price data
         const roundData = await feedContract.latestRoundData();
-        const price = BigInt(roundData.answer);
-        if (price <= 0n) { logger.warn(`${logPrefix} Non-positive price: ${price}`); return null; }
+        const price = BigInt(roundData.answer); // answer is int256, convert to BigInt
+
+        if (price <= 0n) {
+             logger.warn(`${logPrefix} Chainlink feed returned non-positive price: ${price}`);
+             return null; // Cannot use non-positive price
+        }
 
         // Scale the price to 18 decimals (USD_PRICE_PRECISION)
-        // priceScaled = price * (10^18 / 10^feedDecimals)
         const priceScaled = (price * USD_PRICE_PRECISION) / (10n ** BigInt(feedDecimals));
 
-        logger.debug(`${logPrefix} Fetched price: ${price} (Dec: ${feedDecimals}), Scaled Price (18 Dec): ${priceScaled}`);
-        return priceScaled; // Return price scaled to 18 decimals
+        logger.debug(`${logPrefix} Fetched raw price: ${price} (Dec: ${feedDecimals}), Scaled USD Price (18 Dec): ${priceScaled}`);
+        return priceScaled;
 
     } catch (error) {
-        logger.error(`${logPrefix} Error fetching Chainlink price: ${error.message}`);
+         // Log specific errors if possible (e.g., contract call reverted)
+         if (error.code === 'CALL_EXCEPTION') {
+             logger.error(`${logPrefix} Chainlink contract call failed: ${error.reason}`);
+         } else {
+             logger.error(`${logPrefix} Error fetching Chainlink price: ${error.message}`);
+         }
         return null;
     }
 }
@@ -93,52 +110,53 @@ async function getUsdPriceDataScaled(provider, feedAddress) {
 async function convertTokenAmountToNative(amountTokenWei, token, chainlinkFeedsConfig, nativeSymbol, nativeDecimals, provider) {
     const logPrefix = `[PriceFeedConvert ${token?.symbol}->${nativeSymbol}]`;
     if (!amountTokenWei || !token?.symbol || !token?.decimals || !chainlinkFeedsConfig || !nativeSymbol || !nativeDecimals || !provider) {
-        logger.error(`${logPrefix} Invalid arguments. Token: ${token?.symbol}, Amount: ${amountTokenWei}`);
-        return null;
+        logger.error(`${logPrefix} Invalid arguments.`); return null;
     }
 
     const amountToken = BigInt(amountTokenWei);
-    if (amountToken === 0n) return 0n; // No value if amount is zero
+    if (amountToken === 0n) return 0n;
 
-    // --- Handle Native Token ---
+    // Handle Native Token (no conversion needed)
     if (token.symbol === nativeSymbol || (token.symbol === 'WETH' && nativeSymbol === 'ETH')) {
         if (token.decimals !== nativeDecimals) logger.warn(`${logPrefix} Native token decimal mismatch.`);
-        return amountToken; // Amount is already in native wei
+        return amountToken;
     }
 
-    // --- Get Token/USD Price ---
+    // --- Get Token/USD Price (scaled to 1e18) ---
     const tokenUsdFeedAddress = getFeedAddressVsUsd(chainlinkFeedsConfig, token.symbol);
-    if (!tokenUsdFeedAddress) return null; // Error logged in getFeedAddressVsUsd
+    if (!tokenUsdFeedAddress) return null; // Error logged in helper
     const tokenUsdPriceScaled = await getUsdPriceDataScaled(provider, tokenUsdFeedAddress);
-    if (tokenUsdPriceScaled === null) return null; // Error logged in getUsdPriceDataScaled
+    if (tokenUsdPriceScaled === null) return null; // Error logged in helper
 
-    // --- Get Native/USD Price ---
+    // --- Get Native/USD Price (scaled to 1e18) ---
     const nativeUsdFeedAddress = getFeedAddressVsUsd(chainlinkFeedsConfig, nativeSymbol);
     if (!nativeUsdFeedAddress) return null;
     const nativeUsdPriceScaled = await getUsdPriceDataScaled(provider, nativeUsdFeedAddress);
-    if (nativeUsdPriceScaled === null || nativeUsdPriceScaled === 0n) { // Cannot divide by zero
-        logger.error(`${logPrefix} Failed to get valid ${nativeSymbol}/USD price.`);
+    if (nativeUsdPriceScaled === null || nativeUsdPriceScaled <= 0n) { // Cannot divide by zero or invalid price
+        logger.error(`${logPrefix} Failed to get valid ${nativeSymbol}/USD price (${nativeUsdPriceScaled}).`);
         return null;
     }
 
-    // --- Calculate Native Value ---
-    // ValueUSD = AmountToken * Price (USD per Token)
-    // ValueUSD_Scaled = (AmountTokenWei / 10^tokenDec) * (tokenUsdPriceScaled / 10^18) * 10^18 (intermediate USD precision)
-    // ValueUSD_Scaled = (AmountTokenWei * tokenUsdPriceScaled) / 10^tokenDec
-    const valueUsdScaled = (amountToken * tokenUsdPriceScaled) / (10n ** BigInt(token.decimals));
+    // --- Calculate Native Value using USD intermediate ---
+    try {
+        // ValueUSD_Scaled = (AmountTokenWei * tokenUsdPriceScaled) / 10^tokenDec
+        const valueUsdScaled = (amountToken * tokenUsdPriceScaled) / (10n ** BigInt(token.decimals));
 
-    // ValueNative = ValueUSD / Price (USD per Native)
-    // ValueNativeWei = (ValueUSD_Scaled / 10^18) / (nativeUsdPriceScaled / 10^18) * 10^nativeDec
-    // ValueNativeWei = (ValueUSD_Scaled * 10^nativeDec) / nativeUsdPriceScaled
-    const nativeValueWei = (valueUsdScaled * (10n ** BigInt(nativeDecimals))) / nativeUsdPriceScaled;
+        // ValueNativeWei = (ValueUSD_Scaled * 10^nativeDec) / nativeUsdPriceScaled
+        const nativeValueWei = (valueUsdScaled * (10n ** BigInt(nativeDecimals))) / nativeUsdPriceScaled;
 
-    logger.debug(`${logPrefix} Converted ${ethers.formatUnits(amountToken, token.decimals)} ${token.symbol} -> ${ethers.formatUnits(nativeValueWei, nativeDecimals)} ${nativeSymbol}`);
-    return nativeValueWei;
+        logger.debug(`${logPrefix} Converted ${ethers.formatUnits(amountToken, token.decimals)} ${token.symbol} -> ${ethers.formatUnits(nativeValueWei, nativeDecimals)} ${nativeSymbol} (via USD feeds)`);
+        return nativeValueWei;
+
+    } catch (error) {
+        logger.error(`${logPrefix} Error during conversion calculation via USD: ${error.message}`);
+        return null;
+    }
 }
 
 module.exports = {
     convertTokenAmountToNative,
-    // Export helpers if needed elsewhere, otherwise keep private
+    // Expose helpers only if needed externally
     // getFeedAddressVsUsd,
     // getUsdPriceDataScaled
 };
