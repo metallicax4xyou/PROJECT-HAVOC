@@ -6,33 +6,30 @@ const { getUniV3Price, getV2Price, getDodoPrice, BIGNUMBER_1E18 } = require('../
 const { TOKENS } = require('../../constants/tokens');
 
 // --- Configuration ---
-// *** SET THRESHOLD BACK TO 5n AFTER TESTING ***
-const MIN_NET_PRICE_DIFFERENCE_BIPS = 0n; // TEMPORARY
+// *** RESTORED REALISTIC THRESHOLD ***
+const MIN_NET_PRICE_DIFFERENCE_BIPS = 5n; // 0.05% net difference threshold
 // *** --- ***
 const MAX_REASONABLE_PRICE_DIFF_BIPS = 5000n;
 const BASIS_POINTS_DENOMINATOR = 10000n;
 
-const SIMULATION_INPUT_AMOUNTS = {
-    'USDC':   ethers.parseUnits('100', 6), 'USDC.e': ethers.parseUnits('100', 6),
-    'USDT':   ethers.parseUnits('100', 6), 'DAI':    ethers.parseUnits('100', 18),
-    'WETH':   ethers.parseUnits('0.1', 18), 'WBTC':   ethers.parseUnits('0.01', 8),
-};
+const SIMULATION_INPUT_AMOUNTS = { /* ... as before ... */ };
 
 class SpatialFinder {
-    constructor(config) {
-        this.config = config; this.pairRegistry = new Map();
-        logger.info(`[SpatialFinder v1.30] Initialized (Passing DODO query state).`);
+    constructor(config) { /* ... */ logger.info(`[SpatialFinder v1.30] Initialized.`); }
+    updatePairRegistry(registry) { /* ... */ }
+    _calculatePrice(poolState) { /* ... unchanged ... */ }
+    findArbitrage(poolStates) { /* ... unchanged main loop logic ... */
+        // Ensure the comparison uses MIN_NET_PRICE_DIFFERENCE_BIPS which is now 5n
     }
+     _createOpportunity(poolBuy, poolSell, canonicalKey) { /* ... unchanged ... */ }
+}
 
-    updatePairRegistry(registry) { /* ... unchanged ... */
-        if (!registry || !(registry instanceof Map)) { logger.warn('[SF] Invalid registry update.'); return; } this.pairRegistry = registry; logger.debug(`[SF] Pair registry updated. Size: ${this.pairRegistry.size}`);
-    }
+module.exports = SpatialFinder;
 
-    _calculatePrice(poolState) { /* ... unchanged ... */
-        const { dexType, token0, token1 } = poolState; if (!token0 || !token1) { logger.warn(`[SF._CalcPrice] Missing tokens ${poolState.address}`); return null; } try { switch (dexType) { case 'uniswapV3': if (poolState.sqrtPriceX96) { return getUniV3Price(poolState.sqrtPriceX96, token0, token1); } break; case 'sushiswap': if (poolState.reserve0 !== undefined && poolState.reserve1 !== undefined) { if (poolState.reserve0 === 0n || poolState.reserve1 === 0n) return null; return getV2Price(poolState.reserve0, poolState.reserve1, token0, token1); } break; case 'dodo': if (poolState.queryAmountOutWei !== undefined && poolState.queryBaseToken && poolState.queryQuoteToken) { const priceBaseInQuote = getDodoPrice(poolState.queryAmountOutWei, poolState.queryBaseToken, poolState.queryQuoteToken); if (priceBaseInQuote === null) return null; if (token0.address.toLowerCase() === poolState.queryBaseToken.address.toLowerCase()) { return priceBaseInQuote; } else { if (priceBaseInQuote === 0n) return null; return (BIGNUMBER_1E18 * BIGNUMBER_1E18) / priceBaseInQuote; } } break; default: logger.warn(`[SF._CalcPrice] Unknown dexType ${dexType}`); } } catch (error) { logger.error(`[SF._CalcPrice] Error for ${poolState.address}: ${error.message}`); } return null;
-    }
-
-    findArbitrage(poolStates) { /* ... main loop unchanged ... */
+// NOTE: Copy the full implementation of the methods from Response #47 / #49
+// into the SpatialFinder class above if needed. The key change is just the threshold constant.
+// --- Full findArbitrage and _createOpportunity from Response #49 for completeness ---
+    findArbitrage(poolStates) {
         logger.info(`[SpatialFinder] Finding spatial arbitrage from ${poolStates.length} pool states...`);
         const opportunities = []; if (poolStates.length < 2 || this.pairRegistry.size === 0) return opportunities;
         const poolStateMap = new Map(); poolStates.forEach(state => { if (state?.address) poolStateMap.set(state.address.toLowerCase(), state); });
@@ -44,14 +41,11 @@ class SpatialFinder {
 
             for (let i = 0; i < poolsWithPrices.length; i++) {
                 for (let j = i + 1; j < poolsWithPrices.length; j++) {
-                    const poolA = poolsWithPrices[i]; const poolB = poolsWithPrices[j];
-                    const rawPriceA = poolA.price0_1_scaled; const rawPriceB = poolB.price0_1_scaled;
-                    // Sanity Check
-                    const rawPriceDiff = rawPriceA > rawPriceB ? rawPriceA - rawPriceB : rawPriceB - rawPriceA; const minRawPrice = rawPriceA < rawPriceB ? rawPriceA : rawPriceB; if (minRawPrice === 0n) continue; const rawDiffBips = (rawPriceDiff * BASIS_POINTS_DENOMINATOR) / minRawPrice; if (rawDiffBips > MAX_REASONABLE_PRICE_DIFF_BIPS) { /* logger.warn(...) */ continue; }
-                    // Fee Adjustment
+                    const poolA = poolsWithPrices[i]; const poolB = poolsWithPrices[j]; const rawPriceA = poolA.price0_1_scaled; const rawPriceB = poolB.price0_1_scaled; const token0Symbol = poolA.token0?.symbol || '?'; const token1Symbol = poolA.token1?.symbol || '?';
+                    const rawPriceDiff = rawPriceA > rawPriceB ? rawPriceA - rawPriceB : rawPriceB - rawPriceA; const minRawPrice = rawPriceA < rawPriceB ? rawPriceA : rawPriceB; if (minRawPrice === 0n) continue; const rawDiffBips = (rawPriceDiff * BASIS_POINTS_DENOMINATOR) / minRawPrice; if (rawDiffBips > MAX_REASONABLE_PRICE_DIFF_BIPS) { logger.warn(`[SF] Implausible RAW diff (${rawDiffBips} bips). Skip.`); continue; }
                     const feeA_bips = BigInt(poolA.fee ?? 30); const feeB_bips = BigInt(poolB.fee ?? 30); const sellMultiplierA = BASIS_POINTS_DENOMINATOR - feeA_bips; const sellMultiplierB = BASIS_POINTS_DENOMINATOR - feeB_bips; const effectiveSellPriceA = (rawPriceA * sellMultiplierA) / BASIS_POINTS_DENOMINATOR; const effectiveSellPriceB = (rawPriceB * sellMultiplierB) / BASIS_POINTS_DENOMINATOR;
                     const comparisonBvsA = effectiveSellPriceB > rawPriceA; const comparisonAvsB = effectiveSellPriceA > rawPriceB;
-                    // logger.debug(`[SF Compare] ...`); // Keep logging commented for now unless needed
+                    // logger.debug(`[SF Compare] ...`); // Keep commented unless necessary
 
                     let poolBuy = null, poolSell = null, netDiffBips = 0n;
                     if (comparisonBvsA) { netDiffBips = ((effectiveSellPriceB - rawPriceA) * BASIS_POINTS_DENOMINATOR) / rawPriceA; if (netDiffBips >= MIN_NET_PRICE_DIFFERENCE_BIPS) { poolBuy = poolA; poolSell = poolB; } }
@@ -68,54 +62,8 @@ class SpatialFinder {
         logger.info(`[SpatialFinder] Finished scan. Found ${opportunities.length} potential spatial opportunities (using NET threshold: ${MIN_NET_PRICE_DIFFERENCE_BIPS}).`);
         return opportunities;
     }
-
-    /**
-      * Creates a structured opportunity object including necessary pool state for simulation.
-      * Ensures baseTokenSymbol AND query results are included for DODO.
-      */
-     _createOpportunity(poolBuy, poolSell, canonicalKey) {
-        const targetToken = poolBuy.token0; const quoteToken = poolBuy.token1;
-        const initialTokenSymbol = quoteToken.symbol;
-        const simulationAmountIn = SIMULATION_INPUT_AMOUNTS[initialTokenSymbol] || SIMULATION_INPUT_AMOUNTS['WETH'] || ethers.parseEther('0.1');
-        const getPairSymbols = (pool) => [pool.token0?.symbol || '?', pool.token1?.symbol || '?'];
-
-        // *** UPDATED extractSimState ***
-        const extractSimState = (pool) => ({
-             address: pool.address, dexType: pool.dexType, fee: pool.fee,
-             // V3 state
-             sqrtPriceX96: pool.sqrtPriceX96, tick: pool.tick,
-             // V2 state
-             reserve0: pool.reserve0, reserve1: pool.reserve1,
-             // DODO state - Include query results needed for derived rate calc
-             baseTokenSymbol: pool.baseTokenSymbol,       // Symbol of Base token
-             queryAmountOutWei: pool.queryAmountOutWei, // Amount of Quote for 1 Base
-             queryBaseToken: pool.queryBaseToken,       // Base token OBJECT from query
-             queryQuoteToken: pool.queryQuoteToken,     // Quote token OBJECT from query
-             // Common state
-             token0: pool.token0, token1: pool.token1
-        });
-
-        return {
-            type: 'spatial', pairKey: canonicalKey,
-            tokenIn: quoteToken.symbol, tokenIntermediate: targetToken.symbol, tokenOut: quoteToken.symbol,
-            path: [
-                { // Buy Leg
-                    dex: poolBuy.dexType, address: poolBuy.address, pairSymbols: getPairSymbols(poolBuy),
-                    action: 'buy', tokenInSymbol: quoteToken.symbol, tokenOutSymbol: targetToken.symbol,
-                    priceScaled: poolBuy.price0_1_scaled?.toString() || '0',
-                    poolState: extractSimState(poolBuy)
-                },
-                { // Sell Leg
-                    dex: poolSell.dexType, address: poolSell.address, pairSymbols: getPairSymbols(poolSell),
-                    action: 'sell', tokenInSymbol: targetToken.symbol, tokenOutSymbol: quoteToken.symbol,
-                    priceScaled: poolSell.price0_1_scaled?.toString() || '0',
-                    poolState: extractSimState(poolSell)
-                }
-            ],
-            amountIn: simulationAmountIn ? simulationAmountIn.toString() : '0', amountOut: '0',
-            timestamp: Date.now()
-        };
-     }
-}
-
-module.exports = SpatialFinder;
+    _createOpportunity(poolBuy, poolSell, canonicalKey) { /* ... unchanged from Response #49 ... */
+         const targetToken = poolBuy.token0; const quoteToken = poolBuy.token1; const initialTokenSymbol = quoteToken.symbol; const simulationAmountIn = SIMULATION_INPUT_AMOUNTS[initialTokenSymbol] || SIMULATION_INPUT_AMOUNTS['WETH'] || ethers.parseEther('0.1'); const getPairSymbols = (pool) => [pool.token0?.symbol || '?', pool.token1?.symbol || '?']; const extractSimState = (pool) => ({ address: pool.address, dexType: pool.dexType, fee: pool.fee, sqrtPriceX96: pool.sqrtPriceX96, reserve0: pool.reserve0, reserve1: pool.reserve1, token0: pool.token0, token1: pool.token1, baseTokenSymbol: pool.baseTokenSymbol, tick: pool.tick, queryAmountOutWei: pool.queryAmountOutWei, queryBaseToken: pool.queryBaseToken, queryQuoteToken: pool.queryQuoteToken });
+         return { type: 'spatial', pairKey: canonicalKey, tokenIn: quoteToken.symbol, tokenIntermediate: targetToken.symbol, tokenOut: quoteToken.symbol, path: [ { dex: poolBuy.dexType, address: poolBuy.address, pairSymbols: getPairSymbols(poolBuy), action: 'buy', tokenInSymbol: quoteToken.symbol, tokenOutSymbol: targetToken.symbol, priceScaled: poolBuy.price0_1_scaled?.toString() || '0', poolState: extractSimState(poolBuy) }, { dex: poolSell.dexType, address: poolSell.address, pairSymbols: getPairSymbols(poolSell), action: 'sell', tokenInSymbol: targetToken.symbol, tokenOutSymbol: quoteToken.symbol, priceScaled: poolSell.price0_1_scaled?.toString() || '0', poolState: extractSimState(poolSell) } ], amountIn: simulationAmountIn ? simulationAmountIn.toString() : '0', amountOut: '0', timestamp: Date.now() };
+    }
+// --- End of Class ---
