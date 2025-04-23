@@ -1,23 +1,26 @@
 // config/arbitrum.js
-// --- VERSION WITH CORRECTED SUSHI/DODO FEES ---
+// --- VERSION WITH CORRECTED CHAINLINK FEED STRATEGY (USD-based) ---
 
-// --- Chainlink Feed Addresses ---
-// Keys should be BASE/QUOTE (e.g., USDC/ETH means price is ETH per 1 USDC)
-// Need feeds vs Native Currency (ETH for Arbitrum) for ProfitCalculator conversion
-const CHAINLINK_FEEDS = {
-    'USDC/ETH': '0x50834F3163758fcC1Df9973b6e91f0F0F0434AD3', // Verify vs ETH or USD
-    'USDT/ETH': '0x0A599A8555303467150f2aA046764Fa435551F76', // Verify vs ETH or USD
-    'ARB/ETH': '0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6',
-    'DAI/ETH': '0xcAE0036F347a9459510A411DA0937A21f5571D35',  // Verify vs ETH or USD
-    'WBTC/ETH': '0x11A839134e1A4039F852F63D46475F1D5c049394',
-    'LINK/ETH': '0xb5e424679B669A4B547291B079A3541783C57b86',
-    'GMX/ETH': '0x0fB2C88fAcC5F30508E8F7506033654FdB4468aF',
-    // Add FRAX/ETH, MAGIC/ETH if needed
+// --- Chainlink Feed Addresses (Arbitrum Mainnet - USD BASED) ---
+// We will derive Token/ETH prices from Token/USD and ETH/USD feeds.
+const CHAINLINK_FEEDS_USD = {
+    // Native Token vs USD
+    'ETH/USD': '0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612',
+    // Stablecoins vs USD (Note: USDC feed address IS the USDC/USD feed)
+    'USDC/USD': '0x50834F3163758fcC1Df9973b6e91f0F0F0434AD3',
+    'USDT/USD': '0x3f3f5dF88dC9F13eac63DF89EC16ef6e7E25DdE7', // Needed if USDT is profit token
+    'DAI/USD': '0xc5C8E77B397E531B8EC06BFb0048328B30E9eCfB',   // Needed if DAI is profit token
+    // Other Major Tokens vs USD (Add if needed for profit conversion)
+    'WBTC/USD': '0x6ce185860a4963106506C203335A2910413708e9',
+    'LINK/USD': '0x86E53CF1B870786351Da77A57575e79CB55812CB',
+    'ARB/USD': '0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6',
+    // Add GMX/USD, MAGIC/USD, FRAX/USD if directly available and needed
 };
+// We will pass this object to the priceFeed utility.
+// The utility will handle looking up TOKEN/USD and ETH/USD to calculate TOKEN/ETH.
 
-// --- Define Uniswap V3 Pool Groups to monitor ---
-// Fees are defined by the feeTier (e.g., 500 = 0.05%), used by UniswapV3Fetcher
-const UNISWAP_V3_POOLS = [
+// --- Define Uniswap V3 Pool Groups ---
+const UNISWAP_V3_POOLS = [ /* ... unchanged V3 pool definitions ... */
     { name: 'WETH_USDC_V3', token0Symbol: 'WETH', token1Symbol: 'USDC', feeTierToEnvMap: { '100': 'ARBITRUM_WETH_USDC_100_ADDRESS', '500': 'ARBITRUM_WETH_USDC_500_ADDRESS', '3000': 'ARBITRUM_WETH_USDC_3000_ADDRESS' } },
     { name: 'WBTC_WETH_V3', token0Symbol: 'WBTC', token1Symbol: 'WETH', feeTierToEnvMap: { '500': 'ARBITRUM_WBTC_WETH_500_ADDRESS' } },
     { name: 'WETH_USDT_V3', token0Symbol: 'WETH', token1Symbol: 'USDT', feeTierToEnvMap: { '500': 'ARBITRUM_WETH_USDT_500_ADDRESS' } },
@@ -29,9 +32,8 @@ const UNISWAP_V3_POOLS = [
     { name: 'MAGIC_WETH_V3', token0Symbol: 'MAGIC', token1Symbol: 'WETH', feeTierToEnvMap: { '3000': 'ARBITRUM_MAGIC_WETH_3000_ADDRESS' } },
 ];
 
-// --- Define SushiSwap (V2 Style) Pools ---
-// *** CORRECTED FEES TO BASIS POINTS (e.g., 0.3% = 30 bps) ***
-const SUSHISWAP_POOLS = [
+// --- Define SushiSwap Pools (Corrected Fees) ---
+const SUSHISWAP_POOLS = [ /* ... unchanged V2 pool definitions with fee: 30 ... */
     { name: 'WETH_USDCe_SUSHI', token0Symbol: 'WETH', token1Symbol: 'USDC.e', fee: 30, poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDC_E_ADDRESS' },
     { name: 'WBTC_WETH_SUSHI', token0Symbol: 'WBTC', token1Symbol: 'WETH', fee: 30, poolAddressEnv: 'ARBITRUM_SUSHI_WBTC_WETH_ADDRESS' },
     { name: 'ARB_WETH_SUSHI', token0Symbol: 'ARB', token1Symbol: 'WETH', fee: 30, poolAddressEnv: 'ARBITRUM_SUSHI_ARB_WETH_ADDRESS' },
@@ -41,40 +43,28 @@ const SUSHISWAP_POOLS = [
     { name: 'MAGIC_WETH_SUSHI', token0Symbol: 'MAGIC', token1Symbol: 'WETH', fee: 30, poolAddressEnv: 'ARBITRUM_SUSHI_MAGIC_WETH_ADDRESS' },
 ];
 
-// --- Define Camelot Pools (Currently Empty) ---
-const CAMELOT_POOLS = [];
-
-// --- Define DODO Pools ---
-// *** CORRECTED FEES TO BASIS POINTS (Verify exact DODO pool fees) ***
-const DODO_POOLS = [
-    { name: 'WETH_USDCE_DODO', token0Symbol: 'WETH', token1Symbol: 'USDC.e', baseTokenSymbol: 'WETH', poolAddressEnv: 'ARBITRUM_DODO_WETH_USDCE_ADDRESS', fee: 10 }, // Assuming 0.1% = 100 bps -> Changed to 10 (0.1%) Needs verification
-    { name: 'USDT_USDCE_DODO', token0Symbol: 'USDT', token1Symbol: 'USDC.e', baseTokenSymbol: 'USDT', poolAddressEnv: 'ARBITRUM_DODO_USDT_USDCE_ADDRESS', fee: 10 }, // Assuming 0.01% = 10 bps -> Changed to 10. Needs verification
+// --- Define DODO Pools (Corrected Fees) ---
+const DODO_POOLS = [ /* ... unchanged DODO pool definitions with fee: 100 / 10 ... */
+    { name: 'WETH_USDCE_DODO', token0Symbol: 'WETH', token1Symbol: 'USDC.e', baseTokenSymbol: 'WETH', poolAddressEnv: 'ARBITRUM_DODO_WETH_USDCE_ADDRESS', fee: 100 }, // 0.1%? Verify
+    { name: 'USDT_USDCE_DODO', token0Symbol: 'USDT', token1Symbol: 'USDC.e', baseTokenSymbol: 'USDT', poolAddressEnv: 'ARBITRUM_DODO_USDT_USDCE_ADDRESS', fee: 10 }, // 0.01%? Verify
 ];
 
 // --- Gas Cost Estimates ---
-const GAS_COST_ESTIMATES = {
-    FLASH_SWAP_BASE: 350000n,
-    UNISWAP_V3_SWAP: 180000n,
-    SUSHISWAP_V2_SWAP: 120000n,
-    DODO_SWAP: 200000n,
+const GAS_COST_ESTIMATES = { /* ... unchanged ... */
+    FLASH_SWAP_BASE: 350000n, UNISWAP_V3_SWAP: 180000n, SUSHISWAP_V2_SWAP: 120000n, DODO_SWAP: 200000n,
 };
 
 // --- Combine and Export ---
 const ARBITRUM_CONFIG = {
-    CHAINLINK_FEEDS: CHAINLINK_FEEDS,
+    // *** Use the USD feed config ***
+    CHAINLINK_FEEDS: CHAINLINK_FEEDS_USD,
     UNISWAP_V3_POOLS: UNISWAP_V3_POOLS,
-    SUSHISWAP_POOLS: SUSHISWAP_POOLS, // Uses updated fees
-    CAMELOT_POOLS: CAMELOT_POOLS,
-    DODO_POOLS: DODO_POOLS,           // Uses updated fees
+    SUSHISWAP_POOLS: SUSHISWAP_POOLS,
+    DODO_POOLS: DODO_POOLS,
     GAS_COST_ESTIMATES: GAS_COST_ESTIMATES,
 
-    // --- Global Settings (Defaults if not set in .env) ---
-    MIN_PROFIT_THRESHOLDS: {
-        NATIVE: '0.001', // ETH
-        USDC: '5.0', USDT: '5.0', DAI: '5.0', // Stables
-        WBTC: '0.0001', ARB: '5.0', LINK: '0.5', GMX: '0.2', MAGIC: '10.0', // Others
-        DEFAULT: '0.0005' // Default in ETH
-    },
+    // Global Settings Defaults
+    MIN_PROFIT_THRESHOLDS: { NATIVE: '0.001', DEFAULT: '0.0005', /* Add other tokens if profit measured in them */ },
     MAX_GAS_GWEI: 1,
     GAS_ESTIMATE_BUFFER_PERCENT: 25,
     FALLBACK_GAS_LIMIT: 3000000,
