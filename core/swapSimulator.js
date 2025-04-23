@@ -1,216 +1,108 @@
 // core/swapSimulator.js
 const { ethers } = require('ethers');
-const logger = require('../utils/logger'); // Adjust path if needed
-const { ABIS } = require('../constants/abis'); // Adjust path if needed
-const { ArbitrageError } = require('../utils/errorHandler'); // Adjust path if needed
-
-// Uniswap V3 Quoter V2 address (Arbitrum) - Make sure this is in your config or constants
-// const QUOTER_V2_ADDRESS = '0x61fFE014bA17989E743c5F6cB21bF9697530B21e'; // Example, verify correct address
+const logger = require('../utils/logger');
+const { ABIS } = require('../constants/abis');
+const { ArbitrageError } = require('../utils/errorHandler');
 
 class SwapSimulator {
-    /**
-     * @param {object} config The main configuration object (needs QUOTER_ADDRESS)
-     * @param {ethers.Provider} provider Ethers provider instance
-     */
     constructor(config, provider) {
         logger.debug('[SwapSimulator] Initializing...');
-        if (!config || !config.QUOTER_ADDRESS || !ethers.isAddress(config.QUOTER_ADDRESS)) {
-            throw new ArbitrageError('SwapSimulatorInit', 'Valid QUOTER_ADDRESS missing in config.');
-        }
-        if (!provider) {
-            throw new ArbitrageError('SwapSimulatorInit', 'Provider instance required.');
-        }
-        if (!ABIS || !ABIS.IQuoterV2) {
-             throw new ArbitrageError('SwapSimulatorInit', "IQuoterV2 ABI not found in constants/abis.js.");
-        }
+        if (!config?.QUOTER_ADDRESS || !ethers.isAddress(config.QUOTER_ADDRESS)) throw new ArbitrageError('SwapSimulatorInit', 'Valid QUOTER_ADDRESS missing.');
+        if (!provider) throw new ArbitrageError('SwapSimulatorInit', 'Provider instance required.');
+        if (!ABIS?.IQuoterV2) throw new ArbitrageError('SwapSimulatorInit', "IQuoterV2 ABI missing.");
+        // Add check for DODO ABI needed by simulateDodoSwap
+        if (!ABIS?.DODOV1V2Pool) logger.warn("[SwapSimulatorInit] DODOV1V2Pool ABI missing. DODO simulations might fail.");
+
 
         this.config = config;
         this.provider = provider;
-        this.quoterContract = new ethers.Contract(
-            config.QUOTER_ADDRESS,
-            ABIS.IQuoterV2, // Use the IQuoterV2 ABI
-            this.provider
-        );
+        this.quoterContract = new ethers.Contract(config.QUOTER_ADDRESS, ABIS.IQuoterV2, this.provider);
+        // Cache for DODO contracts
+        this.dodoPoolContractCache = {};
         logger.info(`[SwapSimulator] Initialized with Quoter V2 at ${config.QUOTER_ADDRESS}`);
     }
 
-    /**
-     * Simulates a swap for a given pool state and input amount.
-     * @param {object} poolState The fetched state of the pool (needs dexType, tokens, fee, etc.)
-     * @param {object} tokenIn The token object (from constants/tokens) for the input token.
-     * @param {bigint} amountIn The amount of tokenIn to swap (in wei).
-     * @returns {Promise<{ success: boolean, amountOut: bigint | null, error: string | null }>} Simulation result.
-     */
+    _getDodoPoolContract(poolAddress) {
+        const lowerCaseAddress = poolAddress.toLowerCase();
+        if (!this.dodoPoolContractCache[lowerCaseAddress]) {
+            try {
+                 if (!ABIS?.DODOV1V2Pool) throw new Error("DODOV1V2Pool ABI not found.");
+                this.dodoPoolContractCache[lowerCaseAddress] = new ethers.Contract(
+                    poolAddress, ABIS.DODOV1V2Pool, this.provider
+                );
+                 logger.debug(`[SwapSimulator] Created DODO contract instance for ${poolAddress}`);
+            } catch (error) {
+                 logger.error(`[SwapSimulator] Error creating DODO contract instance ${poolAddress}: ${error.message}`);
+                 throw error;
+            }
+        }
+        return this.dodoPoolContractCache[lowerCaseAddress];
+    }
+
+
     async simulateSwap(poolState, tokenIn, amountIn) {
         const { dexType, address } = poolState;
-        const logPrefix = `[SwapSimulator ${dexType} Pool ${address?.substring(0,6) || 'N/A'}]`;
-
-        if (!poolState || !tokenIn || amountIn === undefined || amountIn === null || amountIn <= 0n) {
-             logger.warn(`${logPrefix} Invalid arguments for simulateSwap.`);
+        const logPrefix = `[SwapSim ${dexType} ${address?.substring(0,6) || 'N/A'}]`;
+        if (!poolState || !tokenIn || !amountIn || amountIn <= 0n) {
+             logger.warn(`${logPrefix} Invalid args: ${!!poolState}, ${!!tokenIn}, ${amountIn}`);
              return { success: false, amountOut: null, error: 'Invalid arguments' };
         }
-
-        logger.debug(`${logPrefix} Simulating swap: ${ethers.formatUnits(amountIn, tokenIn.decimals)} ${tokenIn.symbol}`);
-
+        logger.debug(`${logPrefix} Sim Swap: ${ethers.formatUnits(amountIn, tokenIn.decimals)} ${tokenIn.symbol}`);
         try {
             switch (dexType) {
-                case 'uniswapV3':
-                    return await this.simulateV3Swap(poolState, tokenIn, amountIn);
-                case 'sushiswap':
-                    return await this.simulateV2Swap(poolState, tokenIn, amountIn);
-                case 'dodo':
-                    return await this.simulateDodoSwap(poolState, tokenIn, amountIn);
-                // Add cases for other DEXs
-                default:
-                    logger.warn(`${logPrefix} Unsupported dexType for simulation: ${dexType}`);
-                    return { success: false, amountOut: null, error: `Unsupported dexType: ${dexType}` };
+                case 'uniswapV3': return await this.simulateV3Swap(poolState, tokenIn, amountIn);
+                case 'sushiswap': return await this.simulateV2Swap(poolState, tokenIn, amountIn);
+                case 'dodo':      return await this.simulateDodoSwap(poolState, tokenIn, amountIn);
+                default:          return { success: false, amountOut: null, error: `Unsupported dexType: ${dexType}` };
             }
-        } catch (error) {
-             logger.error(`${logPrefix} Error during simulation: ${error.message}`, error);
-             return { success: false, amountOut: null, error: error.message };
-        }
+        } catch (error) { return { success: false, amountOut: null, error: error.message }; }
     }
 
-    /**
-     * Simulates a Uniswap V3 swap using the Quoter V2 contract.
-     * @param {object} poolState V3 pool state (needs fee, token0, token1).
-     * @param {object} tokenIn Input token object.
-     * @param {bigint} amountIn Input amount (wei).
-     * @returns {Promise<{ success: boolean, amountOut: bigint | null, error: string | null }>}
-     */
-    async simulateV3Swap(poolState, tokenIn, amountIn) {
-        const { fee, token0, token1, address } = poolState;
-        const logPrefix = `[SwapSimulator V3 Pool ${address?.substring(0,6)}]`;
-
-        // Determine tokenOut
-        const tokenOut = tokenIn.address.toLowerCase() === token0.address.toLowerCase() ? token1 : token0;
-        if (!tokenOut) { return { success: false, amountOut: null, error: 'Could not determine tokenOut' }; }
-
-        // V3 Quoter requires sqrtPriceLimitX96 = 0 for exact input swaps across ticks
-        const sqrtPriceLimitX96 = 0n;
-
-        try {
-            logger.debug(`${logPrefix} Calling quoterV2.quoteExactInputSingle: ${tokenIn.symbol} -> ${tokenOut.symbol}, Fee: ${fee}, AmountIn: ${amountIn}`);
-
-            // Use callStatic for simulation without sending a transaction
-            // Params: tokenIn, tokenOut, fee, amountIn, sqrtPriceLimitX96
-            const quoteResult = await this.quoterContract.quoteExactInputSingle.staticCall(
-                tokenIn.address,
-                tokenOut.address,
-                fee,
-                amountIn,
-                sqrtPriceLimitX96
-            );
-
-            // Quoter V2 returns multiple values, we typically want amountOut (index 0)
-            const amountOut = BigInt(quoteResult[0]); // amountOut is the first element
-            logger.debug(`${logPrefix} Quoter Result amountOut: ${amountOut}`);
-
-            if (amountOut <= 0n) {
-                logger.warn(`${logPrefix} Quoter returned 0 or negative amountOut. Likely insufficient liquidity or other issue.`);
-                // Treat as simulation failure or just zero output? Let's say zero output is valid.
-                 return { success: true, amountOut: 0n, error: null };
-            }
-
-            return { success: true, amountOut: amountOut, error: null };
-
-        } catch (error) {
-             // Handle specific Quoter reverts if possible
-             let reason = error.reason || error.message;
-             if (error.data && error.data !== '0x') { // Try decoding error data
-                 try { reason = ethers.utils.toUtf8String(error.data); } catch { /* ignore decoding error */ }
-             }
-             logger.warn(`${logPrefix} Quoter V2 simulation failed: ${reason}`);
-             // Common reasons: "Too little received" (if sqrtPriceLimit hit), "Address is not initialized" (bad pool/tokens)
-             return { success: false, amountOut: null, error: `QuoterV2 simulation failed: ${reason}` };
-        }
+    async simulateV3Swap(poolState, tokenIn, amountIn) { /* ... unchanged from Response #39 ... */
+        const { fee, token0, token1, address } = poolState; const logPrefix = `[SwapSim V3 ${address?.substring(0,6)}]`; const tokenOut = tokenIn.address.toLowerCase() === token0.address.toLowerCase() ? token1 : token0; if (!tokenOut) { return { success: false, amountOut: null, error: 'Cannot determine tokenOut' }; } const sqrtPriceLimitX96 = 0n; try { logger.debug(`${logPrefix} Quoting ${tokenIn.symbol}->${tokenOut.symbol} Fee ${fee} In ${amountIn}`); const quoteResult = await this.quoterContract.quoteExactInputSingle.staticCall( tokenIn.address, tokenOut.address, fee, amountIn, sqrtPriceLimitX96 ); const amountOut = BigInt(quoteResult[0]); logger.debug(`${logPrefix} Quoter Out: ${amountOut}`); if (amountOut <= 0n) { logger.warn(`${logPrefix} Quoter zero output.`); /* return { success: true, amountOut: 0n, error: null }; */ } return { success: true, amountOut: amountOut, error: null }; } catch (error) { let reason = error.reason || error.message; if (error.data && error.data !== '0x') { try { reason = ethers.utils.toUtf8String(error.data); } catch {} } logger.warn(`${logPrefix} Quoter fail: ${reason}`); return { success: false, amountOut: null, error: `Quoter fail: ${reason}` }; }
     }
 
-    /**
-     * Simulates a Uniswap V2 / SushiSwap swap using AMM formula.
-     * @param {object} poolState V2 pool state (needs reserve0, reserve1, token0, token1).
-     * @param {object} tokenIn Input token object.
-     * @param {bigint} amountIn Input amount (wei).
-     * @returns {Promise<{ success: boolean, amountOut: bigint | null, error: string | null }>}
-     */
-    async simulateV2Swap(poolState, tokenIn, amountIn) {
-        const { reserve0, reserve1, token0, token1, address } = poolState;
-        const logPrefix = `[SwapSimulator V2 Pool ${address?.substring(0,6)}]`;
-
-        if (reserve0 === undefined || reserve1 === undefined || reserve0 <= 0n || reserve1 <= 0n) {
-            logger.warn(`${logPrefix} Invalid or zero reserves for simulation.`);
-            return { success: false, amountOut: null, error: 'Invalid or zero reserves' };
-        }
-
-        let reserveIn, reserveOut;
-        if (tokenIn.address.toLowerCase() === token0.address.toLowerCase()) {
-            reserveIn = reserve0;
-            reserveOut = reserve1;
-        } else if (tokenIn.address.toLowerCase() === token1.address.toLowerCase()) {
-            reserveIn = reserve1;
-            reserveOut = reserve0;
-        } else {
-             return { success: false, amountOut: null, error: 'tokenIn does not match pool tokens' };
-        }
-
-        try {
-            // Standard AMM formula: amountOut = (reserveOut * amountIn * 997) / (reserveIn * 1000 + amountIn * 997)
-            const amountInWithFee = amountIn * 997n; // amountIn * (1 - fee) where fee = 0.3%
-            const numerator = reserveOut * amountInWithFee;
-            const denominator = (reserveIn * 1000n) + amountInWithFee;
-
-            if (denominator === 0n) {
-                 return { success: false, amountOut: null, error: 'Division by zero in V2 simulation' };
-            }
-
-            const amountOut = numerator / denominator;
-            logger.debug(`${logPrefix} V2 Simulation: In: ${amountIn}, Out: ${amountOut}`);
-
-             return { success: true, amountOut: amountOut, error: null };
-
-        } catch (error) {
-             logger.error(`${logPrefix} Error during V2 simulation calculation: ${error.message}`);
-              return { success: false, amountOut: null, error: `V2 calculation error: ${error.message}` };
-        }
+    async simulateV2Swap(poolState, tokenIn, amountIn) { /* ... unchanged from Response #39 ... */
+        const { reserve0, reserve1, token0, token1, address } = poolState; const logPrefix = `[SwapSim V2 ${address?.substring(0,6)}]`; if (reserve0 === undefined || reserve1 === undefined || reserve0 <= 0n || reserve1 <= 0n) { return { success: false, amountOut: null, error: 'Invalid/zero reserves' }; } let reserveIn, reserveOut; if (tokenIn.address.toLowerCase() === token0.address.toLowerCase()) { reserveIn = reserve0; reserveOut = reserve1; } else if (tokenIn.address.toLowerCase() === token1.address.toLowerCase()) { reserveIn = reserve1; reserveOut = reserve0; } else { return { success: false, amountOut: null, error: 'tokenIn mismatch' }; } try { const amountInWithFee = amountIn * 997n; const numerator = reserveOut * amountInWithFee; const denominator = (reserveIn * 1000n) + amountInWithFee; if (denominator === 0n) { return { success: false, amountOut: null, error: 'Div by zero' }; } const amountOut = numerator / denominator; logger.debug(`${logPrefix} Sim Out: ${amountOut}`); return { success: true, amountOut: amountOut, error: null }; } catch (error) { return { success: false, amountOut: null, error: `V2 calc error: ${error.message}` }; }
     }
 
      /**
-     * Simulates a DODO swap.
-     * @param {object} poolState DODO pool state (needs querySellBaseToken/queryBuyBaseToken logic implemented in fetcher or here).
-     * @param {object} tokenIn Input token object.
-     * @param {bigint} amountIn Input amount (wei).
-     * @returns {Promise<{ success: boolean, amountOut: bigint | null, error: string | null }>}
+     * Simulates a DODO swap using direct pool queries.
+     * NOTE: Requires DODOV1V2Pool ABI with querySellBaseToken and querySellQuoteToken.
      */
      async simulateDodoSwap(poolState, tokenIn, amountIn) {
-        const { address, token0, token1, baseTokenSymbol } = poolState; // Need baseTokenSymbol if using direct query
-        const logPrefix = `[SwapSimulator DODO Pool ${address?.substring(0,6)}]`;
+        const { address, token0, token1, baseTokenSymbol } = poolState;
+        const logPrefix = `[SwapSim DODO ${address?.substring(0,6)}]`;
 
-        // DODO simulation is tricky without a dedicated SDK or helper.
-        // Option 1: Use the results from fetcher's `querySellBaseToken` if amountIn is always 1 unit. (Less flexible)
-        // Option 2: Implement `querySellQuoteToken`, `queryBuyBaseToken` etc., calls here.
-        // Option 3: Rely on a DODO Helper contract if one exists and is reliable.
-
-        // --- Placeholder Implementation (Option 2 - Needs Pool Contract Interaction) ---
-        logger.warn(`${logPrefix} DODO simulation is currently a placeholder. Needs direct pool query implementation.`);
+        if (!baseTokenSymbol) return { success: false, amountOut: null, error: 'Missing baseTokenSymbol in poolState' };
+        if (!token0 || !token1) return { success: false, amountOut: null, error: 'Missing token objects in poolState' };
 
         try {
-            // Determine if selling base or quote
-             const baseToken = this.config.TOKENS[baseTokenSymbol];
-             const isSellingBase = tokenIn.address.toLowerCase() === baseToken.address.toLowerCase();
+            // *** FIX: Look up baseToken object using the symbol ***
+            const baseToken = this.config.TOKENS[baseTokenSymbol];
+            if (!baseToken) {
+                throw new Error(`Base token symbol '${baseTokenSymbol}' not found in config.TOKENS`);
+            }
 
-             // Get DODO pool contract (requires ABI in constants)
-             if (!ABIS.DODOV1V2Pool) { throw new Error("DODOV1V2Pool ABI missing"); }
-             const poolContract = new ethers.Contract(address, ABIS.DODOV1V2Pool, this.provider);
+            // Now safe to compare addresses
+            const isSellingBase = tokenIn.address.toLowerCase() === baseToken.address.toLowerCase();
 
-             let amountOut = 0n;
-             if (isSellingBase) {
-                 logger.debug(`${logPrefix} Simulating sell base: ${amountIn} ${tokenIn.symbol}`);
-                 amountOut = await poolContract.querySellBaseToken.staticCall(amountIn);
-             } else { // Selling Quote
-                 logger.debug(`${logPrefix} Simulating sell quote: ${amountIn} ${tokenIn.symbol}`);
+            const poolContract = this._getDodoPoolContract(address); // Use specific getter
+            let amountOut = 0n;
+
+            if (isSellingBase) {
+                logger.debug(`${logPrefix} Simulating sell base: ${ethers.formatUnits(amountIn, baseToken.decimals)} ${baseToken.symbol}`);
+                // Ensure ABI has querySellBaseToken
+                if (!poolContract.querySellBaseToken) throw new Error("querySellBaseToken function not found in DODO ABI.");
+                amountOut = await poolContract.querySellBaseToken.staticCall(amountIn);
+            } else { // Selling Quote
+                const quoteToken = (tokenIn.address.toLowerCase() === token0.address.toLowerCase()) ? token0 : token1; // tokenIn is the quote token
+                logger.debug(`${logPrefix} Simulating sell quote: ${ethers.formatUnits(amountIn, quoteToken.decimals)} ${quoteToken.symbol}`);
+                 // Ensure ABI has querySellQuoteToken
+                 if (!poolContract.querySellQuoteToken) throw new Error("querySellQuoteToken function not found in DODO ABI.");
                  amountOut = await poolContract.querySellQuoteToken.staticCall(amountIn);
-             }
-             logger.debug(`${logPrefix} DODO Query Result: ${amountOut}`);
+            }
+            logger.debug(`${logPrefix} DODO Query Result: ${amountOut}`);
 
             return { success: true, amountOut: BigInt(amountOut), error: null };
 
@@ -218,9 +110,14 @@ class SwapSimulator {
             let reason = error.reason || error.message;
              if (error.data && error.data !== '0x') { try { reason = ethers.utils.toUtf8String(error.data); } catch { /* ignore */ } }
              logger.warn(`${logPrefix} DODO simulation query failed: ${reason}`);
+            // Treat specific DODO errors as non-fatal (e.g., insufficient liquidity might just mean 0 output)
+            if (reason.includes("DODO_BASE_BALANCE_NOT_ENOUGH") || reason.includes("DODO_QUOTE_BALANCE_NOT_ENOUGH") || reason.includes("TARGET_IS_ZERO")) {
+                 logger.debug(`${logPrefix} DODO Query failed due to balance/target, treating as 0 output.`);
+                 return { success: true, amountOut: 0n, error: null }; // Return 0 output
+             }
+            // Re-throw other contract/RPC errors
             return { success: false, amountOut: null, error: `DODO simulation query failed: ${reason}` };
         }
-        // --- End Placeholder ---
     }
 }
 
