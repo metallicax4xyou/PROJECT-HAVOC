@@ -1,103 +1,120 @@
 // core/fetchers/dodoFetcher.js
 const { ethers } = require('ethers');
-// *** CORRECTED PATHS ***
-const logger = require('../../utils/logger');
-const { ArbitrageError } = require('../../utils/errorHandler');
-const { TOKENS } = require('../../constants/tokens');
-const { getCanonicalPairKey } = require('../../utils/pairUtils'); // Correct path
-const { ABIS } = require('../../constants/abis');
+const logger = require('../../utils/logger'); // Adjust path
+const { ArbitrageError } = require('../../utils/errorHandler'); // Adjust path
+const { TOKENS } = require('../../constants/tokens'); // Adjust path
+const { getCanonicalPairKey } = require('../../utils/pairUtils'); // Adjust path
+const { ABIS } = require('../../constants/abis'); // Adjust path
 
 class DodoFetcher {
     constructor(config) {
-        if (!config || !config.PRIMARY_RPC_URL) { throw new ArbitrageError('DodoFetcher requires config with PRIMARY_RPC_URL.', 'INITIALIZATION_ERROR'); }
+        if (!config?.PRIMARY_RPC_URL) throw new ArbitrageError('DodoFetcher requires config with PRIMARY_RPC_URL.', 'INIT_ERR');
         this.provider = config.provider || new ethers.JsonRpcProvider(config.PRIMARY_RPC_URL);
         this.config = config;
         this.poolContractCache = {};
-        if (!ABIS || !ABIS.DODOV1V2Pool) { throw new ArbitrageError('DodoFetcherInit', "DODOV1V2Pool ABI not found."); }
+        if (!ABIS?.DODOV1V2Pool) logger.warn("[DodoFetcherInit] DODOV1V2Pool ABI missing.");
         this.poolAbi = ABIS.DODOV1V2Pool;
         logger.debug(`[DodoFetcher] Initialized.`);
     }
 
     _getPoolContract(poolAddress) {
         const lowerCaseAddress = poolAddress.toLowerCase();
-        if (!this.poolContractCache[lowerCaseAddress]) {
+        if (!this.dodoPoolContractCache[lowerCaseAddress]) { // Use specific cache name
             try {
-                this.poolContractCache[lowerCaseAddress] = new ethers.Contract( poolAddress, this.poolAbi, this.provider );
-                 logger.debug(`[DodoFetcher] Created contract instance for pool ${poolAddress}`);
-            } catch (error) { logger.error(`[DodoFetcher] Error creating contract instance for DODO pool ${poolAddress}: ${error.message}`); throw error; }
+                 if (!this.poolAbi) throw new Error("DODOV1V2Pool ABI not loaded.");
+                 this.dodoPoolContractCache[lowerCaseAddress] = new ethers.Contract(poolAddress, this.poolAbi, this.provider);
+                 logger.debug(`[DodoFetcher] Created contract instance for ${poolAddress}`);
+            } catch (error) { logger.error(`[DodoFetcher] Error creating DODO contract ${poolAddress}: ${error.message}`); throw error; }
         }
-        return this.poolContractCache[lowerCaseAddress];
+        return this.dodoPoolContractCache[lowerCaseAddress];
     }
 
+    /**
+     * Fetches state and simulates selling 1 unit of baseToken.
+     * Includes baseTokenSymbol in the returned poolData.
+     */
     async fetchPoolData(address, pair) { // pair is [tokenObjectA, tokenObjectB]
         const logPrefix = `[DodoFetcher Pool ${address.substring(0,6)}]`;
         const poolInfo = this.config.POOL_CONFIGS?.find(p => p.address.toLowerCase() === address.toLowerCase());
-        if (!poolInfo) {
-             logger.warn(`${logPrefix} Pool info not found for address ${address}.`);
-              return { success: false, poolData: null, error: 'Pool info not found in config' };
+
+        // --- Critical: Get baseTokenSymbol from poolInfo early ---
+        if (!poolInfo?.baseTokenSymbol) {
+             logger.warn(`${logPrefix} Pool info or baseTokenSymbol missing in config for ${address}.`);
+             return { success: false, poolData: null, error: 'Pool info or baseTokenSymbol missing' };
         }
-        const { fee, baseTokenSymbol, groupName } = poolInfo; // Get necessary info
-        const poolDesc = groupName || `${pair[0]?.symbol || '?'}/${pair[1]?.symbol || '?'}_DODO`;
+        const { fee, baseTokenSymbol, groupName } = poolInfo; // Extract needed info
+        const [token0, token1] = pair; // Token objects directly from pair arg
+        const poolDesc = groupName || `${token0?.symbol || '?'}/${token1?.symbol || '?'}_DODO`;
+
         logger.debug(`${logPrefix} Fetching state (${poolDesc})`);
 
         try {
-            const [token0, token1] = pair; // Get token objects from pair arg
-            if (!token0 || !token1 || !token0.symbol || !token1.symbol) {
-                 return { success: false, poolData: null, error: `Invalid token objects received.` };
+            if (!token0 || !token1) throw new Error(`Invalid token objects received.`);
+
+            // Determine base/quote using the symbol from config
+            const baseToken = this.config.TOKENS[baseTokenSymbol];
+            if (!baseToken) throw new Error(`Base token symbol '${baseTokenSymbol}' not found in TOKENS.`);
+
+            // Determine quote token based on elimination
+            const quoteToken = (token0.address.toLowerCase() === baseToken.address.toLowerCase()) ? token1 : token0;
+            if (quoteToken.address.toLowerCase() === baseToken.address.toLowerCase()) {
+                 throw new Error("Base and Quote tokens are the same, check config/token data.");
             }
 
-            if (!baseTokenSymbol || (baseTokenSymbol !== token0.symbol && baseTokenSymbol !== token1.symbol)) {
-                 throw new Error(`DODO pool config for ${address} missing/invalid 'baseTokenSymbol' ('${token0.symbol}' or '${token1.symbol}')`);
-             }
-            const baseToken = (baseTokenSymbol === token0.symbol) ? token0 : token1;
-            const quoteToken = (baseTokenSymbol === token0.symbol) ? token1 : token0;
-
-            logger.debug(`${logPrefix} Querying: Sell 1 ${baseToken.symbol} for ${quoteToken.symbol}`);
+            logger.debug(`${logPrefix} Configured Base: ${baseToken.symbol}, Quote: ${quoteToken.symbol}. Querying: Sell 1 ${baseToken.symbol}`);
             const poolContract = this._getPoolContract(address);
             const amountIn = ethers.parseUnits('1', baseToken.decimals);
             let amountOutWei;
 
             try {
+                 if (!poolContract.querySellBaseToken) throw new Error("ABI missing querySellBaseToken.");
                  amountOutWei = await poolContract.querySellBaseToken.staticCall(amountIn);
                  logger.debug(`${logPrefix} pool.querySellBaseToken Result: ${amountOutWei.toString()} ${quoteToken.symbol} wei`);
              } catch (queryError) {
-                 let reason = queryError.message;
-                 if (queryError.reason) { reason = queryError.reason; }
-                 else if (queryError.data && queryError.data !== '0x') { try { reason = ethers.utils.toUtf8String(queryError.data); } catch { /* ignore */ } }
+                 let reason = queryError.reason || queryError.message;
+                 if (queryError.data && queryError.data !== '0x') { try { reason = ethers.utils.toUtf8String(queryError.data); } catch {} }
                  logger.warn(`${logPrefix} pool.querySellBaseToken failed: ${reason}`);
                  if (reason.includes("BALANCE_NOT_ENOUGH") || reason.includes("TARGET_IS_ZERO")) {
-                     amountOutWei = 0n;
+                     amountOutWei = 0n; logger.debug(`${logPrefix} Query failed due to balance/target, amountOut=0.`);
                  } else { throw new Error(`DODO query failed: ${reason}`); }
              }
 
             if (amountOutWei === undefined || amountOutWei === null || amountOutWei < 0n) {
-                throw new Error(`Invalid amountOut after DODO query: ${amountOutWei}`);
+                throw new Error(`Invalid amountOut after query: ${amountOutWei}`);
             }
 
-            const pairKey = getCanonicalPairKey(token0, token1); // Use original token objects
+            const pairKey = getCanonicalPairKey(token0, token1);
             if (!pairKey) { throw new Error(`Failed to generate canonical pair key.`); }
 
             const priceString = ethers.formatUnits(amountOutWei, quoteToken.decimals);
-            const effectivePrice = parseFloat(priceString);
-            const feeBps = fee !== undefined ? fee : 3000; // Use fee from config or default
+            const effectivePrice = parseFloat(priceString); // Price of 1 base token in terms of quote token
+            const feeBps = fee !== undefined ? fee : 10; // Use fee from config or DODO default (e.g., 10bps for stable)
 
+            // *** Ensure baseTokenSymbol is included in the final object ***
             const poolData = {
-                address: address, dexType: 'dodo', fee: feeBps,
+                address: address,
+                dexType: 'dodo',
+                fee: feeBps,
                 reserve0: null, reserve1: null,
-                token0: token0, token1: token1, // Store token objects
-                token0Symbol: token0.symbol, token1Symbol: token1.symbol, // Get symbols from objects
+                token0: token0, token1: token1, // Keep original token objects
+                token0Symbol: token0.symbol, token1Symbol: token1.symbol,
                 pairKey: pairKey,
-                effectivePrice: effectivePrice, // Price: Units of Quote per 1 Base
-                queryBaseToken: baseToken, queryQuoteToken: quoteToken, queryAmountOutWei: amountOutWei,
+                effectivePrice: effectivePrice,
+                queryBaseToken: baseToken,       // Store resolved base token object
+                queryQuoteToken: quoteToken,     // Store resolved quote token object
+                queryAmountOutWei: amountOutWei, // Raw output amount from query
+                baseTokenSymbol: baseTokenSymbol, // *** ADDED THIS FIELD ***
                 sqrtPriceX96: null, liquidity: null, tick: null, tickSpacing: null,
-                groupName: groupName || 'N/A', timestamp: Date.now()
+                groupName: groupName || 'N/A',
+                timestamp: Date.now()
             };
             return { success: true, poolData: poolData, error: null };
 
         } catch (error) {
-            logger.warn(`${logPrefix} Failed state fetch for DODO pool ${address}: ${error.message}`);
+            logger.warn(`${logPrefix} Failed fetch/process for DODO pool ${address}: ${error.message}`);
             return { success: false, poolData: null, error: error.message };
         }
     }
 }
+
 module.exports = DodoFetcher;
