@@ -7,7 +7,7 @@ const { TOKENS } = require('../../constants/tokens'); // Adjust path if needed
 
 // --- Configuration ---
 // TODO: Move these to the main config object later
-const MIN_NET_PRICE_DIFFERENCE_BIPS = 0n; // Example: Look for at least 0.05% net difference (Adjust!)
+const MIN_NET_PRICE_DIFFERENCE_BIPS = 5n; // Example: Look for at least 0.05% net difference (Adjust!)
 const MAX_REASONABLE_PRICE_DIFF_BIPS = 5000n; // 50% sanity check for raw price diff
 const BASIS_POINTS_DENOMINATOR = 10000n;
 
