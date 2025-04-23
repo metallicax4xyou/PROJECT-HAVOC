@@ -1,20 +1,25 @@
 // core/profitCalculator.js
-// --- VERSION USING SIMULATOR, GAS ESTIMATOR, AND PRICE FEED ---
+// --- VERSION v2.1 ---
+// Uses SwapSimulator, GasEstimator, and PriceFeed for realistic net profit calculation.
 
 const { ethers } = require('ethers');
-const logger = require('../utils/logger');
-// *** Import GasEstimator and PriceFeed utils ***
+const logger = require('../utils/logger'); // Adjust path if needed
 const { convertTokenAmountToNative } = require('../utils/priceFeed'); // Adjust path
 const GasEstimator = require('../utils/gasEstimator'); // Adjust path
-const { ArbitrageError } = require('../utils/errorHandler');
-const { TOKENS } = require('../constants/tokens');
+const { ArbitrageError } = require('../utils/errorHandler'); // Adjust path
+const { TOKENS } = require('../constants/tokens'); // Adjust path
 const SwapSimulator = require('./swapSimulator'); // Need type validation
 
 // Simulation Input Amounts (Consider moving to config)
-const SIMULATION_INPUT_AMOUNTS = { /* ... same as before ... */
-    'USDC':   ethers.parseUnits('100', 6), 'USDC.e': ethers.parseUnits('100', 6),
-    'USDT':   ethers.parseUnits('100', 6), 'DAI':    ethers.parseUnits('100', 18),
-    'WETH':   ethers.parseUnits('0.1', 18), 'WBTC':   ethers.parseUnits('0.01', 8),
+// Defines the starting amount for the *first leg* of the simulation based on the quote token
+const SIMULATION_INPUT_AMOUNTS = {
+    'USDC':   ethers.parseUnits('100', 6), // 100 USDC
+    'USDC.e': ethers.parseUnits('100', 6), // 100 USDC.e
+    'USDT':   ethers.parseUnits('100', 6), // 100 USDT
+    'DAI':    ethers.parseUnits('100', 18), // 100 DAI
+    'WETH':   ethers.parseUnits('0.1', 18), // 0.1 WETH
+    'WBTC':   ethers.parseUnits('0.01', 8), // 0.01 WBTC
+    // Add default or other common quote tokens if necessary
 };
 
 class ProfitCalculator {
@@ -22,36 +27,35 @@ class ProfitCalculator {
      * @param {object} config Configuration object
      * @param {ethers.Provider} provider Ethers provider instance.
      * @param {SwapSimulator} swapSimulator Instance of SwapSimulator.
-     * @param {GasEstimator} gasEstimator Instance of GasEstimator. // *** ADDED gasEstimator ***
+     * @param {GasEstimator} gasEstimator Instance of GasEstimator.
      */
-    constructor(config, provider, swapSimulator, gasEstimator) { // Added gasEstimator
+    constructor(config, provider, swapSimulator, gasEstimator) {
         logger.debug('[ProfitCalculator] Initializing...');
-        // --- Validate Inputs ---
-        if (!config) throw new ArbitrageError('InitializationError', 'ProfitCalculator: Missing config.');
-        if (!provider) throw new ArbitrageError('InitializationError', 'ProfitCalculator: Missing provider.');
-        if (!swapSimulator || typeof swapSimulator.simulateSwap !== 'function') throw new ArbitrageError('InitializationError', 'ProfitCalculator: Invalid SwapSimulator.');
-        if (!gasEstimator || typeof gasEstimator.estimateTxGasCost !== 'function') throw new ArbitrageError('InitializationError', 'ProfitCalculator: Invalid GasEstimator.'); // *** Validate gasEstimator ***
+        if (!config) throw new ArbitrageError('InitializationError', 'PC: Missing config.');
+        if (!provider) throw new ArbitrageError('InitializationError', 'PC: Missing provider.');
+        if (!swapSimulator?.simulateSwap) throw new ArbitrageError('InitializationError', 'PC: Invalid SwapSimulator.');
+        if (!gasEstimator?.estimateTxGasCost) throw new ArbitrageError('InitializationError', 'PC: Invalid GasEstimator.');
         if (!config.MIN_PROFIT_THRESHOLDS?.NATIVE || !config.MIN_PROFIT_THRESHOLDS?.DEFAULT) throw new Error(`Config missing NATIVE/DEFAULT profit thresholds.`);
-        if (!config.CHAINLINK_FEEDS || Object.keys(config.CHAINLINK_FEEDS).length === 0) logger.warn(`Config missing CHAINLINK_FEEDS. Profit conversion might fail.`); // Warn only
+        if (!config.CHAINLINK_FEEDS || Object.keys(config.CHAINLINK_FEEDS).length === 0) logger.warn(`Config missing CHAINLINK_FEEDS.`);
 
-        // --- Store dependencies ---
         this.config = config;
         this.provider = provider;
         this.swapSimulator = swapSimulator;
-        this.gasEstimator = gasEstimator; // *** Store gasEstimator ***
+        this.gasEstimator = gasEstimator;
         this.minProfitThresholdsConfig = this.config.MIN_PROFIT_THRESHOLDS;
         this.profitBufferPercent = BigInt(this.config.PROFIT_BUFFER_PERCENT || 5);
         this.nativeSymbol = this.config.NATIVE_CURRENCY_SYMBOL || 'ETH';
         this.wrappedNativeSymbol = this.config.WRAPPED_NATIVE_SYMBOL || 'WETH';
-        this.nativeToken = Object.values(TOKENS).find(t => t.symbol === this.nativeSymbol) || { decimals: 18, symbol: 'ETH' }; // More robust fallback
+        // Ensure nativeToken is correctly found or defaults safely
+        this.nativeToken = Object.values(TOKENS).find(t => t?.symbol === this.nativeSymbol) || { decimals: 18, symbol: 'ETH', address: ethers.ZeroAddress, type:'native' };
         this.nativeDecimals = this.nativeToken.decimals;
         this.chainlinkFeeds = this.config.CHAINLINK_FEEDS || {};
 
-        logger.info(`[ProfitCalculator v2.1] Initialized with Simulator & Gas Estimator. Buffer: ${this.profitBufferPercent.toString()}%.`);
+        logger.info(`[ProfitCalculator v2.1] Initialized. Buffer: ${this.profitBufferPercent.toString()}%. Native: ${this.nativeSymbol}`);
     }
 
     // --- _getMinProfitThresholdWei (no change) ---
-    _getMinProfitThresholdWei(profitToken) { /* ... unchanged ... */
+    _getMinProfitThresholdWei(profitToken) {
         if (!profitToken?.decimals || !profitToken?.symbol) throw new Error('Invalid profitToken.'); const canonicalSymbol = profitToken.canonicalSymbol || profitToken.symbol; let thresholdStr, thresholdTokenDecimals, thresholdTokenSymbol;
         if (profitToken.symbol === this.nativeSymbol || profitToken.symbol === this.wrappedNativeSymbol) { thresholdStr = this.minProfitThresholdsConfig.NATIVE; thresholdTokenDecimals = this.nativeDecimals; thresholdTokenSymbol = this.nativeSymbol; }
         else if (this.minProfitThresholdsConfig[canonicalSymbol]) { thresholdStr = this.minProfitThresholdsConfig[canonicalSymbol]; thresholdTokenDecimals = profitToken.decimals; thresholdTokenSymbol = canonicalSymbol; }
@@ -60,26 +64,26 @@ class ProfitCalculator {
         try { return ethers.parseUnits(thresholdStr, thresholdTokenDecimals); } catch (e) { logger.error(`Failed to parse threshold "${thresholdStr}"`); throw new Error(`Bad threshold: ${thresholdStr}`); }
     }
 
-    // --- calculate method ---
+    // --- calculate method (Async wrapper for evaluateOpportunity) ---
     async calculate(opportunities) {
         if (!opportunities || !Array.isArray(opportunities)) return [];
         logger.info(`[ProfitCalculator] Evaluating ${opportunities.length} potential opportunities (incl. gas & simulation)...`);
         const profitableTrades = [];
-        const calculationPromises = opportunities.map(opp => this.evaluateOpportunity(opp)); // Create promises
-        const results = await Promise.allSettled(calculationPromises); // Evaluate concurrently
+        const calculationPromises = opportunities.map(opp => this.evaluateOpportunity(opp));
+        const results = await Promise.allSettled(calculationPromises);
 
         results.forEach((result, index) => {
-             const opp = opportunities[index]; // Get original opportunity for logging context
+             const opp = opportunities[index];
              const pairKey = opp?.pairKey || 'N/A';
-             if (result.status === 'fulfilled' && result.value && result.value.isProfitable) {
-                 profitableTrades.push(result.value.tradeData); // Add successful, profitable trades
-                 logger.info(`[ProfitCalculator] ✅ PROFITABLE Opportunity Found: Pair ${pairKey}, Net Profit ~${ethers.formatEther(result.value.netProfitNativeWei || 0n)} ${this.nativeSymbol}`);
+             if (result.status === 'fulfilled' && result.value?.isProfitable) {
+                 profitableTrades.push(result.value.tradeData);
+                 const profitEth = ethers.formatEther(result.value.netProfitNativeWei || 0n);
+                 logger.info(`[ProfitCalculator] ✅ PROFITABLE: Pair ${pairKey}, Net ~${profitEth} ${this.nativeSymbol}`);
              } else if (result.status === 'rejected') {
-                  logger.warn(`[ProfitCalculator] ❌ Evaluation failed for Opp ${pairKey}: ${result.reason?.message || result.reason}`);
+                  logger.warn(`[ProfitCalculator] ❌ Eval FAILED for Opp ${pairKey}: ${result.reason?.message || result.reason}`);
              } else if (result.status === 'fulfilled' && result.value && !result.value.isProfitable) {
-                  logger.info(`[ProfitCalculator] ➖ Opportunity NOT Profitable: Pair ${pairKey}, Reason: ${result.value.reason || 'Threshold not met'}, Net Profit ~${ethers.formatEther(result.value.netProfitNativeWei || 0n)} ${this.nativeSymbol}`);
-             } else {
-                 logger.warn(`[ProfitCalculator] Unknown evaluation result for Opp ${pairKey}.`);
+                  const profitEth = ethers.formatEther(result.value.netProfitNativeWei || 0n);
+                  logger.info(`[ProfitCalculator] ➖ NOT Profitable: Pair ${pairKey}, Reason: ${result.value.reason || 'Threshold'}, Net ~${profitEth} ${this.nativeSymbol}`);
              }
         });
 
@@ -93,102 +97,92 @@ class ProfitCalculator {
      * @returns {Promise<{isProfitable: boolean, netProfitNativeWei: bigint | null, reason: string | null, tradeData: object | null}>}
      */
     async evaluateOpportunity(opportunity) {
-        const logPrefix = `[ProfitCalc Opp ${opportunity.path?.[0]?.dex}/${opportunity.path?.[1]?.dex} ${opportunity.pairKey}]`;
+        const logPrefix = `[ProfitCalc Opp ${opportunity?.path?.[0]?.dex}/${opportunity?.path?.[1]?.dex} ${opportunity?.pairKey}]`;
 
-        // Basic validation
-        if (opportunity.type !== 'spatial' || !opportunity.path || opportunity.path.length !== 2 || !opportunity.tokenIn || !opportunity.tokenIntermediate || !opportunity.tokenOut) {
-             return { isProfitable: false, netProfitNativeWei: null, reason: "Malformed opportunity structure", tradeData: null };
+        // --- 1. Validate Opportunity Structure ---
+        if (opportunity?.type !== 'spatial' || !opportunity.path || opportunity.path.length !== 2 || !opportunity.tokenIn || !opportunity.tokenIntermediate || !opportunity.tokenOut) {
+             return { isProfitable: false, netProfitNativeWei: null, reason: "Malformed structure", tradeData: null };
         }
-
         const step1 = opportunity.path[0]; const step2 = opportunity.path[1];
         const poolBuyState = step1.poolState; const poolSellState = step2.poolState;
-        if (!poolBuyState || !poolSellState) { return { isProfitable: false, netProfitNativeWei: null, reason: "Missing pool state in opportunity", tradeData: null }; }
+        if (!poolBuyState || !poolSellState) { return { isProfitable: false, netProfitNativeWei: null, reason: "Missing pool state", tradeData: null }; }
 
         const initialToken = this.config.TOKENS[opportunity.tokenIn];
         const intermediateToken = this.config.TOKENS[opportunity.tokenIntermediate];
-        if (!initialToken || !intermediateToken) { return { isProfitable: false, netProfitNativeWei: null, reason: "Cannot find token definitions", tradeData: null }; }
-
-        const amountInStart = BigInt(opportunity.amountIn); // Amount is now set by SpatialFinder/Sim Defaults
-        if (!amountInStart || amountInStart <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: `Invalid simulation amountIn: ${opportunity.amountIn}`, tradeData: null }; }
+        const finalToken = this.config.TOKENS[opportunity.tokenOut]; // Should match initialToken
+        if (!initialToken || !intermediateToken || !finalToken || initialToken.symbol !== finalToken.symbol) {
+             return { isProfitable: false, netProfitNativeWei: null, reason: `Token mismatch/missing (${opportunity.tokenIn}/${opportunity.tokenIntermediate}/${opportunity.tokenOut})`, tradeData: null };
+        }
+        const amountInStart = BigInt(opportunity.amountIn);
+        if (!amountInStart || amountInStart <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: "Invalid amountIn", tradeData: null }; }
         logger.debug(`${logPrefix} Evaluating with initial ${ethers.formatUnits(amountInStart, initialToken.decimals)} ${initialToken.symbol}`);
 
-        // --- Simulate Swaps ---
+        // --- 2. Simulate Swaps ---
         const sim1Result = await this.swapSimulator.simulateSwap(poolBuyState, initialToken, amountInStart);
-        if (!sim1Result.success || !sim1Result.amountOut || sim1Result.amountOut <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: `Leg 1 Sim Failed: ${sim1Result.error || 'Zero output'}`, tradeData: null }; }
+        if (!sim1Result.success || !sim1Result.amountOut || sim1Result.amountOut <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: `Leg 1 Sim Fail: ${sim1Result.error || 'Zero output'}`, tradeData: null }; }
         const amountIntermediate = sim1Result.amountOut;
 
         const sim2Result = await this.swapSimulator.simulateSwap(poolSellState, intermediateToken, amountIntermediate);
-         if (!sim2Result.success || !sim2Result.amountOut || sim2Result.amountOut <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: `Leg 2 Sim Failed: ${sim2Result.error || 'Zero output'}`, tradeData: null }; }
+         if (!sim2Result.success || !sim2Result.amountOut || sim2Result.amountOut <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: `Leg 2 Sim Fail: ${sim2Result.error || 'Zero output'}`, tradeData: null }; }
         const finalAmountOut = sim2Result.amountOut;
-        // --- ---
+        logger.debug(`${logPrefix} Sim Out: ${ethers.formatUnits(finalAmountOut, finalToken.decimals)} ${finalToken.symbol}`);
 
-        // --- Gross Profit ---
+        // --- 3. Calculate Gross Profit (Initial Token Units) ---
         const grossProfitWei_InitialToken = finalAmountOut - amountInStart;
-        if (grossProfitWei_InitialToken <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: "Negative gross profit", tradeData: null }; }
-        logger.debug(`${logPrefix} Gross Profit (Simulated): ${ethers.formatUnits(grossProfitWei_InitialToken, initialToken.decimals)} ${initialToken.symbol}`);
-        // --- ---
+        if (grossProfitWei_InitialToken <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: "Negative gross profit (sim)", tradeData: null }; }
+        logger.debug(`${logPrefix} Gross Profit (Sim): ${ethers.formatUnits(grossProfitWei_InitialToken, initialToken.decimals)} ${initialToken.symbol}`);
 
-        // --- Estimate Gas Cost ---
-        const gasCostDetails = await this.gasEstimator.estimateTxGasCost(opportunity); // Pass opportunity for context if needed
-        if (!gasCostDetails || !gasCostDetails.totalCostWei || gasCostDetails.totalCostWei <= 0n) {
-             return { isProfitable: false, netProfitNativeWei: null, reason: "Failed to estimate gas cost", tradeData: null };
-        }
+        // --- 4. Estimate Gas Cost ---
+        const gasCostDetails = await this.gasEstimator.estimateTxGasCost(opportunity); // Uses fallback for now
+        if (!gasCostDetails?.totalCostWei || gasCostDetails.totalCostWei <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: "Gas cost estimation failed", tradeData: null }; }
         const gasCostNativeWei = gasCostDetails.totalCostWei;
-        logger.debug(`${logPrefix} Estimated Gas Cost: ${ethers.formatEther(gasCostNativeWei)} ${this.nativeSymbol}`);
-        // --- ---
+        logger.debug(`${logPrefix} Est. Gas Cost: ${ethers.formatEther(gasCostNativeWei)} ${this.nativeSymbol}`);
 
-        // --- Convert Gross Profit to Native Wei ---
+        // --- 5. Convert Gross Profit to Native Wei ---
         const grossProfitNativeWei = await convertTokenAmountToNative(
-            grossProfitWei_InitialToken,
-            initialToken, // Profit is in the initial token unit
-            this.chainlinkFeeds,
-            this.nativeSymbol,
-            this.nativeDecimals,
-            this.provider
+            grossProfitWei_InitialToken, initialToken,
+            this.chainlinkFeeds, this.nativeSymbol, this.nativeDecimals, this.provider
         );
-        if (grossProfitNativeWei === null || grossProfitNativeWei <= 0n) {
-             return { isProfitable: false, netProfitNativeWei: null, reason: `Failed to convert gross profit (${initialToken.symbol}) to ${this.nativeSymbol}`, tradeData: null };
-        }
+        if (grossProfitNativeWei === null || grossProfitNativeWei <= 0n) { return { isProfitable: false, netProfitNativeWei: null, reason: "Gross profit conversion failed", tradeData: null }; }
         logger.debug(`${logPrefix} Gross Profit (Native): ${ethers.formatEther(grossProfitNativeWei)} ${this.nativeSymbol}`);
-        // --- ---
 
-        // --- Calculate Net Profit & Compare ---
+        // --- 6. Calculate Net Profit (Native Wei) ---
         const netProfitNativeWei = grossProfitNativeWei - gasCostNativeWei;
-        if (netProfitNativeWei <= 0n) { return { isProfitable: false, netProfitNativeWei, reason: "Net profit negative after gas", tradeData: null }; }
+        if (netProfitNativeWei <= 0n) { return { isProfitable: false, netProfitNativeWei, reason: "Net profit <= 0 after gas", tradeData: null }; }
+        logger.debug(`${logPrefix} Net Profit (Native): ${ethers.formatEther(netProfitNativeWei)} ${this.nativeSymbol}`);
 
+        // --- 7. Apply Buffer & Compare vs Threshold ---
         try {
-            // Threshold should be compared in native currency
-            const thresholdNativeWei = this._getMinProfitThresholdWei(this.nativeToken);
-
-            const bufferMultiplier = 10000n - this.profitBufferPercent * 100n;
+            const thresholdNativeWei = this._getMinProfitThresholdWei(this.nativeToken); // Get threshold for native token
+            const bufferMultiplier = 10000n - (this.profitBufferPercent * 100n); // e.g., 5% buffer -> 9500
+             if (bufferMultiplier <= 0n) throw new Error("Invalid profit buffer percentage."); // Sanity check
             const bufferedNetProfitNativeWei = (netProfitNativeWei * bufferMultiplier) / 10000n;
 
             const isProfitableAfterThreshold = bufferedNetProfitNativeWei > thresholdNativeWei;
-
-            logger.debug(`${logPrefix} Net Profit (Native): ${ethers.formatEther(netProfitNativeWei)}, Buffered: ${ethers.formatEther(bufferedNetProfitNativeWei)}, Threshold: ${ethers.formatEther(thresholdNativeWei)}. Profitable: ${isProfitableAfterThreshold}`);
+            logger.debug(`${logPrefix} Buffered Net: ${ethers.formatEther(bufferedNetProfitNativeWei)}, Threshold: ${ethers.formatEther(thresholdNativeWei)}. Profitable: ${isProfitableAfterThreshold}`);
 
             if (isProfitableAfterThreshold) {
-                let profitPercentage = 0; if (amountInStart !== 0n) { try { const amountInNative = await convertTokenAmountToNative(amountInStart, initialToken, this.chainlinkFeeds, this.nativeSymbol, this.nativeDecimals, this.provider); if(amountInNative && amountInNative > 0n) { profitPercentage = Number( (netProfitNativeWei * 1000000n) / amountInNative ) / 10000; } } catch {} }
+                 let profitPercentage = 0; try { const amountInNative = await convertTokenAmountToNative(amountInStart, initialToken, this.chainlinkFeeds, this.nativeSymbol, this.nativeDecimals, this.provider); if(amountInNative > 0n) { profitPercentage = Number((netProfitNativeWei * 1000000n) / amountInNative) / 10000;} } catch{}
 
-                const finalTradeData = {
-                    ...opportunity,
+                 const finalTradeData = { /* ... structure from previous _createOpportunity, updated amounts ... */
+                    ...opportunity, // Keep original details like path structure
                     amountIn: amountInStart.toString(),
-                    amountOut: finalAmountOut.toString(), // Simulated final amount out
-                    profitAmount: grossProfitWei_InitialToken.toString(), // Gross profit in initial token
-                    profitAmountNativeWei: grossProfitNativeWei.toString(), // Gross profit in native wei
+                    amountOut: finalAmountOut.toString(), // Simulated final amount
+                    profitAmount: grossProfitWei_InitialToken.toString(), // Gross profit (initial token)
+                    profitAmountNativeWei: grossProfitNativeWei.toString(),
                     gasCostNativeWei: gasCostNativeWei.toString(),
-                    netProfitNativeWei: netProfitNativeWei.toString(), // Net profit in native wei
-                    profitPercentage: profitPercentage, // % based on native values
-                    thresholdNativeWei: thresholdNativeWei.toString(),
+                    netProfitNativeWei: netProfitNativeWei.toString(),
+                    profitPercentage: profitPercentage,
+                    thresholdNativeWei: thresholdNativeWei.toString(), // Add threshold used
                     timestamp: Date.now()
                  };
                  return { isProfitable: true, netProfitNativeWei, reason: "Passed threshold", tradeData: finalTradeData };
             } else {
                  return { isProfitable: false, netProfitNativeWei, reason: "Below profit threshold", tradeData: null };
             }
-        } catch (thresholdError) {
-             logger.error(`${logPrefix} Error during threshold check: ${thresholdError.message}`);
-             return { isProfitable: false, netProfitNativeWei, reason: `Threshold check error: ${thresholdError.message}`, tradeData: null };
+        } catch (evalError) {
+             logger.error(`${logPrefix} Error during final evaluation: ${evalError.message}`);
+             return { isProfitable: false, netProfitNativeWei, reason: `Evaluation error: ${evalError.message}`, tradeData: null };
         }
         // --- ---
     }
