@@ -1,86 +1,203 @@
 // core/tx/encoder.js
-// --- VERSION v1.1 ---
-// Uses minimal borrow amount for encoding data specifically for gas estimation.
+// --- VERSION v2.0 ---
+// Replaces specific gas estimation encoder with a general transaction data encoder.
+// Works with paramBuilder v2.0+ to select correct function and encode params.
 
 const { ethers } = require('ethers');
 const logger = require('../../utils/logger');
 const { ABIS } = require('../../constants/abis');
-const { ArbitrageError } = require('../../utils/errorHandler'); // Corrected path
+const { ArbitrageError } = require('../../utils/errorHandler');
+const paramBuilder = require('./paramBuilder'); // Import the builders
 
-if (!ABIS.FlashSwap) { const errorMsg = '[Encoder Init] CRITICAL: FlashSwap ABI not found.'; logger.error(errorMsg); throw new Error(errorMsg); }
+// Ensure FlashSwap ABI is loaded
+if (!ABIS.FlashSwap) {
+    const errorMsg = '[Encoder Init] CRITICAL: FlashSwap ABI not found.';
+    logger.error(errorMsg);
+    throw new Error(errorMsg);
+}
 const flashSwapInterface = new ethers.Interface(ABIS.FlashSwap);
+const logPrefix = '[TxEncoder]';
 
-function encodeParams(params, typeString) { /* ... unchanged ... */
-    const functionSig = `[Encoder]`; logger.debug(`${functionSig} Encoding params: ${typeString}`); if (!params || !typeString) { throw new ArbitrageError('Missing params or typeString.', 'ENCODING_ERROR'); } try { const encodedData = ethers.AbiCoder.defaultAbiCoder().encode([typeString], [params]); logger.debug(`${functionSig} Params encoded successfully.`); return encodedData; } catch (encodeError) { logger.error(`${functionSig} Failed encode params: ${encodeError.message}`, { params: JSON.stringify(params), typeString }); throw new ArbitrageError(`Failed encode params: ${encodeError.message}`, 'ENCODING_ERROR', { originalError: encodeError }); }
+/**
+ * Encodes the raw bytes parameters for a specific trade type using ethers.AbiCoder.
+ * @param {object} params The JavaScript object matching the Solidity struct.
+ * @param {string} typeString The Solidity tuple definition string (e.g., "tuple(...)").
+ * @returns {string} The ABI-encoded bytes string.
+ * @throws {ArbitrageError} If encoding fails.
+ */
+function encodeParams(params, typeString) {
+    logger.debug(`${logPrefix} Encoding params with type: ${typeString}`);
+    if (!params || !typeString) {
+        throw new ArbitrageError('Missing params or typeString for encoding.', 'ENCODING_ERROR', { hasParams: !!params, hasTypeString: !!typeString });
+    }
+    try {
+        const encodedData = ethers.AbiCoder.defaultAbiCoder().encode([typeString], [params]);
+        logger.debug(`${logPrefix} Params encoded successfully: ${encodedData.substring(0, 74)}...`);
+        return encodedData;
+    } catch (encodeError) {
+        logger.error(`${logPrefix} Failed encode params: ${encodeError.message}`, { params: JSON.stringify(params), typeString }); // Avoid logging full params if sensitive
+        throw new ArbitrageError(`Failed encode params: ${encodeError.message}`, 'ENCODING_ERROR', { originalError: encodeError });
+    }
 }
 
 /**
- * Encodes the complete calldata for the `initiateFlashSwap` function.
- * Uses a MINIMAL borrow amount (1 wei) suitable for gas estimation,
- * NOT the actual simulation amount.
- *
- * @param {object} opportunity - The spatial opportunity object.
- * @param {object} config - The main configuration object.
- * @returns {string|null} The encoded calldata or null on error.
+ * Determines the V3 pool address from which the flash loan should originate.
+ * For spatial arbitrage, this is typically the pool of the first swap leg.
+ * For triangular, it's defined differently in the opportunity.
+ * @param {object} opportunity The opportunity object.
+ * @returns {string} The V3 pool address.
+ * @throws {ArbitrageError} If the pool address cannot be determined or is invalid.
  */
-function encodeInitiateFlashSwapData(opportunity, config) {
-    const functionName = 'initiateFlashSwap';
-    const logPrefix = '[TxEncoder.initiateFlashSwap]';
+function getBorrowPoolAddress(opportunity) {
+    let poolAddress = null;
+    let poolState = null;
+
+    if (opportunity.type === 'spatial' && opportunity.path?.length > 0) {
+        // Borrow from the pool corresponding to the first swap leg
+        poolState = opportunity.path[0].poolState;
+        poolAddress = poolState?.address;
+        // Ensure the pool we borrow from is actually a V3 pool (as flash loan originates there)
+        if (opportunity.path[0].dex !== 'uniswapV3') {
+             throw new ArbitrageError(`Flash loan cannot originate from non-V3 pool (${opportunity.path[0].dex}) in current setup.`, 'ENCODING_ERROR', { opportunity });
+        }
+
+    } else if (opportunity.type === 'triangular') {
+        // Assuming the first pool in the list is the borrow pool for triangular
+        poolState = opportunity.pools?.[0]; // poolAB in builder
+        poolAddress = poolState?.address;
+        if (poolState?.dexType !== 'uniswapV3') { // Assuming triangular starts/ends on V3
+             throw new ArbitrageError(`Triangular flash loan cannot originate from non-V3 pool (${poolState?.dexType}) in current setup.`, 'ENCODING_ERROR', { opportunity });
+        }
+    } else {
+        throw new ArbitrageError(`Cannot determine borrow pool for opportunity type: ${opportunity.type}`, 'ENCODING_ERROR', { opportunity });
+    }
+
+    if (!poolAddress || !ethers.isAddress(poolAddress)) {
+        throw new ArbitrageError('Could not determine a valid V3 borrow pool address from opportunity.', 'ENCODING_ERROR', { opportunity });
+    }
+    if (!poolState?.token0?.address || !poolState?.token1?.address) {
+         throw new ArbitrageError('Borrow pool state is missing token address information.', 'ENCODING_ERROR', { poolAddress, poolState });
+    }
+
+    logger.debug(`${logPrefix} Determined borrow pool: ${poolAddress} (Type: ${opportunity.type})`);
+    return { poolAddress, poolState };
+}
+
+
+/**
+ * Encodes the complete transaction calldata for initiating any supported flash swap type.
+ * Selects the correct builder, encodes params, and formats the final function call data.
+ *
+ * @param {object} opportunity - The arbitrage opportunity object (spatial or triangular).
+ * @param {object} simulationResult - The result from the SwapSimulator.
+ * @param {object} config - The main configuration object.
+ * @param {boolean} [isGasEstimation=false] - If true, uses minimal amounts (1 wei borrow, 0 min out) for gas estimation.
+ * @returns {{ calldata: string, contractFunctionName: string, borrowPoolAddress: string } | null} Object with encoded calldata, function name, borrow pool address, or null on error.
+ */
+function encodeTransactionData(opportunity, simulationResult, config, isGasEstimation = false) {
+    logger.debug(`${logPrefix} Encoding transaction data. Gas Estimation Mode: ${isGasEstimation}`);
 
     try {
-        logger.debug(`${logPrefix} Encoding for opportunity: ${opportunity.pairKey} (using MINIMAL amount for gas estimate)`);
-        if (opportunity.type !== 'spatial' || opportunity.path?.length !== 2) throw new Error('Invalid opp type/path.');
+        // --- 1. Determine Borrow Pool & State ---
+        const { poolAddress: borrowPoolAddress, poolState: borrowPoolState } = getBorrowPoolAddress(opportunity);
 
-        // --- 1. Borrow Details (Using MINIMAL AMOUNT = 1 wei) ---
-        const borrowTokenSymbol = opportunity.tokenIn;
-        const borrowToken = config.TOKENS[borrowTokenSymbol];
-        if (!borrowToken?.address || !borrowToken?.decimals) throw new Error(`Borrow token invalid: ${borrowTokenSymbol}`);
+        // --- 2. Select Builder and Prepare Sim Result ---
+        let builderFunction;
+        let effectiveSimulationResult = simulationResult;
 
-        // *** USE 1 WEI FOR GAS ESTIMATION ***
-        const borrowAmount = 1n; // Use 1 wei of the borrow token
-        logger.debug(`${logPrefix} Using minimal borrow amount (1 wei) for gas estimation data.`);
+        if (opportunity.type === 'triangular') {
+            builderFunction = paramBuilder.buildTriangularParams;
+            // Minimal sim result for gas estimation (Triangular)
+            if (isGasEstimation) {
+                effectiveSimulationResult = { initialAmount: 1n, finalAmount: 0n }; // Builder uses these for borrow/minOut
+            }
+        } else if (opportunity.type === 'spatial' && opportunity.path?.length === 2) {
+            const dexPath = `${opportunity.path[0].dex}->${opportunity.path[1].dex}`;
+            logger.debug(`${logPrefix} Identified spatial path: ${dexPath}`);
 
-        const poolBorrowedFromState = opportunity.path[0].poolState;
-        const poolBorrowedFromAddress = poolBorrowedFromState?.address;
-        if (!poolBorrowedFromAddress || !ethers.isAddress(poolBorrowedFromAddress)) throw new Error("Invalid borrow pool address.");
+            if (dexPath === 'uniswapV3->uniswapV3') {
+                builderFunction = paramBuilder.buildTwoHopParams;
+            } else if (dexPath === 'uniswapV3->sushiswap') {
+                builderFunction = paramBuilder.buildV3SushiParams;
+            } else if (dexPath === 'sushiswap->uniswapV3') {
+                builderFunction = paramBuilder.buildSushiV3Params;
+            } else {
+                throw new ArbitrageError(`Unsupported spatial DEX path for encoding: ${dexPath}`, 'ENCODING_ERROR', { opportunity });
+            }
 
-        let amount0ToBorrow = 0n; let amount1ToBorrow = 0n;
-        if (!poolBorrowedFromState.token0?.address || !poolBorrowedFromState.token1?.address) throw new Error("Borrow pool state missing token addresses.");
-        if (borrowToken.address.toLowerCase() === poolBorrowedFromState.token0.address.toLowerCase()) { amount0ToBorrow = borrowAmount; }
-        else if (borrowToken.address.toLowerCase() === poolBorrowedFromState.token1.address.toLowerCase()) { amount1ToBorrow = borrowAmount; }
-        else { throw new Error(`Borrow token ${borrowToken.symbol} not in borrow pool`); }
-        // logger.debug(`${logPrefix} Borrow Details: Pool=${poolBorrowedFromAddress}, Token=${borrowToken.symbol}, Amt0=${amount0ToBorrow}, Amt1=${amount1ToBorrow}`);
+            // Minimal sim result for gas estimation (Spatial)
+            if (isGasEstimation) {
+                 // Builder needs initial, hop1, final. Set initial=1, others=0 for min amounts.
+                effectiveSimulationResult = { initialAmount: 1n, hop1AmountOut: 0n, finalAmount: 0n };
+            }
+        } else {
+            throw new ArbitrageError(`Unsupported opportunity type for encoding: ${opportunity.type}`, 'ENCODING_ERROR', { opportunity });
+        }
 
-        // --- 2. TwoHopParams (Min amounts = 0 for estimation) ---
-        const intermediateTokenSymbol = opportunity.tokenIntermediate;
-        const intermediateToken = config.TOKENS[intermediateTokenSymbol];
-        if (!intermediateToken?.address) throw new Error(`Intermediate token invalid: ${intermediateTokenSymbol}`);
-        const leg1 = opportunity.path[0]; const leg2 = opportunity.path[1];
-        if (!leg1?.poolState?.address || !leg2?.poolState?.address) throw new Error("Path missing pool state addresses.");
-        const feeA = Number(leg1.poolState.fee); const feeB = Number(leg2.poolState.fee);
-        if (isNaN(feeA) || isNaN(feeB) || feeA < 0 || feeB < 0) throw new Error("Invalid pool fee.");
-        const amountOutMinimum1 = 0n; const amountOutMinimum2 = 0n;
-        const twoHopParams = { tokenIntermediate: intermediateToken.address, poolA: leg1.poolState.address, feeA, poolB: leg2.poolState.address, feeB, amountOutMinimum1, amountOutMinimum2 };
-        // logger.debug(`${logPrefix} TwoHopParams Prepared:`, twoHopParams);
+        if (!builderFunction) { // Should be caught above, but safeguard
+             throw new ArbitrageError(`Could not find appropriate parameter builder function.`, 'INTERNAL_ERROR', { opportunity });
+        }
+        logger.debug(`${logPrefix} Using builder: ${builderFunction.name}`);
 
-        // --- 3. Encode Params bytes ---
-        const twoHopParamsType = "tuple(address tokenIntermediate, address poolA, uint24 feeA, address poolB, uint24 feeB, uint256 amountOutMinimum1, uint256 amountOutMinimum2)";
-        const encodedTwoHopParams = encodeParams(twoHopParams, twoHopParamsType);
-        if (!encodedTwoHopParams) throw new Error("Failed to encode TwoHopParams.");
+        // --- 3. Build Parameters using selected builder ---
+        // Pass the effective simulation result (real or minimal)
+        const { params, borrowTokenAddress, borrowAmount, typeString, contractFunctionName } = builderFunction(
+            opportunity,
+            effectiveSimulationResult,
+            config
+        );
 
-        // --- 4. Encode Function Call ---
-        const functionArgs = [ poolBorrowedFromAddress, amount0ToBorrow, amount1ToBorrow, encodedTwoHopParams ];
-        const encodedCallData = flashSwapInterface.encodeFunctionData(functionName, functionArgs);
-        logger.debug(`${logPrefix} Encoded Call Data generated (minimal amount): ${encodedCallData.substring(0, 74)}...`);
-        return encodedCallData;
+        // --- 4. Encode the Specific Parameters Struct ---
+        const encodedParamsBytes = encodeParams(params, typeString);
+        if (!encodedParamsBytes) { // Should throw from encodeParams, but check
+            throw new ArbitrageError("Failed to encode specific parameter bytes.", 'ENCODING_ERROR');
+        }
+
+        // --- 5. Determine amount0/amount1 for flash() call ---
+        // This depends on the token being borrowed relative to token0/token1 of the V3 pool *where the loan originates*
+        let amount0ToBorrow = 0n;
+        let amount1ToBorrow = 0n;
+
+        if (borrowTokenAddress.toLowerCase() === borrowPoolState.token0.address.toLowerCase()) {
+            amount0ToBorrow = borrowAmount; // borrowAmount is either real simulation amount or 1 wei
+        } else if (borrowTokenAddress.toLowerCase() === borrowPoolState.token1.address.toLowerCase()) {
+            amount1ToBorrow = borrowAmount;
+        } else {
+            // This should not happen if builder logic is correct
+            throw new ArbitrageError(`Borrow token address ${borrowTokenAddress} does not match borrow pool tokens (${borrowPoolState.token0.address}, ${borrowPoolState.token1.address})`, 'INTERNAL_ERROR', { opportunity });
+        }
+        logger.debug(`${logPrefix} Flash Loan Amounts: Amt0=${amount0ToBorrow}, Amt1=${amount1ToBorrow}`);
+
+        // --- 6. Encode the Top-Level Function Call ---
+        const functionArgs = [
+            borrowPoolAddress,  // address _poolAddress (V3 pool to borrow from)
+            amount0ToBorrow,    // uint _amount0
+            amount1ToBorrow,    // uint _amount1
+            encodedParamsBytes  // bytes calldata _params
+        ];
+
+        logger.debug(`${logPrefix} Encoding final calldata for function: ${contractFunctionName}`);
+        const finalCalldata = flashSwapInterface.encodeFunctionData(contractFunctionName, functionArgs);
+
+        logger.info(`${logPrefix} Successfully encoded calldata for ${contractFunctionName}. Length: ${finalCalldata.length}`);
+
+        return {
+            calldata: finalCalldata,
+            contractFunctionName: contractFunctionName, // Pass this along for txExecutor
+            borrowPoolAddress: borrowPoolAddress // Might be useful context later
+        };
 
     } catch (error) {
-        logger.error(`${logPrefix} Error encoding ${functionName} data: ${error.message}`, error);
-        return null;
+        logger.error(`${logPrefix} Failed to encode transaction data: ${error.message}`, error);
+        // Ensure error is an ArbitrageError
+        if (!(error instanceof ArbitrageError)) {
+            throw new ArbitrageError(`Unexpected encoding error: ${error.message}`, 'ENCODING_ERROR', { originalError: error });
+        }
+        throw error; // Re-throw the ArbitrageError
     }
 }
 
 module.exports = {
-    encodeParams,
-    encodeInitiateFlashSwapData,
+    // encodeParams, // Keep internal if only used here
+    encodeTransactionData,
 };
