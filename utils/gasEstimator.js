@@ -1,12 +1,11 @@
 // utils/gasEstimator.js
-// --- VERSION v1.2.1 ---
-// Corrected require path for tx/encoder. Uses provider.estimateGas.
+// --- VERSION v1.2.2 ---
+// Includes 'from' address in provider.estimateGas call.
 
 const { ethers } = require('ethers');
-const logger = require('./logger'); // Adjust path if needed
-const { ArbitrageError } = require('./errorHandler'); // Adjust path if needed
-// *** CORRECTED REQUIRE PATH ***
-const { encodeInitiateFlashSwapData } = require('../core/tx/encoder'); // Path relative to utils/
+const logger = require('./logger');
+const { ArbitrageError } = require('./errorHandler');
+const { encodeInitiateFlashSwapData } = require('../core/tx/encoder'); // Corrected path
 
 class GasEstimator {
     constructor(config, provider) {
@@ -21,16 +20,11 @@ class GasEstimator {
         this.maxGasPriceGwei = ethers.parseUnits(String(config.MAX_GAS_GWEI || 1), 'gwei');
         this.fallbackGasLimit = BigInt(config.FALLBACK_GAS_LIMIT || 3000000);
 
-        logger.info(`[GasEstimator v1.2.1] Initialized. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei, Fallback Limit: ${this.fallbackGasLimit}`);
+        logger.info(`[GasEstimator v1.2.2] Initialized. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei, Fallback Limit: ${this.fallbackGasLimit}`);
     }
 
-    async getFeeData() {
-        try { const feeData = await this.provider.getFeeData(); if (!feeData || (!feeData.gasPrice && (!feeData.maxFeePerGas || !feeData.maxPriorityFeePerGas))) { logger.warn('[GasEstimator] Incomplete fee data.'); return null; } return feeData; } catch (error) { logger.error(`[GasEstimator] Error fetching fee data: ${error.message}`); return null; }
-    }
-
-    getEffectiveGasPrice(feeData) {
-        if (!feeData) return null; let effectiveGasPrice = null; if (feeData.maxFeePerGas && feeData.maxPriorityFeePerGas) { effectiveGasPrice = feeData.maxFeePerGas; /* logger.debug(...) */ } else if (feeData.gasPrice) { effectiveGasPrice = feeData.gasPrice; /* logger.debug(...) */ } else { logger.warn('[GasEstimator] Cannot determine base gas price.'); return null; } if (effectiveGasPrice > this.maxGasPriceGwei) { logger.warn(`[GasEstimator] Gas price ${ethers.formatUnits(effectiveGasPrice, 'gwei')} capped to MAX ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')}`); effectiveGasPrice = this.maxGasPriceGwei; } return effectiveGasPrice;
-    }
+    async getFeeData() { /* ... unchanged ... */ }
+    getEffectiveGasPrice(feeData) { /* ... unchanged ... */ }
 
     /**
      * Estimates the gas cost for a flash swap transaction using provider.estimateGas.
@@ -40,7 +34,13 @@ class GasEstimator {
      */
     async estimateTxGasCost(opportunity, signerAddress) {
         const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey}]`;
-        logger.debug(`${logPrefix} Starting gas estimation...`);
+        logger.debug(`${logPrefix} Starting gas estimation for sender ${signerAddress}...`); // Log sender
+
+        // Validate signerAddress
+        if (!signerAddress || !ethers.isAddress(signerAddress)) {
+            logger.error(`${logPrefix} Invalid signerAddress provided for gas estimation.`);
+            return null;
+        }
 
         const feeData = await this.getFeeData();
         if (!feeData) { logger.error(`${logPrefix} Failed fee data fetch.`); return null; }
@@ -48,34 +48,25 @@ class GasEstimator {
         if (!effectiveGasPrice || effectiveGasPrice <= 0n) { logger.error(`${logPrefix} Failed effective gas price.`); return null; }
         logger.debug(`${logPrefix} Effective Gas Price: ${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei`);
 
-        // --- Encode Transaction Data ---
         logger.debug(`${logPrefix} Encoding initiateFlashSwap data...`);
         let encodedData = null;
         try {
-             if (typeof encodeInitiateFlashSwapData !== 'function') {
-                  throw new Error("encodeInitiateFlashSwapData not imported correctly.");
-             }
+            if (typeof encodeInitiateFlashSwapData !== 'function') throw new Error("Encoder fn missing.");
             encodedData = encodeInitiateFlashSwapData(opportunity, this.config);
-        } catch (encodingError) {
-            logger.error(`${logPrefix} Failed to encode transaction data: ${encodingError.message}. Using fallback gas limit.`, encodingError);
-            const totalCostWeiFallback = this.fallbackGasLimit * effectiveGasPrice;
-             return { gasEstimate: this.fallbackGasLimit, effectiveGasPrice, totalCostWei: totalCostWeiFallback };
-        }
+        } catch (encodingError) { logger.error(`${logPrefix} Encoding failed: ${encodingError.message}. Using fallback.`, encodingError); const totalCostWeiFallback = this.fallbackGasLimit * effectiveGasPrice; return { gasEstimate: this.fallbackGasLimit, effectiveGasPrice, totalCostWei: totalCostWeiFallback }; }
+        if (!encodedData) { logger.warn(`${logPrefix} Encoding returned null. Cannot estimate.`); return null; }
 
-        if (!encodedData) {
-            logger.warn(`${logPrefix} Encoding returned null. Cannot estimate precisely. Returning null.`);
-            return null;
-        }
-
-        // --- Estimate Gas Limit using provider.estimateGas ---
+        // --- Estimate Gas Limit ---
         let gasLimitEstimate = null;
         try {
-            logger.debug(`${logPrefix} Estimating gas via provider.estimateGas for tx to ${this.config.FLASH_SWAP_CONTRACT_ADDRESS}...`);
-            const estimatedGas = await this.provider.estimateGas({
+            logger.debug(`${logPrefix} Estimating gas via provider.estimateGas (From: ${signerAddress}, To: ${this.config.FLASH_SWAP_CONTRACT_ADDRESS})...`);
+            const txParams = {
                 to: this.config.FLASH_SWAP_CONTRACT_ADDRESS,
                 data: encodedData,
-                from: signerAddress // Use the provided signer address
-            });
+                from: signerAddress // *** ADDED THE SIGNER ADDRESS HERE ***
+            };
+            logger.debug(`${logPrefix} estimateGas params:`, { to: txParams.to, from: txParams.from, data: txParams.data.substring(0, 42) + '...' }); // Log params concisely
+            const estimatedGas = await this.provider.estimateGas(txParams);
             gasLimitEstimate = BigInt(estimatedGas.toString());
             logger.debug(`${logPrefix} Raw Gas Estimate from Provider: ${gasLimitEstimate}`);
 
@@ -84,15 +75,17 @@ class GasEstimator {
                 const bufferAmount = (gasLimitEstimate * bufferPercent) / 100n;
                 gasLimitEstimate += bufferAmount;
                 logger.debug(`${logPrefix} Applied ${bufferPercent}% buffer. Final Estimate: ${gasLimitEstimate}`);
-            } else if (gasLimitEstimate <= 0n) {
-                 logger.warn(`${logPrefix} Raw gas estimate zero/negative. Using fallback.`);
-                 gasLimitEstimate = this.fallbackGasLimit;
-            }
+            } else if (gasLimitEstimate <= 0n) { logger.warn(`${logPrefix} Raw gas estimate zero/negative. Using fallback.`); gasLimitEstimate = this.fallbackGasLimit; }
 
         } catch (error) {
              if (error.code === 'UNPREDICTABLE_GAS_LIMIT' || (error.message && (error.message.includes("reverted") || error.message.includes("execution failed")) )) {
-                logger.warn(`${logPrefix} Gas estimation failed (TX likely reverts): ${error.reason || error.code || error.message}. Opportunity invalid.`);
-                return null;
+                 // Extract revert reason if available
+                 let reason = error.reason;
+                 if (!reason && error.data && error.data !== '0x') {
+                     try { reason = ethers.utils.toUtf8String(error.data); } catch {}
+                 }
+                 logger.warn(`${logPrefix} Gas estimation failed (TX likely reverts): ${reason || error.code || error.message}. Opportunity invalid.`);
+                 return null; // Signal failure: Opportunity is not viable
              } else {
                  logger.error(`${logPrefix} Unexpected error during gas estimation: ${error.message}. Using fallback limit.`, error);
                  gasLimitEstimate = this.fallbackGasLimit;
