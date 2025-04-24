@@ -1,179 +1,94 @@
 // hardhat.config.js
-
-// --- Imports ---
 require("@nomicfoundation/hardhat-toolbox");
-require("dotenv").config(); // Load .env file
-const { task } = require("hardhat/config"); // Import task function
+require("@nomicfoundation/hardhat-ethers"); // Often included via toolbox, but explicit doesn't hurt
+require('dotenv').config(); // Make .env variables available
 
-// --- Environment Variable Checks ---
-const ARBITRUM_RPC_URL = process.env.ARBITRUM_RPC_URL;
-const POLYGON_RPC_URL = process.env.POLYGON_RPC_URL;
-const BASE_RPC_URL = process.env.BASE_RPC_URL;
-const OPTIMISM_RPC_URL = process.env.OPTIMISM_RPC_URL;
-const PRIVATE_KEY = process.env.PRIVATE_KEY; // Should NOT have '0x' prefix in .env file
-const ARBISCAN_API_KEY = process.env.ARBISCAN_API_KEY;
-const POLYGONSCAN_API_KEY = process.env.POLYGONSCAN_API_KEY;
-const BASESCAN_API_KEY = process.env.BASESCAN_API_KEY;
-const OPTIMISMSCAN_API_KEY = process.env.OPTIMISMSCAN_API_KEY;
-const MAINNET_FORK_URL = process.env.MAINNET_FORK_URL; // Optional
+// --- Environment Variable Loading and Validation ---
+// Load RPC URL: Use the first URL if multiple are comma-separated
+const ARBITRUM_RPC_URL = process.env.ARBITRUM_RPC_URLS ? process.env.ARBITRUM_RPC_URLS.split(',')[0] : undefined;
+// Load Private Key: Remove '0x' prefix if it exists, as Hardhat expects it without
+const RAW_PRIVATE_KEY = process.env.PRIVATE_KEY;
 
-// --- Custom Hardhat Tasks ---
+// Prepare accounts array for Hardhat config
+const ACCOUNTS = [];
+if (RAW_PRIVATE_KEY) {
+    // Add '0x' prefix as required by Hardhat accounts array
+    ACCOUNTS.push(`0x${RAW_PRIVATE_KEY}`);
+} else {
+    console.warn("⚠️ WARNING: PRIVATE_KEY not found in .env file. Deployment and transactions requiring a signer will fail.");
+}
 
-task("checkBalance", "Prints the ETH balance of the deployer account configured for the specified network")
-  .setAction(async (taskArgs, hre) => {
-    const networkName = hre.network.name;
-    console.log(`🔎 Checking balance on network: ${networkName}`);
-    try {
-      const signers = await hre.ethers.getSigners();
-      if (!signers || signers.length === 0) { console.error(`❌ Error: Could not get deployer account...`); return; }
-      const deployer = signers[0];
-      const address = deployer.address;
-      console.log(`👤 Account Address: ${address}`);
-      const balanceWei = await hre.ethers.provider.getBalance(address);
-      const balanceEther = hre.ethers.formatEther(balanceWei);
-      const currency = networkName === 'polygon' ? 'MATIC' : 'ETH';
-      console.log(`💰 Balance: ${balanceEther} ${currency}`);
-    } catch (error) { console.error("\n❌ Error fetching balance:", error.message); }
-  });
+// Check RPC URL
+if (!ARBITRUM_RPC_URL) {
+    console.warn("⚠️ WARNING: ARBITRUM_RPC_URLS not found in .env file. Deployment to Arbitrum will fail.");
+}
 
-task("testQuote", "Tests QuoterV2 quote for a specific hardcoded scenario using quoteExactInputSingle")
-  .setAction(async (taskArgs, hre) => {
-    // This task uses quoteExactInputSingle and might fail, kept for reference.
-    console.warn("[testQuote - Single] This task uses quoteExactInputSingle and may fail.");
-    const quoterAddress = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"; // Correct L2 V2 Address
-    let quoterAbi;
-    try { quoterAbi = require('./abis/IQuoterV2.json'); } catch { console.error("Missing abis/IQuoterV2.json"); return; }
-
-    const provider = hre.ethers.provider;
-    const quoter = new hre.ethers.Contract(quoterAddress, quoterAbi, provider);
-    const params = {
-      tokenIn: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", // WETH on Arbitrum (Adjust if running on other networks)
-      tokenOut: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // USDC on Arbitrum (Adjust if running on other networks)
-      amountIn: hre.ethers.parseEther("0.0001"),
-      fee: 3000,
-      sqrtPriceLimitX96: 0n
-    };
-    console.log(`[testQuote - Single] Attempting static call on ${quoterAddress} (Network: ${hre.network.name})`);
-    console.log("[testQuote - Single] Parameters:", params);
-    try {
-      const result = await quoter.quoteExactInputSingle.staticCall(params);
-      console.log("[testQuote - Single] ✅ Quote successful!");
-      console.log(`  Amount Out (USDC): ${hre.ethers.formatUnits(result.amountOut, 6)}`);
-    } catch (error) {
-      console.error("[testQuote - Single] ❌ Quote failed:");
-      console.error(`  Error Code: ${error.code}`);
-      console.error(`  Reason: ${error.reason}`);
-      if (error.code === 'CALL_EXCEPTION' || (error.code === -32000 && error.message.includes("execution reverted"))) {
-         console.error("  Revert Data:", error.data);
-         console.error("  ProviderError Message:", error.message);
-      } else { console.error("  Full Error:", error); }
-    }
-  });
-
-// <<< RESTORED checkPools Task to check WETH/USDC and handle Base Factory >>>
-task("checkPools", "Checks if specific WETH/USDC pools exist on the network")
-  .setAction(async (taskArgs, hre) => {
-    // --- Standard V3 Factory Address (Default) ---
-    let factoryAddress = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
-
-    // --- Define WETH/USDC Tokens Per Network ---
-    let tokenWETH = "";
-    let tokenUSDC = "";
-    const networkName = hre.network.name;
-
-    console.log(`\n[checkPools] Finding WETH/USDC pools on ${networkName}...`); // Updated log
-
-    switch(networkName) {
-        case 'arbitrum':
-            tokenWETH = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1";
-            tokenUSDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
-            break;
-        case 'polygon':
-            tokenWETH = "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619";
-            tokenUSDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
-            break;
-        case 'base':
-            tokenWETH = "0x4200000000000000000000000000000000000006";
-            tokenUSDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-            // <<< Use CORRECT Base PoolDeployer/Factory Address >>>
-            factoryAddress = "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86"; // Correct Base Address
-            break;
-        case 'optimism':
-            tokenWETH = "0x4200000000000000000000000000000000000006";
-            tokenUSDC = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85";
-            break;
-        default:
-            console.error(`❌ Network ${networkName} not configured in checkPools task.`);
-            return;
-    }
-
-    const feesToCheck = [100, 500, 3000, 10000]; // Check common fee tiers
-    const factoryABI = ["function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)"];
-    const factory = new hre.ethers.Contract(factoryAddress, factoryABI, hre.ethers.provider);
-
-    console.log(`  Using Factory/Deployer ${factoryAddress}`);
-    console.log(`  WETH: ${tokenWETH}`);
-    console.log(`  USDC: ${tokenUSDC}`);
-
-    // Factory requires tokens sorted numerically by address
-    const [token0, token1] = tokenWETH.toLowerCase() < tokenUSDC.toLowerCase() ? [tokenWETH, tokenUSDC] : [tokenUSDC, tokenWETH];
-    console.log(`  Token0 (Sorted): ${token0}`);
-    console.log(`  Token1 (Sorted): ${token1}`);
-
-    for (const fee of feesToCheck) {
-      try {
-        console.log(`--- Checking Fee Tier: ${fee} (${fee / 10000}%) ---`);
-        const poolAddress = await factory.getPool(token0, token1, fee);
-        console.log(`   Pool Address Found: ${poolAddress}`);
-        if (poolAddress === hre.ethers.ZeroAddress) {
-          console.log(`   Status: Pool DOES NOT EXIST.`);
-        } else {
-          console.log(`   Status: Pool EXISTS.`);
-        }
-      } catch (error) {
-        console.error(`[checkPools] ❌ Error checking fee ${fee}: ${error.message}`);
-         if(error.code) console.error(`   Code: ${error.code}`);
-         if(error.value && error.value !== '0x') console.error(`   Value: ${error.value}`);
-         if(error.info) console.error(`   Info: ${JSON.stringify(error.info)}`);
-      }
-    }
-     console.log("[checkPools] Finished checking WETH/USDC pools.");
-  });
+// Load Arbiscan API Key
+const ARBISCAN_API_KEY = process.env.ARBISCAN_API_KEY || "";
+if (!ARBISCAN_API_KEY) {
+     console.warn("⚠️ WARNING: ARBISCAN_API_KEY not found in .env file. Contract verification will fail.");
+}
+// --- End Environment Variable Loading ---
 
 
-task("debugQuote", "Debug quotes using Quoter V2 and quoteExactInput")
-  .addParam("tokenIn", "Input token address")
-  .addParam("tokenOut", "Output token address")
-  .addParam("amount", "Amount in smallest units (wei)")
-  .setAction(async (taskArgs, hre) => { /* ...task code unchanged... */ });
-
-task("findBestQuote", "Finds the best quote across common fee tiers using Quoter V2")
-  .addParam("tokenIn", "Input token address")
-  .addParam("tokenOut", "Output token address")
-  .addParam("amount", "Amount in smallest units (wei)")
-  .addOptionalParam("decimalsOut", "Decimals of the output token", "6")
-  .setAction(async (taskArgs, hre) => { /* ...task code unchanged... */ });
-
-
-// --- Hardhat Configuration ---
+/** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
-  solidity: { compilers: [ { version: "0.7.6", settings: { optimizer: { enabled: true, runs: 9999 } } } ] },
-  defaultNetwork: "hardhat",
+  solidity: {
+    version: "0.7.6", // Match your contract's pragma exactly
+    settings: {
+      optimizer: {
+        enabled: true,
+        runs: 200, // Standard setting, adjust if needed
+      },
+      // Specify EVM version compatible with Solidity 0.7.6 and Arbitrum
+      // Istanbul is generally safe, Berlin might also work.
+      evmVersion: "istanbul"
+    }
+  },
   networks: {
-    hardhat: { ...(MAINNET_FORK_URL && { forking: { url: MAINNET_FORK_URL } }) },
-    // --- FIXED: Removed '0x' prefix from PRIVATE_KEY usage ---
-    arbitrum: { url: ARBITRUM_RPC_URL || "", accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [], chainId: 42161, timeout: 120000 },
-    polygon: { url: POLYGON_RPC_URL || "", accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [], chainId: 137, timeout: 120000 },
-    base: { url: BASE_RPC_URL || "", accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [], chainId: 8453, timeout: 120000 },
-    optimism: { url: OPTIMISM_RPC_URL || "", accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [], chainId: 10, timeout: 120000 },
-    // --- End Fix ---
-  },
-  paths: { sources: "./contracts", tests: "./test", cache: "./cache", artifacts: "./artifacts" },
-  etherscan: {
-    apiKey: {
-       arbitrumOne: ARBISCAN_API_KEY || "", polygon: POLYGONSCAN_API_KEY || "", base: BASESCAN_API_KEY || "", optimisticEthereum: OPTIMISMSCAN_API_KEY || "",
+    // Local development network
+    hardhat: {
+      // You can configure forking here for testing against mainnet state
+      // forking: {
+      //   url: ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc", // Use loaded URL or a default public one
+      //   blockNumber: undefined // Pins the fork to a specific block (optional)
+      // }
     },
-     customChains: [ { network: "base", chainId: 8453, urls: { apiURL: "https://api.basescan.org/api", browserURL: "https://basescan.org" } } ]
+    // Arbitrum Mainnet Configuration
+    arbitrum: {
+      url: ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc", // Fallback to public RPC if .env fails
+      accounts: ACCOUNTS, // Use the accounts array prepared above
+      chainId: 42161, // Arbitrum One chain ID
+      // Optional: Specify gas price strategy if needed, otherwise Hardhat uses provider's default
+      // gasPrice: "auto", // or specific value like ethers.utils.parseUnits("0.1", "gwei")
+    },
+    // Example: Arbitrum Goerli Testnet (uncomment and configure if needed)
+    // arbitrumGoerli: {
+    //   url: process.env.ARBITRUM_GOERLI_RPC_URL || "", // Add this to .env if using testnet
+    //   accounts: ACCOUNTS,
+    //   chainId: 421613,
+    // },
   },
-  gasReporter: { enabled: process.env.REPORT_GAS === "true", currency: "USD", coinmarketcap: process.env.COINMARKETCAP_API_KEY, token: 'ETH' },
+  etherscan: {
+    // Your API key for Arbiscan (needed for contract verification)
+    // Hardhat automatically uses block explorers based on chainId,
+    // but explicitly defining helps.
+    apiKey: {
+      arbitrumOne: ARBISCAN_API_KEY,
+      // arbitrumGoerli: ARBISCAN_API_KEY, // Use the same key if applicable
+    }
+  },
+  // Optional: Specify paths if your project structure is non-standard
+  // paths: {
+  //   sources: "./contracts",
+  //   tests: "./test",
+  //   cache: "./cache",
+  //   artifacts: "./artifacts"
+  // },
+  // Optional: Gas reporter configuration
+  // gasReporter: {
+  //   enabled: (process.env.REPORT_GAS) ? true : false,
+  //   currency: 'USD',
+  //   coinmarketcap: process.env.COINMARKETCAP_API_KEY, // Optional: For USD conversion
+  // },
 };
