@@ -1,11 +1,11 @@
 // utils/gasEstimator.js
 // --- VERSION v1.2.2 ---
-// Includes 'from' address in provider.estimateGas call.
+// Corrected estimateTxGasCost signature to accept signerAddress.
 
 const { ethers } = require('ethers');
 const logger = require('./logger');
 const { ArbitrageError } = require('./errorHandler');
-const { encodeInitiateFlashSwapData } = require('../core/tx/encoder'); // Corrected path
+const { encodeInitiateFlashSwapData } = require('../core/tx/encoder');
 
 class GasEstimator {
     constructor(config, provider) {
@@ -29,16 +29,17 @@ class GasEstimator {
     /**
      * Estimates the gas cost for a flash swap transaction using provider.estimateGas.
      * @param {object} opportunity The opportunity object.
-     * @param {string} signerAddress The address of the bot's signer wallet.
-     * @returns {Promise<{ gasEstimate: bigint, effectiveGasPrice: bigint, totalCostWei: bigint } | null>} Gas cost details or null on failure.
+     * @param {string} signerAddress The address of the bot's signer wallet. <<-- ADDED PARAMETER
+     * @returns {Promise<{ gasEstimate: bigint, effectiveGasPrice: bigint, totalCostWei: bigint } | null>}
      */
-    async estimateTxGasCost(opportunity, signerAddress) {
+    async estimateTxGasCost(opportunity, signerAddress) { // *** FIXED: Added signerAddress parameter ***
         const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey}]`;
-        logger.debug(`${logPrefix} Starting gas estimation for sender ${signerAddress}...`); // Log sender
+        // Now signerAddress comes from the function argument
+        logger.debug(`${logPrefix} Starting gas estimation for sender ${signerAddress}...`);
 
-        // Validate signerAddress
+        // Validate signerAddress received as parameter
         if (!signerAddress || !ethers.isAddress(signerAddress)) {
-            logger.error(`${logPrefix} Invalid signerAddress provided for gas estimation.`);
+            logger.error(`${logPrefix} Invalid signerAddress received: ${signerAddress}`);
             return null;
         }
 
@@ -53,55 +54,36 @@ class GasEstimator {
         try {
             if (typeof encodeInitiateFlashSwapData !== 'function') throw new Error("Encoder fn missing.");
             encodedData = encodeInitiateFlashSwapData(opportunity, this.config);
-        } catch (encodingError) { logger.error(`${logPrefix} Encoding failed: ${encodingError.message}. Using fallback.`, encodingError); const totalCostWeiFallback = this.fallbackGasLimit * effectiveGasPrice; return { gasEstimate: this.fallbackGasLimit, effectiveGasPrice, totalCostWei: totalCostWeiFallback }; }
-        if (!encodedData) { logger.warn(`${logPrefix} Encoding returned null. Cannot estimate.`); return null; }
+        } catch (encodingError) {
+            logger.error(`${logPrefix} Encoding failed: ${encodingError.message}. Using fallback.`, encodingError);
+            const totalCostWeiFallback = this.fallbackGasLimit * effectiveGasPrice;
+             return { gasEstimate: this.fallbackGasLimit, effectiveGasPrice, totalCostWei: totalCostWeiFallback };
+        }
+        if (!encodedData) { logger.warn(`${logPrefix} Encoding returned null.`); return null; }
 
-        // --- Estimate Gas Limit ---
         let gasLimitEstimate = null;
         try {
             logger.debug(`${logPrefix} Estimating gas via provider.estimateGas (From: ${signerAddress}, To: ${this.config.FLASH_SWAP_CONTRACT_ADDRESS})...`);
-            const txParams = {
-                to: this.config.FLASH_SWAP_CONTRACT_ADDRESS,
-                data: encodedData,
-                from: signerAddress // *** ADDED THE SIGNER ADDRESS HERE ***
-            };
-            logger.debug(`${logPrefix} estimateGas params:`, { to: txParams.to, from: txParams.from, data: txParams.data.substring(0, 42) + '...' }); // Log params concisely
+            const txParams = { to: this.config.FLASH_SWAP_CONTRACT_ADDRESS, data: encodedData, from: signerAddress }; // Use parameter
+            // logger.debug(`${logPrefix} estimateGas params:`, { to: txParams.to, from: txParams.from, data: txParams.data.substring(0, 42) + '...' });
             const estimatedGas = await this.provider.estimateGas(txParams);
             gasLimitEstimate = BigInt(estimatedGas.toString());
             logger.debug(`${logPrefix} Raw Gas Estimate from Provider: ${gasLimitEstimate}`);
 
             const bufferPercent = BigInt(this.config.GAS_ESTIMATE_BUFFER_PERCENT || 0);
-            if (bufferPercent > 0n && gasLimitEstimate > 0n) {
-                const bufferAmount = (gasLimitEstimate * bufferPercent) / 100n;
-                gasLimitEstimate += bufferAmount;
-                logger.debug(`${logPrefix} Applied ${bufferPercent}% buffer. Final Estimate: ${gasLimitEstimate}`);
-            } else if (gasLimitEstimate <= 0n) { logger.warn(`${logPrefix} Raw gas estimate zero/negative. Using fallback.`); gasLimitEstimate = this.fallbackGasLimit; }
+            if (bufferPercent > 0n && gasLimitEstimate > 0n) { const bufferAmount = (gasLimitEstimate * bufferPercent) / 100n; gasLimitEstimate += bufferAmount; logger.debug(`${logPrefix} Applied ${bufferPercent}% buffer. Final Estimate: ${gasLimitEstimate}`); }
+            else if (gasLimitEstimate <= 0n) { logger.warn(`${logPrefix} Raw estimate zero/negative. Using fallback.`); gasLimitEstimate = this.fallbackGasLimit; }
 
         } catch (error) {
-             if (error.code === 'UNPREDICTABLE_GAS_LIMIT' || (error.message && (error.message.includes("reverted") || error.message.includes("execution failed")) )) {
-                 // Extract revert reason if available
-                 let reason = error.reason;
-                 if (!reason && error.data && error.data !== '0x') {
-                     try { reason = ethers.utils.toUtf8String(error.data); } catch {}
-                 }
-                 logger.warn(`${logPrefix} Gas estimation failed (TX likely reverts): ${reason || error.code || error.message}. Opportunity invalid.`);
-                 return null; // Signal failure: Opportunity is not viable
-             } else {
-                 logger.error(`${logPrefix} Unexpected error during gas estimation: ${error.message}. Using fallback limit.`, error);
-                 gasLimitEstimate = this.fallbackGasLimit;
-             }
+             if (error.code === 'UNPREDICTABLE_GAS_LIMIT' || (error.message && (error.message.includes("reverted") || error.message.includes("execution failed")) )) { let reason = error.reason; if (!reason && error.data && error.data !== '0x') { try { reason = ethers.utils.toUtf8String(error.data); } catch {} } logger.warn(`${logPrefix} Gas estimate failed (TX reverts): ${reason || error.code || error.message}. Opp invalid.`); return null; }
+             else { logger.error(`${logPrefix} Unexpected gas estimation error: ${error.message}. Using fallback.`, error); gasLimitEstimate = this.fallbackGasLimit; }
         }
 
-        // --- Calculate Total Cost ---
         if (!gasLimitEstimate || gasLimitEstimate <= 0n) { logger.error(`${logPrefix} Final gas limit estimate invalid.`); return null; }
         const totalCostWei = gasLimitEstimate * effectiveGasPrice;
         logger.info(`${logPrefix} Final Estimated Gas: Limit=${gasLimitEstimate}, Price=${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei, Total Cost=${ethers.formatEther(totalCostWei)} ETH`);
 
-        return {
-            gasEstimate: gasLimitEstimate,
-            effectiveGasPrice: effectiveGasPrice,
-            totalCostWei: totalCostWei
-        };
+        return { gasEstimate: gasLimitEstimate, effectiveGasPrice: effectiveGasPrice, totalCostWei: totalCostWei };
     }
 }
 
