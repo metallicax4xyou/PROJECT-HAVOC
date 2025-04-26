@@ -1,31 +1,68 @@
 // utils/nonceManager.js
-// --- VERSION v1.1 --- Uses async-mutex for proper locking
+// --- VERSION v1.2 --- Implements Signer interface for sending transactions.
 
-const { ethers } = require('ethers');
+const { ethers, AbstractSigner } = require('ethers'); // Import AbstractSigner
 const logger = require('./logger');
 const { Mutex } = require('async-mutex'); // Import Mutex
 
-class NonceManager {
+// Extend AbstractSigner to make it a fully functional Signer
+class NonceManager extends AbstractSigner {
     constructor(signer) {
+        // Call the AbstractSigner constructor
+        // Pass the provider from the underlying signer
+        super(signer.provider);
+
         if (!signer || !signer.provider || typeof signer.getAddress !== 'function' || !signer.address) {
             throw new Error("NonceManager requires a valid Ethers Signer instance with an associated address.");
         }
-        this.signer = signer;
-        this.address = signer.address;
-        this.provider = signer.provider;
+        this.signer = signer; // The actual underlying wallet (e.g., ethers.Wallet)
+        this.address = signer.address; // Store address for easy access
+        // this.provider is inherited from AbstractSigner and set by super(signer.provider)
         this.currentNonce = -1; // Initialize as unset
         this.mutex = new Mutex(); // Initialize the mutex
-        logger.debug(`[NonceManager v1.1] Instance created for address: ${this.address} (using async-mutex)`);
+        logger.debug(`[NonceManager v1.2] Instance created for address: ${this.address} (implements Signer)`);
     }
 
+    // Required by AbstractSigner: Returns the signer's address
+    async getAddress() {
+        // We stored it in the constructor for synchronous access if needed elsewhere,
+        // but AbstractSigner requires an async method.
+        return Promise.resolve(this.address);
+    }
+
+    // Required by AbstractSigner: Returns a new instance connected to a different provider
+    // If provider is null, it should return a signer connected to the same provider.
+    connect(provider) {
+        const currentProvider = this.provider; // Get provider from inherited property
+        const newProvider = (provider === null) ? currentProvider : provider;
+        if (newProvider === currentProvider) {
+            return this; // Return self if provider hasn't changed
+        }
+        // Create a new NonceManager with the underlying signer connected to the new provider
+        logger.debug(`[NonceManager] connect() called, creating new instance with new provider`);
+        const newSigner = this.signer.connect(newProvider);
+        // NOTE: The nonce state is NOT carried over to the new instance.
+        // This is generally expected behavior for connect(). The new instance
+        // should likely re-initialize its nonce if used for sending.
+        return new NonceManager(newSigner);
+    }
+
+
+    /**
+     * Initializes the internal nonce count by fetching the 'latest' transaction count.
+     * Should be called before the first transaction or during resync.
+     */
     async initialize() {
         // No locking needed here as it's typically called once at startup or during resync (which is locked)
-        logger.info(`[NonceManager] Initializing nonce for address: ${this.address}`);
+        const functionSig = `[NonceManager Address: ${this.address}]`;
+        logger.info(`${functionSig} Initializing nonce...`);
         try {
+            // Ensure provider is available (inherited from AbstractSigner)
+            if (!this.provider) throw new Error("Provider not available for nonce initialization.");
             this.currentNonce = await this.provider.getTransactionCount(this.address, 'latest');
-            logger.info(`[NonceManager] Initial nonce set to: ${this.currentNonce}`);
+            logger.info(`${functionSig} Initial nonce set to: ${this.currentNonce}`);
         } catch (error) {
-            logger.error(`[NonceManager] CRITICAL: Failed to initialize nonce for ${this.address}: ${error.message}`);
+            logger.error(`${functionSig} CRITICAL: Failed to initialize nonce: ${error.message}`);
             throw new Error(`Nonce initialization failed: ${error.message}`);
         }
     }
@@ -36,27 +73,26 @@ class NonceManager {
      */
     async getNextNonce() {
         const functionSig = `[NonceManager Address: ${this.address}]`;
-        // Acquire lock via mutex. This returns a release function.
         const release = await this.mutex.acquire();
         logger.debug(`${functionSig} Mutex acquired for getNextNonce.`);
         try {
             // Ensure initialized (lazy initialization)
             if (this.currentNonce < 0) {
                 logger.warn(`${functionSig} Nonce not initialized. Attempting initialization within lock...`);
-                // Call initialize directly, it will throw if it fails
-                await this.initialize();
+                await this.initialize(); // Call initialize to fetch starting nonce
             }
 
             // Fetch the 'pending' count to check for external nonce increments
             let pendingNonce;
             try {
+                 if (!this.provider) throw new Error("Provider not available for fetching pending nonce.");
                  pendingNonce = await this.provider.getTransactionCount(this.address, 'pending');
             } catch (fetchError) {
                  logger.error(`${functionSig} Error fetching pending transaction count: ${fetchError.message}`);
-                 // Re-throw as this is critical for determining the correct nonce
                  throw new Error(`Failed to fetch pending nonce: ${fetchError.message}`);
             }
 
+            // If pending nonce is higher, update internal nonce
             if (pendingNonce > this.currentNonce) {
                  logger.info(`${functionSig} Pending nonce (${pendingNonce}) is higher than current internal nonce (${this.currentNonce}). Updating internal nonce.`);
                  this.currentNonce = pendingNonce;
@@ -69,7 +105,7 @@ class NonceManager {
             return nonceToUse;
 
         } finally {
-            // Ensure the lock is always released, even if errors occur
+            // Ensure the lock is always released
             release();
             logger.debug(`${functionSig} Mutex released for getNextNonce.`);
         }
@@ -86,12 +122,10 @@ class NonceManager {
          try {
              logger.warn(`${functionSig} Resyncing nonce... Resetting internal count and fetching latest.`);
              this.currentNonce = -1; // Reset internal state first
-             await this.initialize(); // Re-fetch 'latest' nonce (initialization logic)
+             await this.initialize(); // Re-fetch 'latest' nonce
              logger.info(`${functionSig} Nonce resync completed. New internal nonce: ${this.currentNonce}`);
          } catch (error) {
               logger.error(`${functionSig} Failed to resync nonce: ${error.message}`);
-              // Decide if this should re-throw or allow the bot to potentially continue with an unknown nonce state
-              // Re-throwing might be safer to halt operations if nonce state is critical and uncertain.
               throw new Error(`Nonce resynchronization failed: ${error.message}`);
          } finally {
              release(); // Release lock
@@ -99,16 +133,67 @@ class NonceManager {
          }
      }
 
-     // Expose the signer address directly if needed
-     getAddress() {
-        return this.address;
-     }
+    // --- IMPLEMENT sendTransaction ---
+    /**
+     * Sends a transaction, acquiring the next available nonce first.
+     * @param {ethers.TransactionRequest} tx - The transaction request object.
+     * @returns {Promise<ethers.TransactionResponse>}
+     */
+    async sendTransaction(tx) {
+        const functionSig = `[NonceManager Address: ${this.address}]`;
+        logger.debug(`${functionSig} sendTransaction called...`);
 
-     // Provide access to the underlying signer if needed for signing messages etc.
-     // Note: Transactions should generally go through this manager's methods or use the manager as the signer directly.
-     getSigner() {
-         return this.signer;
-     }
+        // Ensure the underlying signer can actually send transactions
+        if (typeof this.signer.sendTransaction !== 'function') {
+             throw new Error("Underlying signer does not support sendTransaction");
+        }
+
+        // Get the next nonce using the mutex-protected method
+        const nonce = await this.getNextNonce();
+
+        // Populate the transaction with the managed nonce
+        // Create a copy to avoid modifying the original tx object
+        const populatedTx = { ...tx, nonce: nonce };
+        // Ethers V6 requires chainId often, ensure it's present
+        if (populatedTx.chainId === undefined) {
+             const network = await this.provider?.getNetwork();
+             if (network) {
+                  populatedTx.chainId = network.chainId;
+             } else {
+                  logger.warn(`${functionSig} Could not determine chainId for transaction.`);
+                  // Consider throwing an error if chainId is strictly required
+             }
+        }
+        logger.debug(`${functionSig} Populated transaction with nonce ${nonce} and chainId ${populatedTx.chainId}`);
+
+        // Delegate the actual sending to the underlying signer (e.g., Wallet)
+        try {
+            logger.debug(`${functionSig} Delegating sendTransaction to underlying signer...`);
+            const txResponse = await this.signer.sendTransaction(populatedTx);
+            logger.info(`${functionSig} Underlying signer submitted transaction. Hash: ${txResponse.hash}`);
+            return txResponse;
+        } catch (error) {
+            logger.error(`${functionSig} Error sending transaction via underlying signer: ${error.message}`);
+            // Handle potential nonce errors by trying to resync
+            const message = error.message?.toLowerCase() || '';
+            const code = error.code;
+            // Use standard ethers v6 error codes if available
+            if (code === 'NONCE_EXPIRED' || (ethers.ErrorCode && code === ethers.ErrorCode.NONCE_EXPIRED) || message.includes('nonce too low') || message.includes('invalid nonce')) {
+                 logger.warn(`${functionSig} Nonce error detected during send, attempting resync...`);
+                 // Don't await resync here, just trigger it and let the error propagate up
+                 this.resyncNonce().catch(resyncErr => logger.error(`${functionSig} Background resync failed: ${resyncErr.message}`));
+            }
+            // Re-throw the error for upstream handling (e.g., by TxExecutor)
+            throw error;
+        }
+    }
+    // --- END sendTransaction ---
+
+
+    // Provide access to the underlying signer if needed
+    getSigner() {
+        return this.signer;
+    }
 
 } // End NonceManager class
 
