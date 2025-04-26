@@ -16,27 +16,6 @@ import "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol";
 import "./interfaces/IUniswapV2Router02.sol";
 import "./interfaces/IDODOV1V2Pool.sol";
 
-// --- Interface for SushiSwap Router (Uniswap V2 Router Interface) ---
-interface IUniswapV2Router02 {
-    function swapExactTokensForTokens(
-        uint amountIn,
-        uint amountOutMin,
-        address[] calldata path,
-        address to,
-        uint deadline
-    ) external returns (uint[] memory amounts);
-    // Add other functions if needed, like WETH handling
-    function WETH() external pure returns (address);
-}
-
-// --- Interface for DODO Pools (Based on provided ABI) ---
-interface IDODOV1V2Pool {
-    function sellBaseToken(uint256 amount, uint256 minReceiveQuote, bytes calldata data) external returns (uint256 receiveQuoteAmount);
-    // function buyBaseToken(uint256 amount, uint256 maxPayQuote, bytes calldata data) external returns (uint256 payQuoteAmount); // Equivalent to selling quote
-    function _BASE_TOKEN_() external view returns (address);
-    // function _QUOTE_TOKEN_() external view returns (address); // Optional, if needed
-}
-
 // --- AAVE V3 Imports ---
 interface IPool {
     function flashLoan(
