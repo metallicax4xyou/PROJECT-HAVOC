@@ -1,181 +1,129 @@
 // config/helpers/poolLoader.js
-// Logic to load and process pool configurations from network-specific definitions and environment variables.
+// --- VERSION v1.1 --- Loads pools from dedicated files in config/pools/<network>/
 
 const { ethers } = require('ethers');
-const Validators = require('./validators'); // Assumes validators.js is in the same directory
+const Validators = require('./validators');
 let logger; try { logger = require('../../utils/logger'); } catch(e) { console.error("No logger for poolLoader"); logger = console; }
 
+// --- Helper function to safely require pool definition files ---
+function requirePoolFile(networkName, dexType) {
+    const filePath = `../pools/${networkName}/${dexType}.js`; // Path relative to this helper file
+    try {
+        // Use dynamic require wrapped in try/catch
+        logger.debug(`[Pool Loader] Attempting to load pool file: ${filePath}`);
+        const poolModule = require(filePath);
+        // Construct expected key (e.g., UNISWAP_V3_POOLS)
+        const expectedKey = `${dexType.toUpperCase().replace('V3','_V3').replace('SWAP','_SWAP')}_POOLS`;
+        if (poolModule && Array.isArray(poolModule[expectedKey])) {
+             logger.debug(`[Pool Loader] Successfully loaded ${poolModule[expectedKey].length} pools for ${dexType} from ${filePath}`);
+             return poolModule[expectedKey]; // Return the array directly
+        } else {
+             logger.warn(`[Pool Loader] Pool file found at ${filePath}, but missing or invalid export key "${expectedKey}".`);
+             return [];
+        }
+    } catch (error) {
+        // Handle file not found gracefully
+        if (error.code === 'MODULE_NOT_FOUND') {
+            logger.warn(`[Pool Loader] Pool definition file not found for ${dexType} at ${filePath}. Skipping ${dexType} pools.`);
+        } else {
+            // Log other errors (e.g., syntax errors in the pool file)
+            logger.error(`[Pool Loader] Error loading pool file ${filePath}: ${error.message}`);
+        }
+        return []; // Return empty array if file doesn't exist or fails to load
+    }
+}
+// --- End Helper ---
+
+
 /**
- * Loads pool configurations based on enabled DEXs and network-specific definitions.
- * Reads pool addresses from environment variables mapped in the network config.
+ * Loads pool configurations based on enabled DEXs by loading dedicated pool files.
+ * Reads pool addresses from environment variables mapped in the pool definitions.
  *
+ * @param {string} networkName - The name of the network (e.g., 'arbitrum').
  * @param {object} baseTokens - The TOKENS object from baseConfig.TOKENS.
- * @param {object} networkSpecificConfig - The loaded network-specific config (e.g., arbitrum.js content).
  * @param {boolean} isV3Enabled - Flag indicating if Uniswap V3 is enabled.
  * @param {boolean} isSushiEnabled - Flag indicating if SushiSwap is enabled.
  * @param {boolean} isDodoEnabled - Flag indicating if DODO is enabled.
  * @returns {Array<object>} - An array of processed pool configuration objects.
  */
-function loadPoolConfigs(baseTokens, networkSpecificConfig, isV3Enabled, isSushiEnabled, isDodoEnabled) {
-    logger.debug('[Pool Loader] Starting pool configuration loading...');
+function loadPoolConfigs(networkName, baseTokens, isV3Enabled, isSushiEnabled, isDodoEnabled) {
+    logger.debug('[Pool Loader v1.1] Starting pool configuration loading from dedicated files...');
     const allPoolConfigs = [];
-    const loadedPoolAddresses = new Set(); // Track unique addresses across all DEX types
+    const loadedPoolAddresses = new Set();
 
     // --- Process Uniswap V3 Pools ---
-    if (isV3Enabled && networkSpecificConfig.UNISWAP_V3_POOLS && Array.isArray(networkSpecificConfig.UNISWAP_V3_POOLS)) {
-        logger.debug(`[Pool Loader] Processing ${networkSpecificConfig.UNISWAP_V3_POOLS.length} V3 pool groups...`);
-        for (const group of networkSpecificConfig.UNISWAP_V3_POOLS) {
+    if (isV3Enabled) {
+        const uniswapV3Pools = requirePoolFile(networkName, 'uniswapV3');
+        logger.debug(`[Pool Loader] Processing ${uniswapV3Pools.length} raw V3 pools...`);
+        for (const group of uniswapV3Pools) { // Still structured as groups here
             const token0 = baseTokens[group.token0Symbol];
             const token1 = baseTokens[group.token1Symbol];
-            if (!token0 || !token1) {
-                logger.warn(`[Pool Loader] V3 Group ${group.name}: Skipping due to missing token definition for ${group.token0Symbol} or ${group.token1Symbol}.`);
-                continue;
-            }
-            const pairTokenObjects = [token0, token1]; // Store actual token objects
-
-            if (!group.feeTierToEnvMap || typeof group.feeTierToEnvMap !== 'object') {
-                 logger.warn(`[Pool Loader] V3 Group ${group.name}: Skipping due to missing or invalid feeTierToEnvMap.`);
-                 continue;
-            }
+            if (!token0 || !token1) { logger.warn(`[Pool Loader] V3 Group ${group.name}: Skipping due to missing token def: ${group.token0Symbol}/${group.token1Symbol}.`); continue; }
+            const pairTokenObjects = [token0, token1];
+            if (!group.feeTierToEnvMap || typeof group.feeTierToEnvMap !== 'object') { logger.warn(`[Pool Loader] V3 Group ${group.name}: Skipping due to invalid feeTierToEnvMap.`); continue; }
 
             for (const feeTierStr in group.feeTierToEnvMap) {
                 const envVarName = group.feeTierToEnvMap[feeTierStr];
                 if (!envVarName || typeof envVarName !== 'string') continue;
-
                 const fee = parseInt(feeTierStr, 10);
-                if (isNaN(fee)) {
-                    logger.warn(`[Pool Loader] V3 Group ${group.name}: Invalid fee tier string "${feeTierStr}". Skipping.`);
-                    continue;
-                }
+                if (isNaN(fee)) { logger.warn(`[Pool Loader] V3 Group ${group.name}: Invalid fee tier "${feeTierStr}".`); continue; }
 
                 const poolAddress = Validators.validateAndNormalizeAddress(process.env[envVarName], envVarName);
                 if (poolAddress && poolAddress !== ethers.ZeroAddress) {
                     const lowerCaseAddress = poolAddress.toLowerCase();
-                    if (loadedPoolAddresses.has(lowerCaseAddress)) {
-                        logger.debug(`[Pool Loader] V3 Group ${group.name}: Skipping duplicate pool address ${poolAddress}.`);
-                        continue;
-                    }
-                    allPoolConfigs.push({
-                        address: poolAddress,
-                        dexType: 'uniswapV3',
-                        fee: fee,
-                        token0Symbol: group.token0Symbol, // Keep symbols for reference
-                        token1Symbol: group.token1Symbol,
-                        pair: pairTokenObjects, // Include the actual token objects
-                        groupName: group.name || 'N/A'
-                    });
+                    if (loadedPoolAddresses.has(lowerCaseAddress)) continue; // Skip duplicate
+                    allPoolConfigs.push({ address: poolAddress, dexType: 'uniswapV3', fee: fee, token0Symbol: group.token0Symbol, token1Symbol: group.token1Symbol, pair: pairTokenObjects, groupName: group.name || 'N/A' });
                     loadedPoolAddresses.add(lowerCaseAddress);
                     logger.debug(`[Pool Loader] Added V3 Pool: ${poolAddress} (${group.name} ${fee}bps)`);
-                } else if (process.env[envVarName]) {
-                     logger.warn(`[Pool Loader] V3 Group ${group.name}: Invalid address found for env var ${envVarName}: "${process.env[envVarName]}".`);
-                }
+                } else if (process.env[envVarName]) { logger.warn(`[Pool Loader] V3 Group ${group.name}: Invalid address env var ${envVarName}: "${process.env[envVarName]}".`); }
             }
         }
-    } else if (isV3Enabled) {
-         logger.warn("[Pool Loader] Uniswap V3 enabled but no UNISWAP_V3_POOLS found or invalid in network config.");
     }
 
     // --- Process SushiSwap Pools ---
-    if (isSushiEnabled && networkSpecificConfig.SUSHISWAP_POOLS && Array.isArray(networkSpecificConfig.SUSHISWAP_POOLS)) {
-         logger.debug(`[Pool Loader] Processing ${networkSpecificConfig.SUSHISWAP_POOLS.length} SushiSwap pools...`);
-         for (const poolInfo of networkSpecificConfig.SUSHISWAP_POOLS) {
-             const token0 = baseTokens[poolInfo.token0Symbol];
-             const token1 = baseTokens[poolInfo.token1Symbol];
-             if (!token0 || !token1) {
-                 logger.warn(`[Pool Loader] Sushi Pool ${poolInfo.name}: Skipping due to missing token definition for ${poolInfo.token0Symbol} or ${poolInfo.token1Symbol}.`);
-                 continue;
-             }
-             const pairTokenObjects = [token0, token1];
-             const envVarName = poolInfo.poolAddressEnv;
-             if (!envVarName || typeof envVarName !== 'string') {
-                  logger.warn(`[Pool Loader] Sushi Pool ${poolInfo.name}: Skipping due to missing poolAddressEnv.`);
-                  continue;
-             }
+    if (isSushiEnabled) {
+        const sushiSwapPools = requirePoolFile(networkName, 'sushiSwap'); // Changed filename casing
+        logger.debug(`[Pool Loader] Processing ${sushiSwapPools.length} raw Sushi pools...`);
+         for (const poolInfo of sushiSwapPools) {
+             const token0 = baseTokens[poolInfo.token0Symbol]; const token1 = baseTokens[poolInfo.token1Symbol];
+             if (!token0 || !token1) { logger.warn(`[Pool Loader] Sushi Pool ${poolInfo.name}: Skipping missing token def: ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}.`); continue; }
+             const pairTokenObjects = [token0, token1]; const envVarName = poolInfo.poolAddressEnv;
+             if (!envVarName || typeof envVarName !== 'string') { logger.warn(`[Pool Loader] Sushi Pool ${poolInfo.name}: Skipping missing poolAddressEnv.`); continue; }
              const poolAddress = Validators.validateAndNormalizeAddress(process.env[envVarName], envVarName);
              if (poolAddress && poolAddress !== ethers.ZeroAddress) {
-                 const lowerCaseAddress = poolAddress.toLowerCase();
-                 if (loadedPoolAddresses.has(lowerCaseAddress)) {
-                     logger.debug(`[Pool Loader] Sushi Pool ${poolInfo.name}: Skipping duplicate pool address ${poolAddress}.`);
-                     continue;
-                 }
-                 const feeBps = poolInfo.fee; // Standard Sushi fee is usually 30bps (0.3%)
-                 if (typeof feeBps !== 'number' || isNaN(feeBps)) {
-                     logger.warn(`[Pool Loader] Sushi Pool ${poolInfo.name}: Invalid or missing fee, using default? Verify config.`);
-                 }
-                 allPoolConfigs.push({
-                     address: poolAddress,
-                     dexType: 'sushiswap',
-                     fee: feeBps, // Store the configured fee
-                     token0Symbol: poolInfo.token0Symbol,
-                     token1Symbol: poolInfo.token1Symbol,
-                     pair: pairTokenObjects,
-                     groupName: poolInfo.name || 'N/A'
-                 });
+                 const lowerCaseAddress = poolAddress.toLowerCase(); if (loadedPoolAddresses.has(lowerCaseAddress)) continue;
+                 const feeBps = poolInfo.fee; if (typeof feeBps !== 'number' || isNaN(feeBps)) { logger.warn(`[Pool Loader] Sushi Pool ${poolInfo.name}: Invalid fee.`); }
+                 allPoolConfigs.push({ address: poolAddress, dexType: 'sushiswap', fee: feeBps, token0Symbol: poolInfo.token0Symbol, token1Symbol: poolInfo.token1Symbol, pair: pairTokenObjects, groupName: poolInfo.name || 'N/A' });
                  loadedPoolAddresses.add(lowerCaseAddress);
                  logger.debug(`[Pool Loader] Added Sushi Pool: ${poolAddress} (${poolInfo.name})`);
-             } else if (process.env[envVarName]) {
-                  logger.warn(`[Pool Loader] Sushi Pool ${poolInfo.name}: Invalid address found for env var ${envVarName}: "${process.env[envVarName]}".`);
-             }
+             } else if (process.env[envVarName]) { logger.warn(`[Pool Loader] Sushi Pool ${poolInfo.name}: Invalid address env var ${envVarName}: "${process.env[envVarName]}".`); }
          }
-    } else if (isSushiEnabled) {
-         logger.warn("[Pool Loader] SushiSwap enabled but no SUSHISWAP_POOLS found or invalid in network config.");
     }
 
     // --- Process DODO Pools ---
-    if (isDodoEnabled && networkSpecificConfig.DODO_POOLS && Array.isArray(networkSpecificConfig.DODO_POOLS)) {
-         logger.debug(`[Pool Loader] Processing ${networkSpecificConfig.DODO_POOLS.length} DODO pools...`);
-         for (const poolInfo of networkSpecificConfig.DODO_POOLS) {
-             const token0 = baseTokens[poolInfo.token0Symbol];
-             const token1 = baseTokens[poolInfo.token1Symbol];
-             if (!token0 || !token1) {
-                 logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Skipping due to missing token definition for ${poolInfo.token0Symbol} or ${poolInfo.token1Symbol}.`);
-                 continue;
-             }
+    if (isDodoEnabled) {
+        const dodoPools = requirePoolFile(networkName, 'dodo');
+        logger.debug(`[Pool Loader] Processing ${dodoPools.length} raw DODO pools...`);
+         for (const poolInfo of dodoPools) {
+             const token0 = baseTokens[poolInfo.token0Symbol]; const token1 = baseTokens[poolInfo.token1Symbol];
+             if (!token0 || !token1) { logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Skipping missing token def: ${poolInfo.token0Symbol}/${poolInfo.token1Symbol}.`); continue; }
              const pairTokenObjects = [token0, token1];
-             // DODO needs the base token symbol specified correctly
-             if (!poolInfo.baseTokenSymbol || (poolInfo.baseTokenSymbol !== poolInfo.token0Symbol && poolInfo.baseTokenSymbol !== poolInfo.token1Symbol)) {
-                 logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Skipping due to missing or invalid baseTokenSymbol.`);
-                 continue;
-             }
-             const envVarName = poolInfo.poolAddressEnv;
-             if (!envVarName || typeof envVarName !== 'string') {
-                 logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Skipping due to missing poolAddressEnv.`);
-                 continue;
-             }
+             if (!poolInfo.baseTokenSymbol || (poolInfo.baseTokenSymbol !== poolInfo.token0Symbol && poolInfo.baseTokenSymbol !== poolInfo.token1Symbol)) { logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Skipping invalid baseTokenSymbol.`); continue; }
+             const envVarName = poolInfo.poolAddressEnv; if (!envVarName || typeof envVarName !== 'string') { logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Skipping missing poolAddressEnv.`); continue; }
              const poolAddress = Validators.validateAndNormalizeAddress(process.env[envVarName], envVarName);
              if (poolAddress && poolAddress !== ethers.ZeroAddress) {
-                 const lowerCaseAddress = poolAddress.toLowerCase();
-                 if (loadedPoolAddresses.has(lowerCaseAddress)) {
-                     logger.debug(`[Pool Loader] DODO Pool ${poolInfo.name}: Skipping duplicate pool address ${poolAddress}.`);
-                     continue;
-                 }
-                 const feeBps = poolInfo.fee; // DODO fees are complex, config value might be indicative
-                 if (feeBps !== undefined && (typeof feeBps !== 'number' || isNaN(feeBps))) {
-                     logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Invalid fee format.`);
-                 }
-                 allPoolConfigs.push({
-                     address: poolAddress,
-                     dexType: 'dodo',
-                     fee: feeBps, // Store configured indicative fee
-                     token0Symbol: poolInfo.token0Symbol,
-                     token1Symbol: poolInfo.token1Symbol,
-                     pair: pairTokenObjects,
-                     baseTokenSymbol: poolInfo.baseTokenSymbol, // Crucial for DODO fetcher
-                     groupName: poolInfo.name || 'N/A'
-                 });
+                 const lowerCaseAddress = poolAddress.toLowerCase(); if (loadedPoolAddresses.has(lowerCaseAddress)) continue;
+                 const feeBps = poolInfo.fee; if (feeBps !== undefined && (typeof feeBps !== 'number' || isNaN(feeBps))) { logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Invalid fee format.`); }
+                 allPoolConfigs.push({ address: poolAddress, dexType: 'dodo', fee: feeBps, token0Symbol: poolInfo.token0Symbol, token1Symbol: poolInfo.token1Symbol, pair: pairTokenObjects, baseTokenSymbol: poolInfo.baseTokenSymbol, groupName: poolInfo.name || 'N/A' });
                  loadedPoolAddresses.add(lowerCaseAddress);
                  logger.debug(`[Pool Loader] Added DODO Pool: ${poolAddress} (${poolInfo.name})`);
-             } else if (process.env[envVarName]) {
-                 logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Invalid address found for env var ${envVarName}: "${process.env[envVarName]}".`);
-             }
+             } else if (process.env[envVarName]) { logger.warn(`[Pool Loader] DODO Pool ${poolInfo.name}: Invalid address env var ${envVarName}: "${process.env[envVarName]}".`); }
          }
-    } else if (isDodoEnabled) {
-         logger.warn("[Pool Loader] DODO enabled but no DODO_POOLS found or invalid in network config.");
     }
 
-    logger.info(`[Pool Loader] Finished processing. Total unique pools loaded: ${loadedPoolAddresses.size}`);
+    logger.info(`[Pool Loader v1.1] Finished processing. Total unique pools loaded: ${loadedPoolAddresses.size}`);
     if (loadedPoolAddresses.size === 0 && (isV3Enabled || isSushiEnabled || isDodoEnabled)) {
-        logger.error("[Pool Loader] CRITICAL WARNING: DEXs are enabled but NO pool addresses were loaded from .env variables. Check network config and .env mappings.");
+        logger.error("[Pool Loader v1.1] CRITICAL WARNING: DEXs are enabled but NO pool addresses were loaded. Check .env variables and pool definition files in config/pools/");
     }
 
     return allPoolConfigs;
