@@ -3,7 +3,6 @@ pragma solidity =0.7.6; // Match periphery library version
 pragma abicoder v2;
 
 // --- Imports ---
-// ... (imports remain the same) ...
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
@@ -14,15 +13,40 @@ import "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3FlashCallback.s
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
 import "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol";
+
+// --- Interfaces are now imported from separate files ---
 import "./interfaces/IUniswapV2Router02.sol";
 import "./interfaces/IDODOV1V2Pool.sol";
-// ... (Aave imports remain the same) ...
-interface IPool { function flashLoan( address receiverAddress, address[] calldata assets, uint256[] calldata amounts, uint256[] calldata interestRateModes, address onBehalfOf, bytes calldata params, uint16 referralCode ) external; }
-interface IFlashLoanReceiver { function executeOperation( address[] calldata assets, uint256[] calldata amounts, uint256[] calldata premiums, address initiator, bytes calldata params ) external returns (bool); function ADDRESSES_PROVIDER() external view returns (address); function POOL() external view returns (address); }
+
+// --- AAVE V3 Imports ---
+interface IPool {
+    function flashLoan(
+        address receiverAddress,
+        address[] calldata assets,
+        uint256[] calldata amounts,
+        uint256[] calldata interestRateModes,
+        address onBehalfOf,
+        bytes calldata params,
+        uint16 referralCode
+    ) external;
+}
+interface IFlashLoanReceiver {
+    function executeOperation(
+        address[] calldata assets,
+        uint256[] calldata amounts,
+        uint256[] calldata premiums,
+        address initiator,
+        bytes calldata params
+    ) external returns (bool);
+
+    function ADDRESSES_PROVIDER() external view returns (address);
+    function POOL() external view returns (address);
+}
+// --- End AAVE V3 Imports ---
 
 
 // --- Contract Definition ---
-// --- VERSION v3.5 --- Store Addresses Provider in immutable variable
+// --- VERSION v3.6 --- Added DODO buyBaseToken logic
 contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using SafeMath for uint256;
@@ -33,20 +57,15 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     address payable public immutable owner;
     address public immutable V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
     IPool public immutable AAVE_POOL;
-    // +++ ADDED IMMUTABLE VARIABLE +++
-    address public immutable AAVE_ADDRESSES_PROVIDER;
-    // --- REMOVED CONSTANT ---
-    // address constant ARBITRUM_ADDRESSES_PROVIDER = 0xa9768dEaF220135113516e574640BeA2979DBf85;
-
+    address public immutable AAVE_ADDRESSES_PROVIDER; // Set in constructor
     uint constant DEADLINE_OFFSET = 60;
 
-    // --- DEX Type Constants (Unchanged) ---
+    // --- DEX Type Constants ---
     uint8 constant DEX_TYPE_UNISWAP_V3 = 0;
     uint8 constant DEX_TYPE_SUSHISWAP = 1;
     uint8 constant DEX_TYPE_DODO = 2;
 
-    // --- Structs (Unchanged) ---
-    // ... (CallbackType, FlashCallbackData, TwoHopParams, TriangularPathParams, SwapStep, ArbParams) ...
+    // --- Structs ---
     enum CallbackType { TWO_HOP, TRIANGULAR }
     struct FlashCallbackData { CallbackType callbackType; uint amount0Borrowed; uint amount1Borrowed; address caller; address poolBorrowedFrom; address token0; address token1; uint24 fee; bytes params; }
     struct TwoHopParams { address tokenIntermediate; uint24 feeA; uint24 feeB; uint amountOutMinimum1; uint amountOutMinimum2; }
@@ -54,9 +73,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     struct SwapStep { address pool; address tokenIn; address tokenOut; uint24 fee; uint256 minOut; uint8 dexType; }
     struct ArbParams { SwapStep[] path; address initiator; }
 
-
-    // --- Events (Unchanged) ---
-    // ... (FlashSwapInitiated, AaveFlashLoanInitiated, etc.) ...
+    // --- Events ---
     event FlashSwapInitiated(address indexed caller, address indexed pool, CallbackType tradeType, uint amount0, uint amount1);
     event AaveFlashLoanInitiated(address indexed caller, address indexed asset, uint amount);
     event AaveArbitrageExecution(address indexed tokenBorrowed, uint amountBorrowed, uint feePaid);
@@ -67,31 +84,30 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     event EmergencyWithdrawal(address indexed token, address indexed recipient, uint amount);
 
 
-    // --- Modifiers (Unchanged) ---
+    // --- Modifiers ---
     modifier onlyOwner() {
         require(msg.sender == owner || tx.origin == owner, "FS:NA");
         _;
     }
 
-    // --- MODIFIED CONSTRUCTOR ---
+    // --- Constructor (Unchanged from v3.5) ---
     constructor(
         address _uniswapV3Router,
         address _sushiRouter,
         address _aavePoolAddress,
-        address _aaveAddressesProvider // <<< ADDED Argument
+        address _aaveAddressesProvider
     ) {
         require(_uniswapV3Router != address(0), "FS:IUR");
         require(_sushiRouter != address(0), "FS:ISR");
         require(_aavePoolAddress != address(0), "FS:IAP");
-        require(_aaveAddressesProvider != address(0), "FS:IAAP"); // <<< ADDED Check
+        require(_aaveAddressesProvider != address(0), "FS:IAAP");
 
         SWAP_ROUTER = ISwapRouter(_uniswapV3Router);
         SUSHI_ROUTER = IUniswapV2Router02(_sushiRouter);
         AAVE_POOL = IPool(_aavePoolAddress);
-        AAVE_ADDRESSES_PROVIDER = _aaveAddressesProvider; // <<< ADDED Assignment
+        AAVE_ADDRESSES_PROVIDER = _aaveAddressesProvider;
         owner = payable(msg.sender);
     }
-    // --- END MODIFIED CONSTRUCTOR ---
 
 
     // --- Uniswap V3 Flash Callback (Unchanged) ---
@@ -109,10 +125,84 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     function _executeTwoHopSwaps( address _tokenBorrowed, uint _amountBorrowed, bytes memory _params ) internal returns (uint finalAmount) { TwoHopParams memory arbParams = abi.decode(_params, (TwoHopParams)); _approveSpenderIfNeeded(_tokenBorrowed, address(SWAP_ROUTER), _amountBorrowed); uint amountIntermediateReceived = _executeSingleV3Swap( 1, _tokenBorrowed, arbParams.tokenIntermediate, arbParams.feeA, _amountBorrowed, arbParams.amountOutMinimum1 ); require(amountIntermediateReceived > 0, "FS:S1Z"); _approveSpenderIfNeeded(arbParams.tokenIntermediate, address(SWAP_ROUTER), amountIntermediateReceived); finalAmount = _executeSingleV3Swap( 2, arbParams.tokenIntermediate, _tokenBorrowed, arbParams.feeB, amountIntermediateReceived, arbParams.amountOutMinimum2 ); }
     function _executeTriangularSwaps( address _tokenA, uint _amountA, bytes memory _params ) internal returns (uint finalAmount) { TriangularPathParams memory pathParams = abi.decode(_params, (TriangularPathParams)); require(pathParams.tokenA == _tokenA, "FS:TPA"); _approveSpenderIfNeeded(_tokenA, address(SWAP_ROUTER), _amountA); uint amountB = _executeSingleV3Swap( 1, _tokenA, pathParams.tokenB, pathParams.fee1, _amountA, 0 ); require(amountB > 0, "FS:TS1Z"); _approveSpenderIfNeeded(pathParams.tokenB, address(SWAP_ROUTER), amountB); uint amountC = _executeSingleV3Swap( 2, pathParams.tokenB, pathParams.tokenC, pathParams.fee2, amountB, 0 ); require(amountC > 0, "FS:TS2Z"); _approveSpenderIfNeeded(pathParams.tokenC, address(SWAP_ROUTER), amountC); finalAmount = _executeSingleV3Swap( 3, pathParams.tokenC, _tokenA, pathParams.fee3, amountC, pathParams.amountOutMinimumFinal ); }
     function _executeSingleV3Swap( uint _swapNumber, address _tokenIn, address _tokenOut, uint24 _fee, uint _amountIn, uint _amountOutMinimum ) internal returns (uint amountOut) { ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({ tokenIn: _tokenIn, tokenOut: _tokenOut, fee: _fee, recipient: address(this), deadline: block.timestamp + DEADLINE_OFFSET, amountIn: _amountIn, amountOutMinimum: _amountOutMinimum, sqrtPriceLimitX96: 0 }); try SWAP_ROUTER.exactInputSingle(swapParams) returns (uint _amountOut) { amountOut = _amountOut; emit SwapExecuted(_swapNumber, DEX_TYPE_UNISWAP_V3, _tokenIn, _tokenOut, _amountIn, amountOut); } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber), "FL"))); } }
-        // --- _executeSwapPath (Unchanged from previous update) ---
+        // --- _executeSwapPath (Updated with DODO Quote Sell Logic) ---
     function _executeSwapPath(SwapStep[] memory path) internal returns (uint finalAmount) {
-        require(path.length > 0, "FS:ESP"); uint currentAmount = IERC20(path[0].tokenIn).balanceOf(address(this)); for(uint i = 0; i < path.length; i++) { SwapStep memory step = path[i]; require(currentAmount > 0, "FS:AZS"); uint amountOut; if (step.dexType == DEX_TYPE_UNISWAP_V3) { amountOut = _executeSingleV3Swap( i + 1, step.tokenIn, step.tokenOut, step.fee, currentAmount, step.minOut ); require(amountOut > 0, "FS:V3SZ"); } else if (step.dexType == DEX_TYPE_SUSHISWAP) { address[] memory sushiPath = new address[](2); sushiPath[0] = step.tokenIn; sushiPath[1] = step.tokenOut; uint deadline = block.timestamp.add(DEADLINE_OFFSET); try SUSHI_ROUTER.swapExactTokensForTokens( currentAmount, step.minOut, sushiPath, address(this), deadline ) returns (uint[] memory amounts) { require(amounts.length == 2, "FS:SLA"); amountOut = amounts[1]; emit SwapExecuted(i + 1, DEX_TYPE_SUSHISWAP, step.tokenIn, step.tokenOut, currentAmount, amountOut); } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:SS", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:SS", _numToString(i+1), "FL"))); } require(amountOut > 0, "FS:SSZ"); } else if (step.dexType == DEX_TYPE_DODO) { IDODOV1V2Pool dodoPool = IDODOV1V2Pool(step.pool); address baseToken = dodoPool._BASE_TOKEN_(); if (step.tokenIn == baseToken) { try dodoPool.sellBaseToken(currentAmount, step.minOut, "") returns (uint quoteReceived) { amountOut = quoteReceived; emit SwapExecuted(i + 1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, currentAmount, amountOut); } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:DS", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:DS", _numToString(i+1), "FL"))); } } else { revert("FS:DQS"); } require(amountOut > 0, "FS:DSZ"); } else { revert("FS:UDT"); } currentAmount = amountOut; } finalAmount = currentAmount;
+        require(path.length > 0, "FS:ESP");
+        uint currentAmount = IERC20(path[0].tokenIn).balanceOf(address(this)); // Start with balance from flash loan
+
+        for(uint i = 0; i < path.length; i++) {
+            SwapStep memory step = path[i];
+            require(currentAmount > 0, "FS:AZS"); // Amount Zero before Swap
+
+            // Note: Approvals are now done in executeOperation before calling this function
+
+            uint amountOut;
+            if (step.dexType == DEX_TYPE_UNISWAP_V3) { // Uniswap V3
+                 amountOut = _executeSingleV3Swap(
+                     i + 1, step.tokenIn, step.tokenOut, step.fee,
+                     currentAmount, step.minOut
+                 );
+                 require(amountOut > 0, "FS:V3SZ");
+            }
+            else if (step.dexType == DEX_TYPE_SUSHISWAP) { // SushiSwap
+                 address[] memory sushiPath = new address[](2);
+                 sushiPath[0] = step.tokenIn;
+                 sushiPath[1] = step.tokenOut;
+                 // Use SafeMath for deadline
+                 uint deadline = block.timestamp.add(DEADLINE_OFFSET);
+                 try SUSHI_ROUTER.swapExactTokensForTokens(
+                     currentAmount, step.minOut, sushiPath, address(this), deadline
+                 ) returns (uint[] memory amounts) {
+                     require(amounts.length == 2, "FS:SLA"); // Sushi Length Assertion
+                     amountOut = amounts[1]; // amountOut is the last element
+                     // Use correct event emission signature
+                     emit SwapExecuted(i + 1, DEX_TYPE_SUSHISWAP, step.tokenIn, step.tokenOut, currentAmount, amountOut);
+                 } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:SS", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:SS", _numToString(i+1), "FL"))); }
+                 require(amountOut > 0, "FS:SSZ"); // Sushi Swap returned Zero
+            }
+            else if (step.dexType == DEX_TYPE_DODO) { // DODO
+                 IDODOV1V2Pool dodoPool = IDODOV1V2Pool(step.pool);
+                 address baseToken = dodoPool._BASE_TOKEN_();
+
+                 if (step.tokenIn == baseToken) {
+                     // Selling the Base Token
+                     try dodoPool.sellBaseToken(currentAmount, step.minOut, "") returns (uint quoteReceived) {
+                         amountOut = quoteReceived;
+                         // Use correct event emission signature
+                         emit SwapExecuted(i + 1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, currentAmount, amountOut);
+                     } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:DSB", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:DSB", _numToString(i+1), "FL"))); } // DSB = Dodo Sell Base
+                 } else {
+                     // Selling the Quote Token (Using buyBaseToken)
+                     // step.tokenIn is the quote token we are paying
+                     // step.tokenOut is the base token we want to receive
+                     // step.minOut is the minimum amount of base token (tokenOut) we require
+
+                     require(step.minOut > 0, "FS:DQA"); // Min amount out for quote sell must be > 0
+
+                     uint quotePaid; // Variable to store actual quote paid
+                     try dodoPool.buyBaseToken(
+                         step.minOut,       // amount (of base token) to receive - use minOut as target
+                         currentAmount,     // maxPayQuote - use our full input amount as max limit for now
+                         ""                 // data - empty
+                     ) returns (uint _quotePaid) {
+                         quotePaid = _quotePaid; // DODO returns the amount of quote actually paid
+                         amountOut = step.minOut; // We received the target minimum amount of base token
+                         // Log quotePaid as amountIn, amountOut is the base received
+                         emit SwapExecuted(i + 1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, quotePaid, amountOut);
+                     } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:DQB", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:DQB", _numToString(i+1), "FL"))); } // DQB = Dodo Quote Buy (Base)
+                 }
+                 require(amountOut > 0, "FS:DSZ"); // DODO Swap returned Zero (Applies to both paths)
+            }
+             else {
+                 revert("FS:UDT"); // Unknown DEX Type in path
+             }
+
+             currentAmount = amountOut; // Update amount for next step
+        }
+        finalAmount = currentAmount;
     }
+    // --- End MODIFIED Internal function ---
+
 
     // --- Internal Helpers (Unchanged) ---
     function _approveSpenderIfNeeded(address _token, address _spender, uint _amount) internal { if (IERC20(_token).allowance(address(this), _spender) < _amount) { if (IERC20(_token).allowance(address(this), _spender) > 0) { IERC20(_token).safeApprove(_spender, 0); } IERC20(_token).safeApprove(_spender, _amount); } }
@@ -134,10 +224,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     function withdrawToken(address tokenAddress) external onlyOwner { require(tokenAddress != address(0), "FS:ZTA"); uint balance = IERC20(tokenAddress).balanceOf(address(this)); if (balance > 0) { IERC20(tokenAddress).safeTransfer(owner, balance); emit EmergencyWithdrawal(tokenAddress, owner, balance); } }
     receive() external payable {}
 
-    // --- IFlashLoanReceiver Implementation (MODIFIED TO RETURN IMMUTABLE VARIABLE) ---
-    function ADDRESSES_PROVIDER() external view override returns (address) {
-        // Return the immutable state variable set in constructor
-        return AAVE_ADDRESSES_PROVIDER; // <<< MODIFIED
-    }
+    // --- IFlashLoanReceiver Implementation (Unchanged) ---
+    function ADDRESSES_PROVIDER() external view override returns (address) { return AAVE_ADDRESSES_PROVIDER; }
     function POOL() external view override returns (address) { return address(AAVE_POOL); }
 } // ****** END OF CONTRACT ******
