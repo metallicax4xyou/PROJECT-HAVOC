@@ -1,5 +1,6 @@
 // config/index.js
 // --- VERSION USING POOL LOADER HELPER ---
+// Added final config object debug log
 
 require('dotenv').config();
 const { ethers } = require('ethers');
@@ -65,16 +66,31 @@ function loadConfig() {
     // --- ---
 
     // --- Merge Required Settings from network file (Unchanged) ---
-    const requiredNetworkKeys = ['MIN_PROFIT_THRESHOLDS', 'CHAINLINK_FEEDS', 'GAS_COST_ESTIMATES'];
+    const requiredNetworkKeys = ['MIN_PROFIT_THRESHOLDS', 'CHAINLINK_FEEDS', 'GAS_COST_ESTIMATES', 'FINDER_SETTINGS']; // <<< Added FINDER_SETTINGS here
     for (const key of requiredNetworkKeys) {
         if (!networkSpecificConfig[key] || typeof networkSpecificConfig[key] !== 'object' || Object.keys(networkSpecificConfig[key]).length === 0) {
-            throw new Error(`Invalid or empty ${key} definition in ${networkName}.js`);
+            // Added extra check for FINDER_SETTINGS specific needs
+             if (key === 'FINDER_SETTINGS' && (!networkSpecificConfig[key]?.SPATIAL_SIMULATION_INPUT_AMOUNTS || !networkSpecificConfig[key]?.SPATIAL_SIMULATION_INPUT_AMOUNTS['DEFAULT'])) {
+                  throw new Error(`Invalid or incomplete ${key} definition in ${networkName}.js (Check structure and DEFAULT sim amount)`);
+             } else if (key !== 'FINDER_SETTINGS') { // Apply original check to others
+                  throw new Error(`Invalid or empty ${key} definition in ${networkName}.js`);
+             }
+             // If it passed the specific FINDER_SETTINGS check, assign it
+             if (key === 'FINDER_SETTINGS') {
+                 baseConfig[key] = networkSpecificConfig[key];
+                 logger.debug(`[Config Merge] Merged ${key}: ${Object.keys(baseConfig[key]).length} entries`);
+             }
+        } else { // Key exists, is object, and is not empty
+             baseConfig[key] = networkSpecificConfig[key];
+             logger.debug(`[Config Merge] Merged ${key}: ${Object.keys(baseConfig[key]).length} entries`);
         }
-        baseConfig[key] = networkSpecificConfig[key];
-        logger.debug(`[Config Merge] Merged ${key}: ${Object.keys(baseConfig[key]).length} entries`);
     }
+    // --- Specific sub-key validation (remains useful) ---
     if (!baseConfig.MIN_PROFIT_THRESHOLDS.NATIVE || !baseConfig.MIN_PROFIT_THRESHOLDS.DEFAULT) { throw new Error(`MIN_PROFIT_THRESHOLDS missing NATIVE/DEFAULT keys.`); }
     if (!baseConfig.GAS_COST_ESTIMATES.FLASH_SWAP_BASE) { throw new Error(`GAS_COST_ESTIMATES missing FLASH_SWAP_BASE key.`); }
+    if (!baseConfig.FINDER_SETTINGS?.SPATIAL_SIMULATION_INPUT_AMOUNTS?.DEFAULT) { throw new Error(`FINDER_SETTINGS missing SPATIAL_SIMULATION_INPUT_AMOUNTS.DEFAULT key.`); }
+    // --- ---
+
     baseConfig.SUSHISWAP_ROUTER_ADDRESS = process.env[`${networkName.toUpperCase()}_SUSHISWAP_ROUTER_ADDRESS`] || networkSpecificConfig.SUSHISWAP_ROUTER_ADDRESS || null;
     logger.debug(`[Config Merge] SUSHISWAP_ROUTER_ADDRESS: ${baseConfig.SUSHISWAP_ROUTER_ADDRESS || 'Not Set'}`);
     // --- ---
@@ -102,16 +118,38 @@ function loadConfig() {
     logger.debug("-----------------------------------------");
     // --- ---
 
+    // --- ADDED FINAL OBJECT DEBUG LOG ---
+    try {
+        logger.debug('[loadConfig] Final baseConfig object before return:', JSON.stringify(baseConfig, (key, value) =>
+            // Custom replacer to handle complex objects like Token instances and BigInts
+            {
+                if (typeof value === 'bigint') {
+                    return `BigInt(${value.toString()})`; // Mark BigInts explicitly
+                }
+                if (value instanceof Token) {
+                    // Simplify Token objects for logging
+                    return `Token(${value.symbol} ${value.address} Dec:${value.decimals} Chain:${value.chainId})`;
+                }
+                // Add handling for other complex types if they cause stringify issues
+                return value;
+            }
+        , 2)); // Pretty print
+    } catch (stringifyError) {
+         logger.error('[loadConfig] Failed to stringify final config object for debugging:', stringifyError);
+    }
+    // --- END ADDED DEBUG LOG ---
+
+
     logger.info(`[loadConfig] Exiting loadConfig successfully with ${baseConfig.POOL_CONFIGS.length} pools loaded.`);
     return baseConfig;
-}
+} // End loadConfig function
 
 // --- Load and Export Config (Unchanged) ---
 let config;
 console.log('[Config] Attempting to call loadConfig inside try block...');
 try {
     config = loadConfig();
-    const essentialKeys = [ /* ... previous keys ... */ 'GAS_COST_ESTIMATES', 'POOL_CONFIGS']; // Added POOL_CONFIGS check
+    const essentialKeys = ['NAME','CHAIN_ID','TOKENS','RPC_URLS','PRIVATE_KEY','FLASH_SWAP_CONTRACT_ADDRESS','MIN_PROFIT_THRESHOLDS','CHAINLINK_FEEDS','GAS_COST_ESTIMATES', 'POOL_CONFIGS', 'FINDER_SETTINGS']; // Added POOL_CONFIGS & FINDER_SETTINGS check
     const missingEssential = essentialKeys.filter(key => !(key in config) || config[key] === null || config[key] === undefined );
     if (missingEssential.length > 0) { throw new Error(`[Config Export] CRITICAL: Final config missing keys: ${missingEssential.join(', ')}`); }
     if (!Array.isArray(config.POOL_CONFIGS)) { throw new Error(`[Config Export] CRITICAL: POOL_CONFIGS is not an array.`); }
