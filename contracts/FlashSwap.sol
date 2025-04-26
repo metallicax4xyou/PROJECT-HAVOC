@@ -480,7 +480,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
         // Return actual Arbitrum V3 AddressesProvider if needed for more complex interactions,
         // otherwise return the Pool address itself might suffice for basic flash loan receiving.
         // Let's return the known Arbitrum V3 Addresses Provider for correctness.
-        return 0xa97684ead0e402dc232d5a977953df7ecbab3cdb; // Arbitrum V3 Addresses Provider
+        return 0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb; // Arbitrum V3 Addresses Provider (Checksum Corrected)
     }
     function POOL() external view override returns (address) {
         // This MUST return the address of the Aave Pool contract.
