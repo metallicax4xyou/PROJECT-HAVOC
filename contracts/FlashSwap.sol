@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity =0.7.6;
+pragma solidity =0.7.6; // Match periphery library version
 pragma abicoder v2;
 
 // --- Imports ---
@@ -19,8 +19,9 @@ import "./interfaces/IDODOV1V2Pool.sol";
 interface IPool { function flashLoan( address receiverAddress, address[] calldata assets, uint256[] calldata amounts, uint256[] calldata interestRateModes, address onBehalfOf, bytes calldata params, uint16 referralCode ) external; }
 interface IFlashLoanReceiver { function executeOperation( address[] calldata assets, uint256[] calldata amounts, uint256[] calldata premiums, address initiator, bytes calldata params ) external returns (bool); function ADDRESSES_PROVIDER() external view returns (address); function POOL() external view returns (address); }
 
+
 // --- Contract Definition ---
-// --- VERSION v3.10 --- Added TradeProfit Event
+// --- VERSION v3.11 --- Temporarily disable DODO Quote Sell path
 contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using SafeMath for uint256;
@@ -56,9 +57,8 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     event RepaymentSuccess(address indexed token, uint amountRepaid);
     event ProfitTransferred(address indexed token, address indexed recipient, uint amount);
     event EmergencyWithdrawal(address indexed token, address indexed recipient, uint amount);
-    // --- ADDED TradeProfit Event ---
     event TradeProfit(bytes32 indexed pathHash, address indexed token, uint grossProfit, uint feesPaid, uint netProfit);
-    // --- END ADDED Event ---
+
 
     // --- Modifiers ---
     modifier onlyOwner() { require(msg.sender == owner || tx.origin == owner, "FS:NA"); _; }
@@ -67,76 +67,65 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     constructor( address _uniswapV3Router, address _sushiRouter, address _aavePoolAddress, address _aaveAddressesProvider ) { require(_uniswapV3Router != address(0), "FS:IUR"); require(_sushiRouter != address(0), "FS:ISR"); require(_aavePoolAddress != address(0), "FS:IAP"); require(_aaveAddressesProvider != address(0), "FS:IAAP"); SWAP_ROUTER = ISwapRouter(_uniswapV3Router); SUSHI_ROUTER = IUniswapV2Router02(_sushiRouter); AAVE_POOL = IPool(_aavePoolAddress); AAVE_ADDRESSES_PROVIDER = _aaveAddressesProvider; owner = payable(msg.sender); }
 
     // --- Uniswap V3 Flash Callback ---
-    function uniswapV3FlashCallback( uint256 fee0, uint256 fee1, bytes calldata data ) external override nonReentrant {
-        FlashCallbackData memory decodedData = abi.decode(data, (FlashCallbackData)); PoolAddress.PoolKey memory poolKey = PoolAddress.PoolKey({ token0: decodedData.token0, token1: decodedData.token1, fee: decodedData.fee }); require(msg.sender == decodedData.poolBorrowedFrom, "FS:CBW"); CallbackValidation.verifyCallback(V3_FACTORY, poolKey); address tokenBorrowed; uint amountBorrowed; uint totalAmountToRepay; uint feePaid; if (decodedData.amount1Borrowed > 0) { require(decodedData.amount0Borrowed == 0, "FS:BTB"); tokenBorrowed = decodedData.token1; amountBorrowed = decodedData.amount1Borrowed; feePaid = fee1; totalAmountToRepay = amountBorrowed.add(feePaid); } else { require(decodedData.amount1Borrowed == 0 && decodedData.amount0Borrowed > 0, "FS:BNA"); tokenBorrowed = decodedData.token0; amountBorrowed = decodedData.amount0Borrowed; feePaid = fee0; totalAmountToRepay = amountBorrowed.add(feePaid); } emit ArbitrageExecution(decodedData.callbackType, tokenBorrowed, amountBorrowed, feePaid); uint finalAmountReceived; if (decodedData.callbackType == CallbackType.TRIANGULAR) { finalAmountReceived = _executeTriangularSwaps(tokenBorrowed, amountBorrowed, decodedData.params); } else if (decodedData.callbackType == CallbackType.TWO_HOP) { finalAmountReceived = _executeTwoHopSwaps(tokenBorrowed, amountBorrowed, decodedData.params); } else { revert("FS:UCT"); } uint currentBalanceBorrowedToken = IERC20(tokenBorrowed).balanceOf(address(this)); require(currentBalanceBorrowedToken >= totalAmountToRepay, "FS:IFR"); // Check funds *before* repayment
-        uint grossProfit = currentBalanceBorrowedToken > amountBorrowed ? currentBalanceBorrowedToken.sub(amountBorrowed) : 0; // Calculate gross before repay
-        uint netProfit = currentBalanceBorrowedToken > totalAmountToRepay ? currentBalanceBorrowedToken.sub(totalAmountToRepay) : 0; // Calculate net before repay
-        IERC20(tokenBorrowed).safeTransfer(msg.sender, totalAmountToRepay); emit RepaymentSuccess(tokenBorrowed, totalAmountToRepay);
-        // Emit TradeProfit event
-        bytes32 pathHash = keccak256(decodedData.params); // Use params hash as identifier
-        emit TradeProfit(pathHash, tokenBorrowed, grossProfit, feePaid, netProfit);
-        if (netProfit > 0) { emit ProfitTransferred(tokenBorrowed, owner, netProfit); IERC20(tokenBorrowed).safeTransfer(owner, netProfit); }
-    }
+    function uniswapV3FlashCallback( uint256 fee0, uint256 fee1, bytes calldata data ) external override nonReentrant { FlashCallbackData memory decodedData = abi.decode(data, (FlashCallbackData)); PoolAddress.PoolKey memory poolKey = PoolAddress.PoolKey({ token0: decodedData.token0, token1: decodedData.token1, fee: decodedData.fee }); require(msg.sender == decodedData.poolBorrowedFrom, "FS:CBW"); CallbackValidation.verifyCallback(V3_FACTORY, poolKey); address tokenBorrowed; uint amountBorrowed; uint totalAmountToRepay; uint feePaid; if (decodedData.amount1Borrowed > 0) { require(decodedData.amount0Borrowed == 0, "FS:BTB"); tokenBorrowed = decodedData.token1; amountBorrowed = decodedData.amount1Borrowed; feePaid = fee1; totalAmountToRepay = amountBorrowed.add(feePaid); } else { require(decodedData.amount1Borrowed == 0 && decodedData.amount0Borrowed > 0, "FS:BNA"); tokenBorrowed = decodedData.token0; amountBorrowed = decodedData.amount0Borrowed; feePaid = fee0; totalAmountToRepay = amountBorrowed.add(feePaid); } emit ArbitrageExecution(decodedData.callbackType, tokenBorrowed, amountBorrowed, feePaid); uint finalAmountReceived; if (decodedData.callbackType == CallbackType.TRIANGULAR) { finalAmountReceived = _executeTriangularSwaps(tokenBorrowed, amountBorrowed, decodedData.params); } else if (decodedData.callbackType == CallbackType.TWO_HOP) { finalAmountReceived = _executeTwoHopSwaps(tokenBorrowed, amountBorrowed, decodedData.params); } else { revert("FS:UCT"); } uint currentBalanceBorrowedToken = IERC20(tokenBorrowed).balanceOf(address(this)); require(currentBalanceBorrowedToken >= totalAmountToRepay, "FS:IFR"); uint grossProfit = currentBalanceBorrowedToken > amountBorrowed ? currentBalanceBorrowedToken.sub(amountBorrowed) : 0; uint netProfit = currentBalanceBorrowedToken > totalAmountToRepay ? currentBalanceBorrowedToken.sub(totalAmountToRepay) : 0; IERC20(tokenBorrowed).safeTransfer(msg.sender, totalAmountToRepay); emit RepaymentSuccess(tokenBorrowed, totalAmountToRepay); bytes32 pathHash = keccak256(decodedData.params); emit TradeProfit(pathHash, tokenBorrowed, grossProfit, feePaid, netProfit); if (netProfit > 0) { emit ProfitTransferred(tokenBorrowed, owner, netProfit); IERC20(tokenBorrowed).safeTransfer(owner, netProfit); } }
 
     // --- AAVE V3 Flash Loan Callback ---
-    function executeOperation( address[] calldata assets, uint256[] calldata amounts, uint256[] calldata premiums, address initiator, bytes calldata params ) external override nonReentrant returns (bool) {
-        require(msg.sender == address(AAVE_POOL), "FS:CBA"); require(initiator == address(this), "FS:IFI"); require(assets.length == 1, "FS:MA"); require(assets.length == amounts.length && amounts.length == premiums.length, "FS:ALA"); ArbParams memory decodedParams = abi.decode(params, (ArbParams)); address tokenBorrowed = assets[0]; uint amountBorrowed = amounts[0]; uint feePaid = premiums[0]; emit AaveArbitrageExecution(tokenBorrowed, amountBorrowed, feePaid);
-        // --- Execute Arbitrage Path ---
-        uint finalAmountReceived = _executeSwapPath(decodedParams.path); require(finalAmountReceived > 0, "FS:AZA");
-        // --- Repayment & Profit ---
-        uint totalAmountToRepay = amountBorrowed.add(feePaid); uint currentBalanceBorrowedTokenAfterSwaps = IERC20(tokenBorrowed).balanceOf(address(this)); require(currentBalanceBorrowedTokenAfterSwaps >= totalAmountToRepay, "FS:IFR"); // Check funds *before* approval/repayment
-        uint grossProfit = currentBalanceBorrowedTokenAfterSwaps > amountBorrowed ? currentBalanceBorrowedTokenAfterSwaps.sub(amountBorrowed) : 0; // Calculate gross before repay
-        uint netProfit = currentBalanceBorrowedTokenAfterSwaps > totalAmountToRepay ? currentBalanceBorrowedTokenAfterSwaps.sub(totalAmountToRepay) : 0; // Calculate net before repay
-        _approveSpenderIfNeeded(tokenBorrowed, address(AAVE_POOL), totalAmountToRepay); emit RepaymentSuccess(tokenBorrowed, totalAmountToRepay);
-        // Emit TradeProfit event
-        bytes32 pathHash = keccak256(params); // Use params hash as identifier
-        emit TradeProfit(pathHash, tokenBorrowed, grossProfit, feePaid, netProfit);
-        if (netProfit > 0) { emit ProfitTransferred(tokenBorrowed, owner, netProfit); IERC20(tokenBorrowed).safeTransfer(owner, netProfit); } return true;
-    }
+    function executeOperation( address[] calldata assets, uint256[] calldata amounts, uint256[] calldata premiums, address initiator, bytes calldata params ) external override nonReentrant returns (bool) { require(msg.sender == address(AAVE_POOL), "FS:CBA"); require(initiator == address(this), "FS:IFI"); require(assets.length == 1, "FS:MA"); require(assets.length == amounts.length && amounts.length == premiums.length, "FS:ALA"); ArbParams memory decodedParams = abi.decode(params, (ArbParams)); address tokenBorrowed = assets[0]; uint amountBorrowed = amounts[0]; uint feePaid = premiums[0]; emit AaveArbitrageExecution(tokenBorrowed, amountBorrowed, feePaid); uint finalAmountReceived = _executeSwapPath(decodedParams.path); require(finalAmountReceived > 0, "FS:AZA"); uint totalAmountToRepay = amountBorrowed.add(feePaid); uint currentBalanceBorrowedTokenAfterSwaps = IERC20(tokenBorrowed).balanceOf(address(this)); require(currentBalanceBorrowedTokenAfterSwaps >= totalAmountToRepay, "FS:IFR"); uint grossProfit = currentBalanceBorrowedTokenAfterSwaps > amountBorrowed ? currentBalanceBorrowedTokenAfterSwaps.sub(amountBorrowed) : 0; uint netProfit = currentBalanceBorrowedTokenAfterSwaps > totalAmountToRepay ? currentBalanceBorrowedTokenAfterSwaps.sub(totalAmountToRepay) : 0; _approveSpenderIfNeeded(tokenBorrowed, address(AAVE_POOL), totalAmountToRepay); emit RepaymentSuccess(tokenBorrowed, totalAmountToRepay); bytes32 pathHash = keccak256(params); emit TradeProfit(pathHash, tokenBorrowed, grossProfit, feePaid, netProfit); if (netProfit > 0) { emit ProfitTransferred(tokenBorrowed, owner, netProfit); IERC20(tokenBorrowed).safeTransfer(owner, netProfit); } return true; }
 
     // --- Internal functions for UniV3 Flow ---
     function _executeTwoHopSwaps( address _tokenBorrowed, uint _amountBorrowed, bytes memory _params ) internal returns (uint finalAmount) { TwoHopParams memory arbParams = abi.decode(_params, (TwoHopParams)); _approveSpenderIfNeeded(_tokenBorrowed, address(SWAP_ROUTER), _amountBorrowed); uint amountIntermediateReceived = _executeSingleV3Swap( 1, _tokenBorrowed, arbParams.tokenIntermediate, arbParams.feeA, _amountBorrowed, arbParams.amountOutMinimum1 ); require(amountIntermediateReceived > 0, "FS:S1Z"); _approveSpenderIfNeeded(arbParams.tokenIntermediate, address(SWAP_ROUTER), amountIntermediateReceived); finalAmount = _executeSingleV3Swap( 2, arbParams.tokenIntermediate, _tokenBorrowed, arbParams.feeB, amountIntermediateReceived, arbParams.amountOutMinimum2 ); }
     function _executeTriangularSwaps( address _tokenA, uint _amountA, bytes memory _params ) internal returns (uint finalAmount) { TriangularPathParams memory pathParams = abi.decode(_params, (TriangularPathParams)); require(pathParams.tokenA == _tokenA, "FS:TPA"); _approveSpenderIfNeeded(_tokenA, address(SWAP_ROUTER), _amountA); uint amountB = _executeSingleV3Swap( 1, _tokenA, pathParams.tokenB, pathParams.fee1, _amountA, 0 ); require(amountB > 0, "FS:TS1Z"); _approveSpenderIfNeeded(pathParams.tokenB, address(SWAP_ROUTER), amountB); uint amountC = _executeSingleV3Swap( 2, pathParams.tokenB, pathParams.tokenC, pathParams.fee2, amountB, 0 ); require(amountC > 0, "FS:TS2Z"); _approveSpenderIfNeeded(pathParams.tokenC, address(SWAP_ROUTER), amountC); finalAmount = _executeSingleV3Swap( 3, pathParams.tokenC, _tokenA, pathParams.fee3, amountC, pathParams.amountOutMinimumFinal ); }
     function _executeSingleV3Swap( uint _swapNumber, address _tokenIn, address _tokenOut, uint24 _fee, uint _amountIn, uint _amountOutMinimum ) internal returns (uint amountOut) { ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({ tokenIn: _tokenIn, tokenOut: _tokenOut, fee: _fee, recipient: address(this), deadline: block.timestamp + DEADLINE_OFFSET, amountIn: _amountIn, amountOutMinimum: _amountOutMinimum, sqrtPriceLimitX96: 0 }); try SWAP_ROUTER.exactInputSingle(swapParams) returns (uint _amountOut) { amountOut = _amountOut; emit SwapExecuted(_swapNumber, DEX_TYPE_UNISWAP_V3, _tokenIn, _tokenOut, _amountIn, amountOut); } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber), "FL"))); } }
     
-    // --- _executeSwapPath ---
+    // --- _executeSwapPath (DODO Quote Sell Temporarily Disabled) ---
     function _executeSwapPath(SwapStep[] memory path) internal returns (uint finalAmount) {
         require(path.length > 0, "FS:ESP");
-        uint currentAmount = IERC20(path[0].tokenIn).balanceOf(address(this));
+        uint currentAmount = IERC20(path[0].tokenIn).balanceOf(address(this)); // Start with balance from flash loan
 
         for(uint i = 0; i < path.length; i++) {
             SwapStep memory step = path[i];
-            require(currentAmount > 0, "FS:AZS");
+            require(currentAmount > 0, "FS:AZS"); // Amount Zero before Swap
 
             // --- Determine Spender & Approve ---
             address spender;
              if (step.dexType == DEX_TYPE_UNISWAP_V3) { spender = address(SWAP_ROUTER); }
              else if (step.dexType == DEX_TYPE_SUSHISWAP) { spender = address(SUSHI_ROUTER); }
              else if (step.dexType == DEX_TYPE_DODO) { spender = step.pool; }
-             else { revert("FS:UDA"); }
-             _approveSpenderIfNeeded(step.tokenIn, spender, currentAmount);
+             else { revert("FS:UDA"); } // Unknown Dex for Approval
+             _approveSpenderIfNeeded(step.tokenIn, spender, currentAmount); // Approve before swap
             // --- End Approval ---
 
             uint amountOut;
-            if (step.dexType == DEX_TYPE_UNISWAP_V3) {
+            if (step.dexType == DEX_TYPE_UNISWAP_V3) { // Uniswap V3
                  amountOut = _executeSingleV3Swap( i + 1, step.tokenIn, step.tokenOut, step.fee, currentAmount, step.minOut );
                  require(amountOut > 0, "FS:V3SZ");
             }
-            else if (step.dexType == DEX_TYPE_SUSHISWAP) {
+            else if (step.dexType == DEX_TYPE_SUSHISWAP) { // SushiSwap
                  address[] memory sushiPath = new address[](2); sushiPath[0] = step.tokenIn; sushiPath[1] = step.tokenOut; uint deadline = block.timestamp.add(DEADLINE_OFFSET);
                  try SUSHI_ROUTER.swapExactTokensForTokens( currentAmount, step.minOut, sushiPath, address(this), deadline ) returns (uint[] memory amounts) { require(amounts.length == 2, "FS:SLA"); amountOut = amounts[1]; emit SwapExecuted(i + 1, DEX_TYPE_SUSHISWAP, step.tokenIn, step.tokenOut, currentAmount, amountOut); } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:SS", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:SS", _numToString(i+1), "FL"))); }
                  require(amountOut > 0, "FS:SSZ");
             }
-            else if (step.dexType == DEX_TYPE_DODO) {
-                 IDODOV1V2Pool dodoPool = IDODOV1V2Pool(step.pool); address baseToken = dodoPool._BASE_TOKEN_();
+            else if (step.dexType == DEX_TYPE_DODO) { // DODO
+                 IDODOV1V2Pool dodoPool = IDODOV1V2Pool(step.pool);
+                 address baseToken = dodoPool._BASE_TOKEN_();
+
                  if (step.tokenIn == baseToken) {
+                     // Selling the Base Token (Keep Implemented)
                      try dodoPool.sellBaseToken(currentAmount, step.minOut, "") returns (uint quoteReceived) { amountOut = quoteReceived; emit SwapExecuted(i + 1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, currentAmount, amountOut); } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:DSB", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:DSB", _numToString(i+1), "FL"))); }
                  } else {
-                     uint quotePaid; try dodoPool.buyBaseToken( step.minOut, currentAmount, "" ) returns (uint _quotePaid) { quotePaid = _quotePaid; amountOut = step.minOut; emit SwapExecuted(i + 1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, quotePaid, amountOut); } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:DQB", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:DQB", _numToString(i+1), "FL"))); }
+                     // Selling the Quote Token - TEMPORARILY DISABLED
+                     revert("FS:DQD"); // DODO Quote Disabled
+                     /* --- Previous buyBaseToken logic commented out ---
+                     require(step.minOut > 0, "FS:DQA"); // Check if minimum output is valid before proceeding
+                     uint quotePaid;
+                     try dodoPool.buyBaseToken( step.minOut, currentAmount, "" ) returns (uint _quotePaid) { quotePaid = _quotePaid; amountOut = step.minOut; emit SwapExecuted(i + 1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, quotePaid, amountOut); } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:DQB", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:DQB", _numToString(i+1), "FL"))); }
+                     */
                  }
-                 require(amountOut > 0, "FS:DSZ");
+                 require(amountOut > 0, "FS:DSZ"); // Check amountOut > 0 for sellBaseToken path
             }
-             else { revert("FS:UDT"); }
+             else {
+                 revert("FS:UDT"); // Unknown DEX Type in path
+             }
              currentAmount = amountOut;
         }
         finalAmount = currentAmount;
@@ -159,4 +148,4 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     // --- IFlashLoanReceiver Implementation ---
     function ADDRESSES_PROVIDER() external view override returns (address) { return AAVE_ADDRESSES_PROVIDER; }
     function POOL() external view override returns (address) { return address(AAVE_POOL); }
-}
+} // ****** END OF CONTRACT ******
