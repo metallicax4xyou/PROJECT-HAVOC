@@ -1,4 +1,5 @@
 // contracts/interfaces/IUniswapV2Router02.sol
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity >=0.6.2;
 
 interface IUniswapV2Router01 {
