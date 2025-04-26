@@ -3,6 +3,7 @@ pragma solidity =0.7.6; // Match periphery library version
 pragma abicoder v2;
 
 // --- Imports ---
+// ... (imports remain the same) ...
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
@@ -13,63 +14,39 @@ import "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3FlashCallback.s
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
 import "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol";
-
-// --- Interfaces are now imported from separate files ---
 import "./interfaces/IUniswapV2Router02.sol";
 import "./interfaces/IDODOV1V2Pool.sol";
-
-// --- AAVE V3 Imports ---
-interface IPool {
-    function flashLoan(
-        address receiverAddress,
-        address[] calldata assets,
-        uint256[] calldata amounts,
-        uint256[] calldata interestRateModes,
-        address onBehalfOf,
-        bytes calldata params,
-        uint16 referralCode
-    ) external;
-}
-interface IFlashLoanReceiver {
-    function executeOperation(
-        address[] calldata assets,
-        uint256[] calldata amounts,
-        uint256[] calldata premiums,
-        address initiator,
-        bytes calldata params
-    ) external returns (bool);
-
-    function ADDRESSES_PROVIDER() external view returns (address);
-    function POOL() external view returns (address);
-}
-// --- End AAVE V3 Imports ---
+// ... (Aave imports remain the same) ...
+interface IPool { function flashLoan( address receiverAddress, address[] calldata assets, uint256[] calldata amounts, uint256[] calldata interestRateModes, address onBehalfOf, bytes calldata params, uint16 referralCode ) external; }
+interface IFlashLoanReceiver { function executeOperation( address[] calldata assets, uint256[] calldata amounts, uint256[] calldata premiums, address initiator, bytes calldata params ) external returns (bool); function ADDRESSES_PROVIDER() external view returns (address); function POOL() external view returns (address); }
 
 
 // --- Contract Definition ---
-// --- VERSION v3.4 --- Use constant for Addresses Provider address
+// --- VERSION v3.5 --- Store Addresses Provider in immutable variable
 contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using SafeMath for uint256;
 
     // --- State Variables ---
-    ISwapRouter public immutable SWAP_ROUTER; // UniV3 Router
-    IUniswapV2Router02 public immutable SUSHI_ROUTER; // Sushi Router
+    ISwapRouter public immutable SWAP_ROUTER;
+    IUniswapV2Router02 public immutable SUSHI_ROUTER;
     address payable public immutable owner;
     address public immutable V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
     IPool public immutable AAVE_POOL;
+    // +++ ADDED IMMUTABLE VARIABLE +++
+    address public immutable AAVE_ADDRESSES_PROVIDER;
+    // --- REMOVED CONSTANT ---
+    // address constant ARBITRUM_ADDRESSES_PROVIDER = 0xa9768dEaF220135113516e574640BeA2979DBf85;
+
     uint constant DEADLINE_OFFSET = 60;
 
-    // +++ ADDED CONSTANT +++
-    // Arbitrum V3 Addresses Provider (Checksummed)
-    address constant ARBITRUM_ADDRESSES_PROVIDER = 0xa9768dEaF220135113516e574640BeA2979DBf85;
-    // +++ END ADDED CONSTANT +++
-
-    // --- DEX Type Constants ---
+    // --- DEX Type Constants (Unchanged) ---
     uint8 constant DEX_TYPE_UNISWAP_V3 = 0;
     uint8 constant DEX_TYPE_SUSHISWAP = 1;
     uint8 constant DEX_TYPE_DODO = 2;
 
-    // --- Structs ---
+    // --- Structs (Unchanged) ---
+    // ... (CallbackType, FlashCallbackData, TwoHopParams, TriangularPathParams, SwapStep, ArbParams) ...
     enum CallbackType { TWO_HOP, TRIANGULAR }
     struct FlashCallbackData { CallbackType callbackType; uint amount0Borrowed; uint amount1Borrowed; address caller; address poolBorrowedFrom; address token0; address token1; uint24 fee; bytes params; }
     struct TwoHopParams { address tokenIntermediate; uint24 feeA; uint24 feeB; uint amountOutMinimum1; uint amountOutMinimum2; }
@@ -77,7 +54,9 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     struct SwapStep { address pool; address tokenIn; address tokenOut; uint24 fee; uint256 minOut; uint8 dexType; }
     struct ArbParams { SwapStep[] path; address initiator; }
 
-    // --- Events ---
+
+    // --- Events (Unchanged) ---
+    // ... (FlashSwapInitiated, AaveFlashLoanInitiated, etc.) ...
     event FlashSwapInitiated(address indexed caller, address indexed pool, CallbackType tradeType, uint amount0, uint amount1);
     event AaveFlashLoanInitiated(address indexed caller, address indexed asset, uint amount);
     event AaveArbitrageExecution(address indexed tokenBorrowed, uint amountBorrowed, uint feePaid);
@@ -88,23 +67,31 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     event EmergencyWithdrawal(address indexed token, address indexed recipient, uint amount);
 
 
-    // --- Modifiers ---
+    // --- Modifiers (Unchanged) ---
     modifier onlyOwner() {
         require(msg.sender == owner || tx.origin == owner, "FS:NA");
         _;
     }
 
-    // --- Constructor (Unchanged) ---
-    constructor(address _uniswapV3Router, address _sushiRouter, address _aavePoolAddress) {
+    // --- MODIFIED CONSTRUCTOR ---
+    constructor(
+        address _uniswapV3Router,
+        address _sushiRouter,
+        address _aavePoolAddress,
+        address _aaveAddressesProvider // <<< ADDED Argument
+    ) {
         require(_uniswapV3Router != address(0), "FS:IUR");
         require(_sushiRouter != address(0), "FS:ISR");
         require(_aavePoolAddress != address(0), "FS:IAP");
+        require(_aaveAddressesProvider != address(0), "FS:IAAP"); // <<< ADDED Check
 
         SWAP_ROUTER = ISwapRouter(_uniswapV3Router);
         SUSHI_ROUTER = IUniswapV2Router02(_sushiRouter);
         AAVE_POOL = IPool(_aavePoolAddress);
+        AAVE_ADDRESSES_PROVIDER = _aaveAddressesProvider; // <<< ADDED Assignment
         owner = payable(msg.sender);
     }
+    // --- END MODIFIED CONSTRUCTOR ---
 
 
     // --- Uniswap V3 Flash Callback (Unchanged) ---
@@ -136,21 +123,21 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     function initiateTriangularFlashSwap( address _poolAddress, uint _amount0, uint _amount1, bytes calldata _params ) external onlyOwner { require(_poolAddress != address(0), "FS:IP"); require((_amount0 > 0 && _amount1 == 0) || (_amount1 > 0 && _amount0 == 0), "FS:BAO"); require(_params.length > 0, "FS:EP"); IUniswapV3Pool pool = IUniswapV3Pool(_poolAddress); address token0 = pool.token0(); address token1 = pool.token1(); uint24 fee = pool.fee(); emit FlashSwapInitiated(msg.sender, _poolAddress, CallbackType.TRIANGULAR, _amount0, _amount1); FlashCallbackData memory callbackData = FlashCallbackData({ callbackType: CallbackType.TRIANGULAR, amount0Borrowed: _amount0, amount1Borrowed: _amount1, caller: msg.sender, poolBorrowedFrom: _poolAddress, token0: token0, token1: token1, fee: fee, params: _params }); pool.flash( address(this), _amount0, _amount1, abi.encode(callbackData) ); }
     function initiateAaveFlashLoan( address[] memory assets, uint256[] memory amounts, bytes calldata params ) external onlyOwner { require(assets.length == 1 && amounts.length == 1, "FS:SAA"); require(amounts[0] > 0, "FS:AZA"); require(params.length > 0, "FS:EP"); emit AaveFlashLoanInitiated(msg.sender, assets[0], amounts[0]); uint256[] memory modes = new uint256[](1); modes[0] = 0; AAVE_POOL.flashLoan( address(this), assets, amounts, modes, address(this), params, 0 ); }
 
-    // --- Emergency Withdrawal (Using .call) & Fallback ---
+    // --- Emergency Withdrawal (Unchanged) ---
     function withdrawEther() external onlyOwner {
         uint balance = address(this).balance;
-        require(balance > 0, "FS:NEF"); // No Ether Found
+        require(balance > 0, "FS:NEF");
         (bool success, ) = owner.call{value: balance}("");
-        require(success, "FS:ETF"); // Ether Transfer Failed
+        require(success, "FS:ETF");
         emit EmergencyWithdrawal(address(0), owner, balance);
     }
     function withdrawToken(address tokenAddress) external onlyOwner { require(tokenAddress != address(0), "FS:ZTA"); uint balance = IERC20(tokenAddress).balanceOf(address(this)); if (balance > 0) { IERC20(tokenAddress).safeTransfer(owner, balance); emit EmergencyWithdrawal(tokenAddress, owner, balance); } }
     receive() external payable {}
 
-    // --- IFlashLoanReceiver Implementation (Using Constant) ---
+    // --- IFlashLoanReceiver Implementation (MODIFIED TO RETURN IMMUTABLE VARIABLE) ---
     function ADDRESSES_PROVIDER() external view override returns (address) {
-        // Return the constant defined above
-        return ARBITRUM_ADDRESSES_PROVIDER; // <<< MODIFIED
+        // Return the immutable state variable set in constructor
+        return AAVE_ADDRESSES_PROVIDER; // <<< MODIFIED
     }
     function POOL() external view override returns (address) { return address(AAVE_POOL); }
 } // ****** END OF CONTRACT ******
