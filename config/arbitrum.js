@@ -53,7 +53,7 @@ const ARBITRUM_CONFIG = {
 
     // Gas & Profitability Settings
     GAS_COST_ESTIMATES: GAS_COST_ESTIMATES,
-    MIN_PROFIT_THRESHOLDS: { NATIVE: 0.000021, DEFAULT: 0.000021 }, // Use numbers
+    MIN_PROFIT_THRESHOLDS: { NATIVE: 0.0001, DEFAULT: 0.0001 }, // Use numbers
     MAX_GAS_GWEI: 1, // Max gas price in Gwei
     GAS_ESTIMATE_BUFFER_PERCENT: 25, // % buffer added to path-based gas limit
     FALLBACK_GAS_LIMIT: 3000000, // Default gas limit if base estimate missing
