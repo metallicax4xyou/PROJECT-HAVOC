@@ -4,12 +4,23 @@
 const { ethers } = require('ethers');
 const logger = require('./logger');
 const { ArbitrageError } = require('./errorHandler');
-const ErrorHandler = require('./errorHandler');
+const ErrorHandler = require('./errorHandler'); // Ensure ErrorHandler is imported
 // const TxParamBuilder = require('../core/tx/paramBuilder'); // Keep commented if using lazy require
-const { ABIS } = require('../constants/abis');
+const { ABIS } = require('../constants/abis'); // Need FlashSwap ABI for interface
 
+// Ensure FlashSwap ABI is loaded for encoding function calls
 let flashSwapInterface;
-if (!ABIS.FlashSwap) { /* ... Interface init ... */ logger.error('[GasEstimator Init] CRITICAL: FlashSwap ABI not found in ABIS constant.'); flashSwapInterface = null; } else { try { flashSwapInterface = new ethers.Interface(ABIS.FlashSwap); } catch (abiError) { logger.error('[GasEstimator Init] CRITICAL: Failed to create Interface from FlashSwap ABI.', abiError); flashSwapInterface = null; } }
+if (!ABIS.FlashSwap) {
+    logger.error('[GasEstimator Init] CRITICAL: FlashSwap ABI not found in ABIS constant.');
+    flashSwapInterface = null; // Mark as unavailable
+} else {
+    try {
+        flashSwapInterface = new ethers.Interface(ABIS.FlashSwap);
+    } catch (abiError) {
+        logger.error('[GasEstimator Init] CRITICAL: Failed to create Interface from FlashSwap ABI.', abiError);
+        flashSwapInterface = null;
+    }
+}
 
 
 class GasEstimator {
@@ -28,26 +39,80 @@ class GasEstimator {
         logger.info(`[GasEstimator v1.8] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`);
     }
 
-    async getFeeData() { /* ... unchanged ... */ try { const feeData = await this.provider.getFeeData(); if (!feeData || (!feeData.gasPrice && !feeData.maxFeePerGas)) { logger.warn('[GasEstimator] Fetched feeData is missing both gasPrice and maxFeePerGas.'); return null; } return feeData; } catch (error) { logger.error(`[GasEstimator] Failed to get fee data: ${error.message}`); return null; } }
-    getEffectiveGasPrice(feeData) { /* ... unchanged ... */ if (!feeData) return null; let effectivePrice = 0n; if (feeData.maxFeePerGas) { effectivePrice = feeData.maxFeePerGas; } else if (feeData.gasPrice) { effectivePrice = feeData.gasPrice; } else { logger.warn('[GasEstimator] No valid gas price (maxFeePerGas or gasPrice) in feeData.'); return null; } if (effectivePrice > this.maxGasPriceGwei) { logger.warn(`[GasEstimator] Clamping effective gas price ${ethers.formatUnits(effectivePrice, 'gwei')} Gwei to MAX ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei.`); return this.maxGasPriceGwei; } return effectivePrice; }
+    async getFeeData() {
+        try {
+             const feeData = await this.provider.getFeeData();
+             if (!feeData || (!feeData.gasPrice && !feeData.maxFeePerGas)) {
+                logger.warn('[GasEstimator] Fetched feeData is missing both gasPrice and maxFeePerGas.');
+                 return null;
+             }
+             return feeData;
+         } catch (error) {
+             logger.error(`[GasEstimator] Failed to get fee data: ${error.message}`);
+             return null;
+         }
+    }
 
+    getEffectiveGasPrice(feeData) {
+         if (!feeData) return null;
+         let effectivePrice = 0n;
+
+         if (feeData.maxFeePerGas) { effectivePrice = feeData.maxFeePerGas; }
+         else if (feeData.gasPrice) { effectivePrice = feeData.gasPrice; }
+         else { logger.warn('[GasEstimator] No valid gas price (maxFeePerGas or gasPrice) in feeData.'); return null; }
+
+         if (effectivePrice > this.maxGasPriceGwei) {
+              logger.warn(`[GasEstimator] Clamping effective gas price ${ethers.formatUnits(effectivePrice, 'gwei')} Gwei to MAX ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei.`);
+              return this.maxGasPriceGwei;
+         }
+         return effectivePrice;
+    }
+
+    /**
+     * Encodes minimal transaction calldata for either UniV3 or Aave flash loan for gas estimation check.
+     * Uses minimal amounts (1 wei borrow, 0 min out, adjusted to 1 for DODO quote sell).
+     * @param {object} opportunity The opportunity object.
+     * @param {string} providerType 'UNIV3' or 'AAVE'.
+     * @returns {{ calldata: string, contractFunctionName: string } | null} Encoded data and function name, or null on error.
+     * @private Internal helper method
+     */
     async _encodeMinimalCalldataForEstimate(opportunity, providerType) {
         const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.8]`; // Version bump
-        if (!flashSwapInterface) { /* ... */ logger.error(`${logPrefix} FlashSwap Interface not available. Cannot encode.`); return null; }
-        let TxParamBuilder; try { TxParamBuilder = require('../core/tx/paramBuilder'); } catch (requireError) { logger.error(`${logPrefix} Failed to require main TxParamBuilder: ${requireError.message}`); return null; }
+        if (!flashSwapInterface) {
+             logger.error(`${logPrefix} FlashSwap Interface not available. Cannot encode.`);
+             return null;
+        }
+
+        // Import main builder index lazily inside function scope to potentially help with circular deps
+        let TxParamBuilder;
+        try {
+             TxParamBuilder = require('../core/tx/paramBuilder');
+        } catch (requireError) {
+             logger.error(`${logPrefix} Failed to require main TxParamBuilder: ${requireError.message}`);
+             return null;
+        }
+
 
         try {
+            // Minimal simulation result placeholder for builders
+            // Note: finalAmount=0n is key, hop1AmountOut is for buildTwoHopParams
             const minimalSimResult = { initialAmount: 1n, hop1AmountOut: 0n, finalAmount: 0n };
             let builderFunction;
             let buildResult;
 
             if (providerType === 'UNIV3') {
                  const dexPath = opportunity.path.map(p => p.dex).join('->');
-                 if (opportunity.type === 'spatial' && dexPath === 'uniswapV3->uniswapV3') { builderFunction = TxParamBuilder.buildTwoHopParams; }
-                 else if (opportunity.type === 'triangular') { builderFunction = TxParamBuilder.buildTriangularParams; }
-                 else { throw new Error(`Unsupported opportunity type/path for UniV3 estimateGas encoding: ${opportunity.type} / ${dexPath}`); }
+                 if (opportunity.type === 'spatial' && dexPath === 'uniswapV3->uniswapV3') {
+                     builderFunction = TxParamBuilder.buildTwoHopParams;
+                 } else if (opportunity.type === 'triangular') {
+                     builderFunction = TxParamBuilder.buildTriangularParams;
+                 } else {
+                     throw new Error(`Unsupported opportunity type/path for UniV3 estimateGas encoding: ${opportunity.type} / ${dexPath}`);
+                 }
                  if (!builderFunction) throw new Error("UniV3 builder function not found in TxParamBuilder.");
+
                  buildResult = builderFunction(opportunity, minimalSimResult, this.config);
+
                  const encodedParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [buildResult.params]);
                  const borrowPoolState = opportunity.path[0].poolState;
                  if (!borrowPoolState || !borrowPoolState.token0?.address || !borrowPoolState.token1?.address) { throw new Error("Invalid V3 borrow pool state for estimateGas encoding."); }
@@ -62,36 +127,40 @@ class GasEstimator {
             } else if (providerType === 'AAVE') {
                  builderFunction = TxParamBuilder.buildAavePathParams;
                  if (!builderFunction) throw new Error("Aave builder function not found in TxParamBuilder exports.");
-                 const tempManager = { getSignerAddress: async () => ethers.ZeroAddress };
+                 const tempManager = { getSignerAddress: async () => ethers.ZeroAddress }; // Placeholder!
                  // Call builder with minimal sim results
                  buildResult = await builderFunction(opportunity, minimalSimResult, this.config, tempManager);
 
                  // --- ADJUSTMENT for DODO QUOTE SELL during estimation ---
-                 // If any step involves selling quote on DODO, set its minOut to 1 instead of 0 for the estimation encoding
-                 // This prevents reverts in buyBaseToken when amount=0
-                 let adjustedParams = { ...buildResult.params }; // Create a shallow copy to modify
-                 let needsReEncoding = false;
-                 for(let i = 0; i < adjustedParams.path.length; i++) {
-                     const step = adjustedParams.path[i];
+                 let adjustedParams = { ...buildResult.params }; // Create a shallow copy
+                 let adjustedPath = [...adjustedParams.path]; // Create a shallow copy of the path array
+                 adjustedParams.path = adjustedPath; // Assign the copied path array back
+
+                 let needsReEncoding = false; // Flag if adjustment occurred
+                 for(let i = 0; i < adjustedPath.length; i++) {
+                     const step = adjustedPath[i];
                      // Check if it's a DODO step AND selling the quote token (tokenIn != baseToken)
-                     const poolInfo = this.config.POOL_CONFIGS?.find(p => p.address.toLowerCase() === step.pool.toLowerCase());
+                     // Need pool info from config to find base token
+                     const poolInfo = this.config.POOL_CONFIGS?.find(p => p.address.toLowerCase() === step.pool.toLowerCase() && p.dexType === 'dodo');
                      const baseTokenSymbol = poolInfo?.baseTokenSymbol;
                      const baseToken = baseTokenSymbol ? this.config.TOKENS[baseTokenSymbol] : null;
 
                      if (step.dexType === 2 /* DEX_TYPE_DODO */ && baseToken && step.tokenIn.toLowerCase() !== baseToken.address.toLowerCase()) {
-                          // This is a DODO quote sell. If minOut is currently 0, set it to 1 for estimation.
-                          if (step.minOut === 0n || step.minOut === '0') {
-                              logger.debug(`${logPrefix} Adjusting DODO quote sell minOut from 0 to 1 for step ${i} during gas estimation.`);
-                              // IMPORTANT: Modify the *copy* of the path array element
-                              adjustedParams.path[i] = { ...step, minOut: 1n };
-                              needsReEncoding = true; // We need to re-encode with the adjusted params
+                          // This is a DODO quote sell. If minOut is currently 0 (from minimalSimResult), set it to 1 for estimation.
+                          // We need to check the original buildResult param's minOut value
+                          if (buildResult.params.path[i].minOut === 0n) {
+                              logger.debug(`${logPrefix} Adjusting DODO quote sell minOut from 0 to 1 for step ${i} during gas estimation encoding.`);
+                              // IMPORTANT: Modify the step object within the *copied* path array
+                              adjustedPath[i] = { ...step, minOut: 1n }; // Use 1n (BigInt one)
+                              needsReEncoding = true; // Indicate we need to encode the adjustedParams
                           }
                      }
                  }
                  // --- END ADJUSTMENT ---
 
-                 // Encode the parameters struct (potentially adjusted)
-                 const encodedArbParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [adjustedParams]);
+                 // Encode the parameters struct (use adjustedParams if needed, otherwise original)
+                 const paramsToEncode = needsReEncoding ? adjustedParams : buildResult.params;
+                 const encodedArbParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [paramsToEncode]);
 
                  // Determine Args (amount = 1 wei)
                  const args = [[buildResult.borrowTokenAddress], [1n], encodedArbParamsBytes];
@@ -107,6 +176,13 @@ class GasEstimator {
         }
     }
 
+    /**
+     * Estimates gas cost using path-based heuristics & performs an estimateGas check
+     * using provider-specific calldata (UniV3 or Aave).
+     * @param {object} opportunity The opportunity object.
+     * @param {string} signerAddress The address of the bot's signer wallet.
+     * @returns {Promise<{ pathGasLimit: bigint, effectiveGasPrice: bigint, totalCostWei: bigint, estimateGasSuccess: boolean } | null>}
+     */
     async estimateTxGasCost(opportunity, signerAddress) {
         const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey}]`;
         logger.debug(`${logPrefix} Starting path-based gas estimation & validity check...`);
@@ -160,10 +236,11 @@ class GasEstimator {
                 from: signerAddress
             });
             estimateGasSuccess = true;
-            logger.debug(`${logPrefix} estimateGas check PASSED.`); // <<< HOPEFULLY WE SEE THIS!
+            logger.debug(`${logPrefix} estimateGas check PASSED.`); // <<< WE WANT TO SEE THIS!
         } catch (error) {
              let reason = error.reason || error.code || error.message;
              logger.warn(`${logPrefix} estimateGas check FAILED for ${contractFunctionName} (TX likely reverts): ${reason}. Marking opportunity invalid.`);
+             // Use the imported ErrorHandler
              ErrorHandler.handleError(error, `GasEstimator estimateGas Check (${contractFunctionName})`);
              estimateGasSuccess = false;
         }
