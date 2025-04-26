@@ -1,6 +1,6 @@
 // config/arbitrum.js
-// --- VERSION v3.3 ---
-// Updated MIN_PROFIT_THRESHOLDS target ~$0.10. Includes FINDER_SETTINGS.
+// --- VERSION v3.4 ---
+// Adds AAVE V3 Pool Address and Fee BPS.
 
 const { ethers } = require('ethers'); // Required for FINDER_SETTINGS
 
@@ -18,22 +18,22 @@ const UNISWAP_V3_POOLS = [
     { name: 'USDC_DAI_V3', token0Symbol: 'USDC', token1Symbol: 'DAI', borrowTokenSymbol: 'USDC', feeTierToEnvMap: { '100': 'ARBITRUM_USDC_DAI_100_ADDRESS' } },
 ];
 
-// --- Define SushiSwap Pools (Corrected Fees: 30 bps) ---
+// --- Define SushiSwap Pools ---
 const SUSHISWAP_POOLS = [
     { name: 'WETH_USDCe_SUSHI', token0Symbol: 'WETH', token1Symbol: 'USDC.e', fee: 30, poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDC_E_ADDRESS' },
     { name: 'WBTC_WETH_SUSHI', token0Symbol: 'WBTC', token1Symbol: 'WETH', fee: 30, poolAddressEnv: 'ARBITRUM_SUSHI_WBTC_WETH_ADDRESS' },
     { name: 'WETH_USDT_SUSHI', token0Symbol: 'WETH', token1Symbol: 'USDT', fee: 30, poolAddressEnv: 'ARBITRUM_SUSHI_WETH_USDT_ADDRESS' },
 ];
 
-// --- Define DODO Pools (Corrected Fees - Verify!) ---
+// --- Define DODO Pools ---
 const DODO_POOLS = [
-    { name: 'WETH_USDCE_DODO', token0Symbol: 'WETH', token1Symbol: 'USDC.e', baseTokenSymbol: 'WETH', poolAddressEnv: 'ARBITRUM_DODO_WETH_USDCE_ADDRESS', fee: 100 }, // Assuming 0.1% = 100 bps
-    { name: 'USDT_USDCE_DODO', token0Symbol: 'USDT', token1Symbol: 'USDC.e', baseTokenSymbol: 'USDT', poolAddressEnv: 'ARBITRUM_DODO_USDT_USDCE_ADDRESS', fee: 10 }, // Assuming 0.01% = 10 bps
+    { name: 'WETH_USDCE_DODO', token0Symbol: 'WETH', token1Symbol: 'USDC.e', baseTokenSymbol: 'WETH', poolAddressEnv: 'ARBITRUM_DODO_WETH_USDCE_ADDRESS', fee: 100 },
+    { name: 'USDT_USDCE_DODO', token0Symbol: 'USDT', token1Symbol: 'USDC.e', baseTokenSymbol: 'USDT', poolAddressEnv: 'ARBITRUM_DODO_USDT_USDCE_ADDRESS', fee: 10 },
 ];
 
-// --- Gas Cost Estimates (Tune these based on observation!) ---
+// --- Gas Cost Estimates ---
 const GAS_COST_ESTIMATES = {
-    FLASH_SWAP_BASE: 350000n,
+    FLASH_SWAP_BASE: 350000n, // Might need separate base costs for UniV3 vs Aave later
     UNISWAP_V3_SWAP: 180000n,
     SUSHISWAP_V2_SWAP: 120000n,
     DODO_SWAP: 200000n,
@@ -41,12 +41,25 @@ const GAS_COST_ESTIMATES = {
 
 // --- Combine and Export ---
 const ARBITRUM_CONFIG = {
+    // Network Specific Contracts & Feeds
     CHAINLINK_FEEDS: CHAINLINK_FEEDS_CONFIG,
+    AAVE_POOL_ADDRESS: process.env.ARBITRUM_AAVE_POOL_ADDRESS || "0x794a61358D6845594F94dc1DB02A252b5b4814aD", // Load Aave Pool address from env, fallback to known value
+    SUSHISWAP_ROUTER_ADDRESS: process.env.ARBITRUM_SUSHISWAP_ROUTER_ADDRESS || '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506', // Load Sushi Router address from env
+
+    // Pool Definitions
     UNISWAP_V3_POOLS: UNISWAP_V3_POOLS,
     SUSHISWAP_POOLS: SUSHISWAP_POOLS,
     DODO_POOLS: DODO_POOLS,
-    GAS_COST_ESTIMATES: GAS_COST_ESTIMATES,
 
+    // Gas & Profitability Settings
+    GAS_COST_ESTIMATES: GAS_COST_ESTIMATES,
+    MIN_PROFIT_THRESHOLDS: { NATIVE: '0.00006', DEFAULT: '0.00006' },
+    MAX_GAS_GWEI: 1, // Max gas price in Gwei
+    GAS_ESTIMATE_BUFFER_PERCENT: 25, // % buffer added to path-based gas limit
+    FALLBACK_GAS_LIMIT: 3000000, // Default gas limit if base estimate missing
+    PROFIT_BUFFER_PERCENT: 10, // % buffer applied to net profit before comparing vs threshold
+
+    // Finder Specific Settings
     FINDER_SETTINGS: {
         SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS: 5n,
         SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS: 5000n,
@@ -61,19 +74,10 @@ const ARBITRUM_CONFIG = {
         },
     },
 
-    // --- UPDATED MIN_PROFIT_THRESHOLDS ---
-    MIN_PROFIT_THRESHOLDS: {
-         NATIVE: '0.00006', // ~$0.10 @ $1800 ETH. Minimum profit in ETH after gas+buffer.
-         DEFAULT: '0.00006', // Set default same as native for consistency
-         // Add token-specific thresholds if needed, e.g., 'USDC': '0.1' (minimum 0.1 USDC profit)
-    },
-    // --- END UPDATED SECTION ---
+    // Flash Loan Fees
+    AAVE_FLASH_LOAN_FEE_BPS: 9n, // 0.09% as BigInt BPS
+    UNIV3_FLASH_LOAN_FEE_BPS: 0n, // Uniswap V3 flash fee is paid via gas/swap fees
 
-    MAX_GAS_GWEI: 1,
-    GAS_ESTIMATE_BUFFER_PERCENT: 25,
-    FALLBACK_GAS_LIMIT: 3000000,
-    PROFIT_BUFFER_PERCENT: 10,
-    SUSHISWAP_ROUTER_ADDRESS: '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506',
 };
 
 module.exports = ARBITRUM_CONFIG;
