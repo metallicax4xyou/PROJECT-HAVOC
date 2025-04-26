@@ -1,38 +1,34 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.33 ---
-// Reverted V3-only filter, restored default BIPS threshold.
+// --- VERSION v1.4 --- Reads thresholds and sim amounts from config.
 
-const { ethers } = require('ethers');
-const { formatUnits } = require('ethers'); // Added for logging convenience
-const logger = require('../../utils/logger'); // Adjust path if needed
-const { getCanonicalPairKey } = require('../../utils/pairUtils'); // Adjust path if needed
-const { getUniV3Price, getV2Price, getDodoPrice, BIGNUMBER_1E18 } = require('../../utils/priceUtils'); // Adjust path if needed
-const { TOKENS } = require('../../constants/tokens'); // Adjust path if needed
+const { ethers, formatUnits } = require('ethers'); // Import formatUnits for logging if needed
+const logger = require('../../utils/logger');
+const { getCanonicalPairKey } = require('../../utils/pairUtils');
+const { getUniV3Price, getV2Price, getDodoPrice, BIGNUMBER_1E18 } = require('../../utils/priceUtils');
+const { TOKENS } = require('../../constants/tokens'); // Still needed for token info fallback if not on pool state
 
-// --- Configuration ---
-// *** RESTORED THRESHOLD - ADJUST AS NEEDED ***
-// Minimum net difference (after fees) between the buy price on one pool
-// and the sell price on another, expressed in basis points (1/100th of 1%).
-// Example: 5n = 0.05% net profit margin required *before* gas costs.
-const MIN_NET_PRICE_DIFFERENCE_BIPS = 5n; // Restore to your preferred value!
-// *** --- ***
-const MAX_REASONABLE_PRICE_DIFF_BIPS = 5000n; // 50% sanity check
+// --- Constants ---
 const BASIS_POINTS_DENOMINATOR = 10000n;
-
-// Simulation Input Amounts (Consider centralizing this in config/constants)
-const SIMULATION_INPUT_AMOUNTS = {
-    'USDC':   ethers.parseUnits('100', 6), 'USDC.e': ethers.parseUnits('100', 6),
-    'USDT':   ethers.parseUnits('100', 6), 'DAI':    ethers.parseUnits('100', 18),
-    'WETH':   ethers.parseUnits('0.1', 18), 'WBTC':   ethers.parseUnits('0.01', 8),
-    // Add others as needed
-};
 
 class SpatialFinder {
     constructor(config) {
-        // Store the main config object if needed for other thresholds later
-        this.config = config; // Keep if MAIN_PROFIT_THRESHOLD etc. are needed here
+        // Validate that required settings exist in the passed config
+        if (!config?.FINDER_SETTINGS?.SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS ||
+            !config?.FINDER_SETTINGS?.SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS ||
+            !config?.FINDER_SETTINGS?.SPATIAL_SIMULATION_INPUT_AMOUNTS ||
+            !config?.FINDER_SETTINGS?.SPATIAL_SIMULATION_INPUT_AMOUNTS['DEFAULT']) { // Ensure DEFAULT exists
+            throw new Error("[SpatialFinder Init] Missing required FINDER_SETTINGS (or DEFAULT sim amount) in configuration.");
+        }
+        this.config = config;
         this.pairRegistry = new Map();
-        logger.info(`[SpatialFinder v1.33] Initialized. Min Net BIPS Threshold: ${MIN_NET_PRICE_DIFFERENCE_BIPS}`);
+
+        // Read values from config and store them on the instance
+        this.minNetPriceDiffBips = BigInt(this.config.FINDER_SETTINGS.SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS);
+        this.maxReasonablePriceDiffBips = BigInt(this.config.FINDER_SETTINGS.SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS);
+        // Store the simulation amounts map directly
+        this.simulationInputAmounts = this.config.FINDER_SETTINGS.SPATIAL_SIMULATION_INPUT_AMOUNTS;
+
+        logger.info(`[SpatialFinder v1.4] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length}`);
     }
 
     updatePairRegistry(registry) {
@@ -49,40 +45,33 @@ class SpatialFinder {
                 case 'uniswapv3':
                     if (poolState.sqrtPriceX96) { return getUniV3Price(poolState.sqrtPriceX96, token0, token1); }
                     break;
-                case 'sushiswap': // Assuming V2 logic
+                case 'sushiswap':
                     if (poolState.reserve0 !== undefined && poolState.reserve1 !== undefined) {
-                        if (poolState.reserve0 === 0n || poolState.reserve1 === 0n) return null; // Avoid division by zero
+                        if (poolState.reserve0 === 0n || poolState.reserve1 === 0n) return null;
                         return getV2Price(poolState.reserve0, poolState.reserve1, token0, token1);
                     }
                     break;
                 case 'dodo':
                     if (poolState.queryAmountOutWei !== undefined && poolState.queryBaseToken && poolState.queryQuoteToken) {
-                        // DODO price logic needs careful handling based on which token is base/quote
                         const priceBaseInQuote = getDodoPrice(poolState.queryAmountOutWei, poolState.queryBaseToken, poolState.queryQuoteToken);
                         if (priceBaseInQuote === null) return null;
-                        // We need the price of token0 in terms of token1 (like UniV3/V2)
-                        // Check if pool's baseToken matches our token0
+                        // Ensure token addresses are compared case-insensitively
                         if (token0.address.toLowerCase() === poolState.queryBaseToken.address.toLowerCase()) {
                             return priceBaseInQuote; // Price is already token0 quoted in token1
-                        } else {
+                        } else if (token1.address.toLowerCase() === poolState.queryBaseToken.address.toLowerCase()) {
                             // The pool's base is our token1, so we need the inverse price
                             if (priceBaseInQuote === 0n) return null; // Avoid division by zero
-                            // Inverse: price(T0 in T1) = 1 / price(T1 in T0) -> Scaled: (1e18 * 1e18) / priceBaseInQuote
                             return (BIGNUMBER_1E18 * BIGNUMBER_1E18) / priceBaseInQuote;
+                        } else {
+                             logger.warn(`[SF._CalcPrice] DODO pool tokens don't match expected base/quote for ${poolState.address}`);
+                             return null;
                         }
                     }
                     break;
-                 // Add Camelot fetcher case if/when integrated
-                // case 'camelot':
-                //     if (poolState.reserve0 !== undefined && poolState.reserve1 !== undefined) {
-                //        // Assuming standard V2 logic for Camelot for now
-                //        return getV2Price(poolState.reserve0, poolState.reserve1, token0, token1);
-                //     }
-                //     break;
                 default:
-                    logger.warn(`[SF._CalcPrice] Unknown or unsupported dexType for price calculation: ${dexType} for pool ${poolState.address}`);
+                    logger.warn(`[SF._CalcPrice] Unknown dexType for price calc: ${dexType} @ ${poolState.address}`);
             }
-        } catch (error) { logger.error(`[SF._CalcPrice] Error calculating price for ${poolState.name || poolState.address}: ${error.message}`); }
+        } catch (error) { logger.error(`[SF._CalcPrice] Error calc price ${poolState.address}: ${error.message}`); }
         return null;
     }
 
@@ -98,8 +87,7 @@ class SpatialFinder {
         poolStates.forEach(state => { if (state?.address) poolStateMap.set(state.address.toLowerCase(), state); });
 
         for (const [canonicalKey, poolAddressesSet] of this.pairRegistry.entries()) {
-            // logger.debug(`[SF] Processing pair: ${canonicalKey}`); // Uncomment for deep debug
-            if (poolAddressesSet.size < 2) continue; // Need at least two pools for the same pair
+            if (poolAddressesSet.size < 2) continue;
 
             const relevantPoolStates = [];
             poolAddressesSet.forEach(addr => {
@@ -108,209 +96,162 @@ class SpatialFinder {
             });
             if (relevantPoolStates.length < 2) continue;
 
-            // Calculate prices *once* per pool state in this cycle
             const poolsWithPrices = relevantPoolStates
                 .map(pool => ({ ...pool, price0_1_scaled: this._calculatePrice(pool) }))
-                .filter(p => p.price0_1_scaled !== null && p.price0_1_scaled > 0n); // Filter out pools where price calc failed or is zero
+                .filter(p => p.price0_1_scaled !== null && p.price0_1_scaled > 0n);
 
-            if (poolsWithPrices.length < 2) continue; // Need at least two valid prices to compare
+            if (poolsWithPrices.length < 2) continue;
 
-            // logger.debug(`[SF] Comparing ${poolsWithPrices.length} pools for pair ${canonicalKey}...`); // Uncomment for deep debug
-
-            // Compare every pool with every other pool for the same pair
             for (let i = 0; i < poolsWithPrices.length; i++) {
                 for (let j = i + 1; j < poolsWithPrices.length; j++) {
                     const poolA = poolsWithPrices[i];
                     const poolB = poolsWithPrices[j];
 
-                    // Ensure tokens are valid before proceeding (should be guaranteed by registry, but belt-and-suspenders)
-                    if (!poolA.token0 || !poolA.token1 || !poolB.token0 || !poolB.token1) {
-                         logger.warn(`[SF] Missing token info during comparison: ${poolA.address} vs ${poolB.address}`);
-                         continue;
-                    }
-                     // Ensure tokens match canonical key (should be guaranteed, but check)
-                    if (poolA.token0.address !== poolB.token0.address || poolA.token1.address !== poolB.token1.address) {
-                         logger.warn(`[SF] Token mismatch within canonical pair comparison: ${poolA.name} vs ${poolB.name}`);
-                         continue;
+                    if (!poolA.token0 || !poolA.token1 || !poolB.token0 || !poolB.token1) { continue; }
+                    // Ensure tokens match (case-insensitive address check)
+                    if (poolA.token0.address.toLowerCase() !== poolB.token0.address.toLowerCase() ||
+                        poolA.token1.address.toLowerCase() !== poolB.token1.address.toLowerCase()) {
+                            logger.warn(`[SF] Token mismatch within canonical pair comparison: ${poolA.name} vs ${poolB.name}`);
+                            continue;
                     }
 
-                    const rawPriceA = poolA.price0_1_scaled; // Price of T0 in terms of T1 on Pool A
-                    const rawPriceB = poolB.price0_1_scaled; // Price of T0 in terms of T1 on Pool B
+                    const rawPriceA = poolA.price0_1_scaled; // Price of T0 in terms of T1
+                    const rawPriceB = poolB.price0_1_scaled; // Price of T0 in terms of T1
 
-                    // --- Sanity Check: Prevent huge unrealistic differences ---
+                    // --- Sanity Check --- Use value from config ---
                     const rawPriceDiff = rawPriceA > rawPriceB ? rawPriceA - rawPriceB : rawPriceB - rawPriceA;
                     const minRawPrice = rawPriceA < rawPriceB ? rawPriceA : rawPriceB;
-                    if (minRawPrice === 0n) continue; // Avoid division by zero if a price somehow is zero
+                    if (minRawPrice === 0n) continue; // Avoid division by zero
                     const rawDiffBips = (rawPriceDiff * BASIS_POINTS_DENOMINATOR) / minRawPrice;
-                    if (rawDiffBips > MAX_REASONABLE_PRICE_DIFF_BIPS) {
-                        // logger.warn(`[SF] Skipping implausible raw price diff > ${MAX_REASONABLE_PRICE_DIFF_BIPS} BIPS between ${poolA.name} (${formatUnits(rawPriceA, 18)}) and ${poolB.name} (${formatUnits(rawPriceB, 18)})`);
+                    if (rawDiffBips > this.maxReasonablePriceDiffBips) { // Use config value
+                        // logger.warn(`[SF] Skipping implausible raw price diff > ${this.maxReasonablePriceDiffBips} BIPS between ${poolA.name} and ${poolB.name}`);
                         continue;
                     }
 
                     // --- Fee Adjustment ---
-                    // Get fees - Use defaults if missing (though they should be fetched)
-                    // Note: DODO fees are complex (base/quote side, taker/maker), using a placeholder for now. Needs refinement.
-                    // Note: Sushi uses a standard 30 bips usually.
-                    const feeA_bips = BigInt(poolA.fee ?? (poolA.dexType === 'sushiswap' ? 30 : (poolA.dexType === 'dodo' ? 30 : 30))); // Default 30 bips (0.3%) if fee missing/unexpected DEX
-                    const feeB_bips = BigInt(poolB.fee ?? (poolB.dexType === 'sushiswap' ? 30 : (poolB.dexType === 'dodo' ? 30 : 30)));
+                    // TODO: Improve fee handling - maybe fetcher provides better fee data?
+                    // Using low defaults for DODO based on comment in config file. Verify these!
+                    const feeA_bips = BigInt(poolA.fee ?? (poolA.dexType === 'sushiswap' ? 30 : (poolA.dexType === 'dodo' ? 10 : 30)));
+                    const feeB_bips = BigInt(poolB.fee ?? (poolB.dexType === 'sushiswap' ? 30 : (poolB.dexType === 'dodo' ? 10 : 30)));
                     const sellMultiplierA = BASIS_POINTS_DENOMINATOR - feeA_bips;
                     const sellMultiplierB = BASIS_POINTS_DENOMINATOR - feeB_bips;
 
-                    // Effective price when SELLING token0 on each pool (receive token1)
                     const effectiveSellPriceA_0for1 = (rawPriceA * sellMultiplierA) / BASIS_POINTS_DENOMINATOR;
                     const effectiveSellPriceB_0for1 = (rawPriceB * sellMultiplierB) / BASIS_POINTS_DENOMINATOR;
 
-                    // Opportunity: Buy T0 low on Pool X, Sell T0 high on Pool Y
-                    // We need to compare the *effective sell price* on one pool against the *raw buy price* on the other.
-                    // Buy T0 on A (means paying rawPriceA T1 per T0), Sell T0 on B (means receiving effectiveSellPriceB_0for1 T1 per T0)
-                    // Profit if effectiveSellPriceB_0for1 > rawPriceA
-
-                    // Buy T0 on B (means paying rawPriceB T1 per T0), Sell T0 on A (means receiving effectiveSellPriceA_0for1 T1 per T0)
-                    // Profit if effectiveSellPriceA_0for1 > rawPriceB
-
-                    let poolBuy = null; // Pool where we buy T0 (pay T1)
-                    let poolSell = null; // Pool where we sell T0 (receive T1)
-                    let netDiffBips = 0n; // Net difference in basis points
-                    let buyToken0 = false; // Flag: are we buying token0 or token1 initially?
+                    let poolBuy = null; let poolSell = null; let netDiffBips = 0n;
 
                     // Scenario 1: Buy T0 on A, Sell T0 on B
                     if (effectiveSellPriceB_0for1 > rawPriceA) {
                         netDiffBips = ((effectiveSellPriceB_0for1 - rawPriceA) * BASIS_POINTS_DENOMINATOR) / rawPriceA;
-                        if (netDiffBips >= MIN_NET_PRICE_DIFFERENCE_BIPS) {
-                            poolBuy = poolA;
-                            poolSell = poolB;
-                            buyToken0 = true; // We are buying token0 on poolBuy, selling on poolSell
-                            // logger.debug(`[SF] Scenario 1 Check: effSellB=${formatUnits(effectiveSellPriceB_0for1, 18)} > rawBuyA=${formatUnits(rawPriceA, 18)}. Net Bips: ${netDiffBips}`);
+                        if (netDiffBips >= this.minNetPriceDiffBips) { // Use config value
+                            poolBuy = poolA; poolSell = poolB;
                         }
                     }
 
                     // Scenario 2: Buy T0 on B, Sell T0 on A
-                    if (!poolBuy && effectiveSellPriceA_0for1 > rawPriceB) { // Check only if Scenario 1 wasn't profitable
+                    if (!poolBuy && effectiveSellPriceA_0for1 > rawPriceB) {
                         netDiffBips = ((effectiveSellPriceA_0for1 - rawPriceB) * BASIS_POINTS_DENOMINATOR) / rawPriceB;
-                        if (netDiffBips >= MIN_NET_PRICE_DIFFERENCE_BIPS) {
-                            poolBuy = poolB;
-                            poolSell = poolA;
-                            buyToken0 = true; // We are buying token0 on poolBuy, selling on poolSell
-                             // logger.debug(`[SF] Scenario 2 Check: effSellA=${formatUnits(effectiveSellPriceA_0for1, 18)} > rawBuyB=${formatUnits(rawPriceB, 18)}. Net Bips: ${netDiffBips}`);
+                        if (netDiffBips >= this.minNetPriceDiffBips) { // Use config value
+                            poolBuy = poolB; poolSell = poolA;
                         }
                     }
 
-                    // If an opportunity to buy/sell T0 was found, create the opportunity object
                     if (poolBuy && poolSell) {
                         const t0Sym = poolA.token0.symbol; const t1Sym = poolA.token1.symbol;
-                        // Log prices consistently (price of T0 in terms of T1)
-                        const buyPriceFormatted = formatUnits( poolBuy === poolA ? rawPriceA : rawPriceB, 18 );
-                        const sellPriceFormatted = formatUnits( poolSell === poolA ? effectiveSellPriceA_0for1 : effectiveSellPriceB_0for1, 18 );
+                        logger.info(`[SpatialFinder] NET Opportunity Found! Pair: ${t0Sym}/${t1Sym} (Diff: ${netDiffBips} Bips >= Threshold: ${this.minNetPriceDiffBips})`);
+                        logger.info(`  Buy ${t0Sym} on ${poolBuy.dexType} (${poolBuy.address.substring(0,6)}...) | Sell ${t0Sym} on ${poolSell.dexType} (${poolSell.address.substring(0,6)}...)`);
 
-                        logger.info(`[SpatialFinder] NET Opportunity Found! Pair: ${t0Sym}/${t1Sym}`);
-                        logger.info(`  Buy ${t0Sym} on ${poolBuy.dexType} (${poolBuy.address.substring(0,6)}...) @ Raw Price ~${buyPriceFormatted} ${t1Sym}/${t0Sym}`);
-                        logger.info(`  Sell ${t0Sym} on ${poolSell.dexType} (${poolSell.address.substring(0,6)}...) @ Eff. Price ~${sellPriceFormatted} ${t1Sym}/${t0Sym}`);
-                        logger.info(`  Net Diff (Bips): ${netDiffBips.toString()} (Threshold: ${MIN_NET_PRICE_DIFFERENCE_BIPS.toString()})`);
-
-                        const opportunity = this._createOpportunity(poolBuy, poolSell, canonicalKey, buyToken0); // Pass buyToken0 flag
-                        if (opportunity) { // Check if opportunity creation succeeded
-                           opportunities.push(opportunity);
-                        }
+                        const opportunity = this._createOpportunity(poolBuy, poolSell, canonicalKey);
+                        if (opportunity) { opportunities.push(opportunity); }
                     }
                 } // End inner loop (j)
             } // End outer loop (i)
         } // End loop over canonical pairs
 
-        logger.info(`[SpatialFinder] Finished scan. Found ${opportunities.length} potential spatial opportunities (using NET threshold: ${MIN_NET_PRICE_DIFFERENCE_BIPS}).`);
+        logger.info(`[SpatialFinder] Finished scan. Found ${opportunities.length} potential spatial opportunities (using NET threshold: ${this.minNetPriceDiffBips}).`);
         return opportunities;
     }
 
-    _createOpportunity(poolBuy, poolSell, canonicalKey, buyToken0) {
-        // Determine the initial token to borrow based on the trade direction
-        // If buyToken0 is true: We buy T0 on poolBuy (spending T1), sell T0 on poolSell (receiving T1)
-        // -> Borrow T1, swap T1->T0 on poolBuy, swap T0->T1 on poolSell, repay T1
-        // If buyToken0 is false: We buy T1 on poolBuy (spending T0), sell T1 on poolSell (receiving T0)
-        // -> Borrow T0, swap T0->T1 on poolBuy, swap T1->T0 on poolSell, repay T0
-
-        // Let's stick to the convention: price0_1 means price of T0 in terms of T1.
-        // The logic above found opportunities based on buying/selling T0.
-        // So, we borrow T1, buy T0 (poolBuy), sell T0 (poolSell), repay T1.
-
-        const tokenToBorrow = poolBuy.token1; // T1
-        const tokenIntermediate = poolBuy.token0; // T0
+    _createOpportunity(poolBuy, poolSell, canonicalKey) {
+        // Determine the initial token to borrow (T1) and intermediate token (T0)
+        // Assuming T0/T1 are consistent within the canonical pair
+        const tokenToBorrow = poolBuy.token1; // Borrow T1
+        const tokenIntermediate = poolBuy.token0; // Intermediate T0
 
         if (!tokenToBorrow || !tokenIntermediate) {
             logger.error(`[SF._createOpp] Critical: Missing token definitions for pools ${poolBuy.name} / ${poolSell.name}`);
             return null;
         }
 
-        // Determine simulation amount based on the token we BORROW (tokenToBorrow)
-        const simulationAmountIn = SIMULATION_INPUT_AMOUNTS[tokenToBorrow.symbol] || SIMULATION_INPUT_AMOUNTS['WETH'] || ethers.parseEther('0.1'); // Fallback if symbol not in map
+        // Determine simulation amount based on the token we BORROW (T1) using config map
+        // Use BigInt directly from config map, falling back to DEFAULT
+        const simulationAmountIn = this.simulationInputAmounts[tokenToBorrow.symbol] || this.simulationInputAmounts['DEFAULT'];
+        if (!simulationAmountIn || typeof simulationAmountIn !== 'bigint' || simulationAmountIn <= 0n) {
+             logger.error(`[SF._createOpp] Could not determine valid simulation input amount for ${tokenToBorrow.symbol}. Using DEFAULT failed or invalid.`);
+             return null; // Cannot create opportunity without valid input amount
+        }
 
-        const getPairSymbols = (pool) => [pool.token0?.symbol || '?', pool.token1?.symbol || '?'];
+
+        // Function to extract only necessary state for simulation
+        // Ensure all fields potentially needed by any simulator are included
         const extractSimState = (pool) => ({
              address: pool.address, dexType: pool.dexType, fee: pool.fee,
-             sqrtPriceX96: pool.sqrtPriceX96, tick: pool.tick, // V3 specific
-             reserve0: pool.reserve0, reserve1: pool.reserve1, // V2 specific
-             // DODO specific (pass what's needed for simulation)
-             queryAmountOutWei: pool.queryAmountOutWei, // Or other relevant state like B, Q, K, R etc. if needed
-             baseTokenSymbol: pool.baseTokenSymbol,
-             queryBaseToken: pool.queryBaseToken,
-             queryQuoteToken: pool.queryQuoteToken,
-             // Pass tokens for simulation logic
-             token0: pool.token0,
-             token1: pool.token1
+             // V3
+             sqrtPriceX96: pool.sqrtPriceX96, tick: pool.tick,
+             // V2
+             reserve0: pool.reserve0, reserve1: pool.reserve1,
+             // DODO (pass all potentially relevant fetched fields)
+             queryAmountOutWei: pool.queryAmountOutWei,
+             baseTokenSymbol: pool.baseTokenSymbol, // Needed by DODO sim
+             queryBaseToken: pool.queryBaseToken, // Needed by DODO sim
+             queryQuoteToken: pool.queryQuoteToken, // Needed by DODO sim
+             // Always include tokens (ensure they are objects)
+             token0: pool.token0, token1: pool.token1
         });
 
-        // Construct the path object carefully
-        // Path describes the sequence of swaps needed to execute the arbitrage
-        // We borrowed T1 (tokenToBorrow), need to end with more T1 to repay loan + profit
-        // 1. Swap T1 -> T0 on poolBuy
-        // 2. Swap T0 -> T1 on poolSell
-
+        // Construct the path object for the opportunity
         return {
             type: 'spatial',
             pairKey: canonicalKey,
-            tokenIn: tokenToBorrow,         // Token to borrow (T1)
-            tokenIntermediate: tokenIntermediate, // Intermediate token (T0)
-            tokenOut: tokenToBorrow,        // Token to repay (T1)
+            tokenIn: tokenToBorrow, // Token object to borrow (T1)
+            tokenIntermediate: tokenIntermediate, // Intermediate token object (T0)
+            tokenOut: tokenToBorrow, // Token object to repay (T1)
 
-            // Path structure matching simulator expectation:
-            // Each element describes one swap hop.
             path: [
                 // Hop 1: Buy T0 using T1 on poolBuy
                 {
                     dex: poolBuy.dexType,
                     address: poolBuy.address,
-                    // Swap T1 for T0
+                    fee: poolBuy.fee,
+                    // Pass symbols/addresses for clarity/potential use elsewhere if needed
                     tokenInSymbol: tokenToBorrow.symbol,
                     tokenOutSymbol: tokenIntermediate.symbol,
                     tokenInAddress: tokenToBorrow.address,
                     tokenOutAddress: tokenIntermediate.address,
                     poolState: extractSimState(poolBuy), // Pass necessary state for simulation
-                    fee: poolBuy.fee // Pass fee if needed by simulator
                 },
                 // Hop 2: Sell T0 for T1 on poolSell
                 {
                     dex: poolSell.dexType,
                     address: poolSell.address,
-                    // Swap T0 for T1
+                    fee: poolSell.fee,
+                    // Pass symbols/addresses
                     tokenInSymbol: tokenIntermediate.symbol,
                     tokenOutSymbol: tokenToBorrow.symbol,
                     tokenInAddress: tokenIntermediate.address,
                     tokenOutAddress: tokenToBorrow.address,
                     poolState: extractSimState(poolSell), // Pass necessary state for simulation
-                    fee: poolSell.fee // Pass fee if needed by simulator
                 }
             ],
-
-            // Initial amount IN for simulation (amount of tokenToBorrow)
+            // Use BigInt amount from config map, convert to string for the object
             amountIn: simulationAmountIn.toString(),
-            // Placeholder for simulation result
-            amountOut: '0',
-            // Estimated gas (placeholder, filled by GasEstimator)
-            gasEstimate: '0',
-            // Estimated profit (placeholder, filled by ProfitCalculator)
-            estimatedProfit: '0',
-            // Timestamp for tracking
+            amountOut: '0', // Placeholder, filled by ProfitCalculator
+            gasEstimate: '0', // Placeholder, filled by ProfitCalculator
+            estimatedProfit: '0', // Placeholder, maybe not used?
             timestamp: Date.now()
         };
      }
-}
+} // End SpatialFinder class
 
 module.exports = SpatialFinder;
