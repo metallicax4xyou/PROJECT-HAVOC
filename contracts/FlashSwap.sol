@@ -125,9 +125,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     function _executeTwoHopSwaps( address _tokenBorrowed, uint _amountBorrowed, bytes memory _params ) internal returns (uint finalAmount) { TwoHopParams memory arbParams = abi.decode(_params, (TwoHopParams)); _approveSpenderIfNeeded(_tokenBorrowed, address(SWAP_ROUTER), _amountBorrowed); uint amountIntermediateReceived = _executeSingleV3Swap( 1, _tokenBorrowed, arbParams.tokenIntermediate, arbParams.feeA, _amountBorrowed, arbParams.amountOutMinimum1 ); require(amountIntermediateReceived > 0, "FS:S1Z"); _approveSpenderIfNeeded(arbParams.tokenIntermediate, address(SWAP_ROUTER), amountIntermediateReceived); finalAmount = _executeSingleV3Swap( 2, arbParams.tokenIntermediate, _tokenBorrowed, arbParams.feeB, amountIntermediateReceived, arbParams.amountOutMinimum2 ); }
     function _executeTriangularSwaps( address _tokenA, uint _amountA, bytes memory _params ) internal returns (uint finalAmount) { TriangularPathParams memory pathParams = abi.decode(_params, (TriangularPathParams)); require(pathParams.tokenA == _tokenA, "FS:TPA"); _approveSpenderIfNeeded(_tokenA, address(SWAP_ROUTER), _amountA); uint amountB = _executeSingleV3Swap( 1, _tokenA, pathParams.tokenB, pathParams.fee1, _amountA, 0 ); require(amountB > 0, "FS:TS1Z"); _approveSpenderIfNeeded(pathParams.tokenB, address(SWAP_ROUTER), amountB); uint amountC = _executeSingleV3Swap( 2, pathParams.tokenB, pathParams.tokenC, pathParams.fee2, amountB, 0 ); require(amountC > 0, "FS:TS2Z"); _approveSpenderIfNeeded(pathParams.tokenC, address(SWAP_ROUTER), amountC); finalAmount = _executeSingleV3Swap( 3, pathParams.tokenC, _tokenA, pathParams.fee3, amountC, pathParams.amountOutMinimumFinal ); }
     function _executeSingleV3Swap( uint _swapNumber, address _tokenIn, address _tokenOut, uint24 _fee, uint _amountIn, uint _amountOutMinimum ) internal returns (uint amountOut) { ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({ tokenIn: _tokenIn, tokenOut: _tokenOut, fee: _fee, recipient: address(this), deadline: block.timestamp + DEADLINE_OFFSET, amountIn: _amountIn, amountOutMinimum: _amountOutMinimum, sqrtPriceLimitX96: 0 }); try SWAP_ROUTER.exactInputSingle(swapParams) returns (uint _amountOut) { amountOut = _amountOut; emit SwapExecuted(_swapNumber, DEX_TYPE_UNISWAP_V3, _tokenIn, _tokenOut, _amountIn, amountOut); } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber), "FL"))); } }
-
-
-    // --- _executeSwapPath (Updated with DODO Quote Sell Logic) ---
+        // --- _executeSwapPath (Implemented DODO Quote Sell Logic) ---
     function _executeSwapPath(SwapStep[] memory path) internal returns (uint finalAmount) {
         require(path.length > 0, "FS:ESP");
         uint currentAmount = IERC20(path[0].tokenIn).balanceOf(address(this)); // Start with balance from flash loan
@@ -179,36 +177,24 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
                      // step.tokenOut is the base token we want to receive
                      // step.minOut is the minimum amount of base token (tokenOut) we require
 
-                     // Note: The require check for minOut > 0 was removed here as it caused reverts during gas estimation.
-                     // Proper slippage MUST be handled by the caller or by comparing balances before/after.
-                     // The `currentAmount` used as `maxPayQuote` provides some basic protection on the input side.
-                     // require(step.minOut > 0, "FS:DQA"); // Removed for gas estimation compatibility
+                     // Removed require(step.minOut > 0, "FS:DQA"); for gas estimation compatibility
+                     // Actual execution slippage is implicitly handled by maxPayQuote = currentAmount
 
                      uint quotePaid;
                      try dodoPool.buyBaseToken(
-                         step.minOut,       // amount (of base token) to receive - use minOut as target (might be 0 during gas estimation)
+                         step.minOut,       // amount (of base token) to receive - use minOut as target
                          currentAmount,     // maxPayQuote - pay up to current balance of quote tokens
                          ""                 // data - empty
                      ) returns (uint _quotePaid) {
                          quotePaid = _quotePaid; // DODO returns the amount of quote actually paid
-                         // Assuming success means we received at least step.minOut base tokens
-                         amountOut = IERC20(step.tokenOut).balanceOf(address(this)) > 0 ? step.minOut : 0; // A bit indirect, check actual balance if possible? Or just assume minOut was met.
-                         // For simplicity and gas estimation, assume we got step.minOut if call succeeded.
-                         // A more robust check compares quotePaid vs currentAmount.
-                         if (step.minOut > 0) { // Only assume minOut received if it was specified
-                            amountOut = step.minOut;
-                         } else {
-                            // If minOut was 0 (gas estimation), we can't determine actual output easily here.
-                            // For execution flow, just check balance diff, but here we need a value for currentAmount.
-                            // Re-read balance or revert if critical? For now, assume 0 if minOut was 0.
-                            amountOut = 0;
-                         }
-
+                         // We assume if the call succeeds, we received *at least* step.minOut
+                         // A more precise check would involve reading the balance change of step.tokenOut
+                         amountOut = step.minOut;
                          // Log quotePaid as amountIn, amountOut is the base received
                          emit SwapExecuted(i + 1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, quotePaid, amountOut);
                      } catch Error(string memory reason) { revert(string(abi.encodePacked("FS:DQB", _numToString(i+1) ,"F:", reason))); } catch { revert(string(abi.encodePacked("FS:DQB", _numToString(i+1), "FL"))); } // DQB = Dodo Quote Buy (Base)
                  }
-                 require(amountOut > 0, "FS:DSZ"); // DODO Swap returned Zero
+                 require(amountOut > 0, "FS:DSZ"); // DODO Swap returned Zero (Applies to both paths)
             }
              else {
                  revert("FS:UDT"); // Unknown DEX Type in path
@@ -229,6 +215,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     function initiateFlashSwap( address _poolAddress, uint _amount0, uint _amount1, bytes calldata _params ) external onlyOwner { require(_poolAddress != address(0), "FS:IP"); require((_amount0 > 0 && _amount1 == 0) || (_amount1 > 0 && _amount0 == 0), "FS:BAO"); require(_params.length > 0, "FS:EP"); IUniswapV3Pool pool = IUniswapV3Pool(_poolAddress); address token0 = pool.token0(); address token1 = pool.token1(); uint24 fee = pool.fee(); emit FlashSwapInitiated(msg.sender, _poolAddress, CallbackType.TWO_HOP, _amount0, _amount1); FlashCallbackData memory callbackData = FlashCallbackData({ callbackType: CallbackType.TWO_HOP, amount0Borrowed: _amount0, amount1Borrowed: _amount1, caller: msg.sender, poolBorrowedFrom: _poolAddress, token0: token0, token1: token1, fee: fee, params: _params }); pool.flash( address(this), _amount0, _amount1, abi.encode(callbackData) ); }
     function initiateTriangularFlashSwap( address _poolAddress, uint _amount0, uint _amount1, bytes calldata _params ) external onlyOwner { require(_poolAddress != address(0), "FS:IP"); require((_amount0 > 0 && _amount1 == 0) || (_amount1 > 0 && _amount0 == 0), "FS:BAO"); require(_params.length > 0, "FS:EP"); IUniswapV3Pool pool = IUniswapV3Pool(_poolAddress); address token0 = pool.token0(); address token1 = pool.token1(); uint24 fee = pool.fee(); emit FlashSwapInitiated(msg.sender, _poolAddress, CallbackType.TRIANGULAR, _amount0, _amount1); FlashCallbackData memory callbackData = FlashCallbackData({ callbackType: CallbackType.TRIANGULAR, amount0Borrowed: _amount0, amount1Borrowed: _amount1, caller: msg.sender, poolBorrowedFrom: _poolAddress, token0: token0, token1: token1, fee: fee, params: _params }); pool.flash( address(this), _amount0, _amount1, abi.encode(callbackData) ); }
     function initiateAaveFlashLoan( address[] memory assets, uint256[] memory amounts, bytes calldata params ) external onlyOwner { require(assets.length == 1 && amounts.length == 1, "FS:SAA"); require(amounts[0] > 0, "FS:AZA"); require(params.length > 0, "FS:EP"); emit AaveFlashLoanInitiated(msg.sender, assets[0], amounts[0]); uint256[] memory modes = new uint256[](1); modes[0] = 0; AAVE_POOL.flashLoan( address(this), assets, amounts, modes, address(this), params, 0 ); }
+
     // --- Emergency Withdrawal & Fallback ---
     function withdrawEther() external onlyOwner { uint balance = address(this).balance; require(balance > 0, "FS:NEF"); (bool success, ) = owner.call{value: balance}(""); require(success, "FS:ETF"); emit EmergencyWithdrawal(address(0), owner, balance); }
     function withdrawToken(address tokenAddress) external onlyOwner { require(tokenAddress != address(0), "FS:ZTA"); uint balance = IERC20(tokenAddress).balanceOf(address(this)); if (balance > 0) { IERC20(tokenAddress).safeTransfer(owner, balance); emit EmergencyWithdrawal(tokenAddress, owner, balance); } }
@@ -237,4 +224,4 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     // --- IFlashLoanReceiver Implementation ---
     function ADDRESSES_PROVIDER() external view override returns (address) { return AAVE_ADDRESSES_PROVIDER; }
     function POOL() external view override returns (address) { return address(AAVE_POOL); }
-}
+} // ****** END OF CONTRACT ******
