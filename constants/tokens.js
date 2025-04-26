@@ -1,5 +1,5 @@
 // /workspaces/arbitrum-flash/constants/tokens.js
-// --- FINALIZED: CHAINID, TYPE, NEW TOKENS, VERIFIED ADDRESSES ---
+// --- VERSION Corrected USDC.e canonicalSymbol ---
 
 const { Token } = require('@uniswap/sdk-core');
 
@@ -32,10 +32,13 @@ const _USDC = createTokenWithMetadata(
     { canonicalSymbol: 'USDC', type: 'stablecoin' }
 );
 
+// --- CORRECTED USDC.e canonicalSymbol ---
 const _USDCe = createTokenWithMetadata(
     ARBITRUM_CHAIN_ID, '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8', 6, 'USDC.e', 'USD Coin Bridged',
-    { canonicalSymbol: 'USDC', type: 'stablecoin-bridged' } // Maps to USDC
+    { canonicalSymbol: 'USDC.e', type: 'stablecoin-bridged' } // Use 'USDC.e', NOT 'USDC'
+    // Previous value was 'USDC', causing incorrect pairing
 );
+// --- END CORRECTION ---
 
 const _USDT = createTokenWithMetadata(
     ARBITRUM_CHAIN_ID, '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', 6, 'USDT', 'Tether USD',
@@ -100,6 +103,8 @@ const ARBITRUM_TOKENS = {
 };
 
 // --- Export based on current network ---
+// Use a basic logger here as the main one might not be initialized yet during require time
+const _log = { info: console.log, warn: console.warn, error: console.error, debug: console.log };
 const networkName = process.env.NETWORK?.toLowerCase() || 'arbitrum';
 let TOKENS_TO_EXPORT;
 switch (networkName) {
@@ -107,18 +112,11 @@ switch (networkName) {
         TOKENS_TO_EXPORT = ARBITRUM_TOKENS;
         break;
     default:
-        (console.warn || console.log)(`[tokens.js] Network "${networkName}" not explicitly configured in tokens.js, defaulting to Arbitrum tokens.`);
+        _log.warn(`[tokens.js] Network "${networkName}" not explicitly configured in tokens.js, defaulting to Arbitrum tokens.`);
         TOKENS_TO_EXPORT = ARBITRUM_TOKENS;
 }
 
-// Ensure logger is defined or imported - replace if necessary
-const logger = { info: console.log, warn: console.warn, error: console.error, debug: console.log };
-logger.info(`[tokens.js] Exporting tokens for network: ${networkName}`);
-
-// Optional: Debug log to verify metadata after loading
-// Object.values(TOKENS_TO_EXPORT).forEach(token => {
-//    logger.debug(`[tokens.js] Token: ${token.symbol}, Addr: ${token.address}, Canon: ${token.canonicalSymbol}, Type: ${token.type}, ChainId: ${token.chainId}`);
-// });
+_log.info(`[tokens.js] Exporting tokens for network: ${networkName}`);
 
 module.exports = {
     TOKENS: TOKENS_TO_EXPORT,
