@@ -56,7 +56,7 @@ const ARBITRUM_CONFIG = {
     MIN_PROFIT_THRESHOLDS: { NATIVE: 0.0001, DEFAULT: 0.0001 }, // Use numbers
     MAX_GAS_GWEI: 1, // Max gas price in Gwei
     GAS_ESTIMATE_BUFFER_PERCENT: 25, // % buffer added to path-based gas limit
-    FALLBACK_GAS_LIMIT: 3000000, // Default gas limit if base estimate missing
+    FALLBACK_GAS_LIMIT: 5000000, // Default gas limit if base estimate missing
     PROFIT_BUFFER_PERCENT: 10, // % buffer applied to net profit before comparing vs threshold
 
     // Finder Specific Settings
