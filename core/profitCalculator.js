@@ -1,107 +1,91 @@
-// core/profitCalculator.js
-// --- VERSION v2.6 --- Refactored helpers to profitCalcUtils.js
+// core/profitCalcUtils.js
+// Helper functions for ProfitCalculator logic.
+// --- VERSION v1.1 --- Adds calculateMinAmountOut
 
 const { ethers } = require('ethers');
-const logger = require('../utils/logger');
-// Removed direct dependency on priceFeed here, helpers use it
-const GasEstimator = require('../utils/gasEstimator');
-const { ArbitrageError } = require('../utils/errorHandler');
-const { TOKENS } = require('../constants/tokens');
-const SwapSimulator = require('./swapSimulator');
+const logger = require('../utils/logger'); // Adjust path if needed
+const { convertTokenAmountToNative } = require('../utils/priceFeed'); // Adjust path
+const { ArbitrageError } = require('../utils/errorHandler'); // Adjust path
 
-// --- Import Helper Functions ---
-const ProfitCalcUtils = require('./profitCalcUtils');
-// --- ---
-
-class ProfitCalculator {
-    // Constructor remains largely unchanged, stores instances needed by helpers
-    constructor(config, provider, swapSimulator, gasEstimator) {
-        logger.debug('[ProfitCalculator] Initializing...');
-        if (!config) throw new ArbitrageError('PC Init', 'Config missing.');
-        if (!provider) throw new ArbitrageError('PC Init', 'Provider missing.');
-        if (!swapSimulator?.simulateSwap) throw new ArbitrageError('PC Init', 'Simulator invalid.');
-        if (!gasEstimator?.estimateTxGasCost) throw new ArbitrageError('PC Init', 'GasEstimator invalid.');
-        if (!config.MIN_PROFIT_THRESHOLDS?.NATIVE || !config.MIN_PROFIT_THRESHOLDS?.DEFAULT) { throw new Error(`Config missing MIN_PROFIT_THRESHOLDS NATIVE/DEFAULT keys.`); }
-        if (!config.CHAINLINK_FEEDS || Object.keys(config.CHAINLINK_FEEDS).length === 0) { logger.warn(`[PC Init] Config missing CHAINLINK_FEEDS.`); }
-        if (config.AAVE_FLASH_LOAN_FEE_BPS === undefined || typeof config.AAVE_FLASH_LOAN_FEE_BPS !== 'bigint') { logger.warn(`[PC Init] Config missing/invalid AAVE_FLASH_LOAN_FEE_BPS.`); this.aaveFeeBps = 0n;} else { this.aaveFeeBps = config.AAVE_FLASH_LOAN_FEE_BPS;}
-
-        this.config = config;
-        this.provider = provider;
-        this.swapSimulator = swapSimulator; // Needed by simulatePath helper
-        this.gasEstimator = gasEstimator; // Needed by estimateGas helper
-        this.minProfitThresholdsConfig = this.config.MIN_PROFIT_THRESHOLDS;
-        this.profitBufferPercent = BigInt(this.config.PROFIT_BUFFER_PERCENT || 5); // Needed by checkThreshold helper
-        this.nativeSymbol = this.config.NATIVE_CURRENCY_SYMBOL || 'ETH'; // Needed by helpers
-        this.nativeToken = Object.values(TOKENS).find(t => t?.symbol === this.nativeSymbol) || { decimals: 18, symbol: 'ETH', address: ethers.ZeroAddress, type:'native' }; // Needed by helpers
-        this.nativeDecimals = this.nativeToken.decimals; // Needed by helpers
-        this.chainlinkFeeds = this.config.CHAINLINK_FEEDS || {}; // Needed by helpers
-
-        logger.info(`[ProfitCalculator v2.6] Initialized. Helpers moved to profitCalcUtils. Handles Aave fee (${this.aaveFeeBps} BPS).`);
+// +++ ADDED FUNCTION +++
+/**
+ * Calculates the minimum amount out based on slippage tolerance.
+ * @param {bigint | null | undefined} amountOut The simulated output amount.
+ * @param {number} slippageToleranceBps Slippage tolerance in basis points (e.g., 10 for 0.1%).
+ * @returns {bigint} The minimum amount out acceptable after slippage.
+ */
+function calculateMinAmountOut(amountOut, slippageToleranceBps) {
+    const logPrefix = '[profitCalcUtils]'; // Add prefix for clarity
+    // Validate amountOut is a positive BigInt
+    if (amountOut === null || amountOut === undefined || typeof amountOut !== 'bigint' || amountOut <= 0n) {
+        logger.warn(`${logPrefix} [calculateMinAmountOut] Invalid input: amountOut=${amountOut}. Returning 0n.`);
+        return 0n; // Return 0 if input is invalid or non-positive
+    }
+    // Validate slippage is a non-negative number
+    if (typeof slippageToleranceBps !== 'number' || slippageToleranceBps < 0 || isNaN(slippageToleranceBps)) {
+        logger.warn(`${logPrefix} [calculateMinAmountOut] Invalid slippageToleranceBps: ${slippageToleranceBps}. Using 0 BPS.`);
+        slippageToleranceBps = 0; // Default to 0 if invalid
     }
 
-    // Keep this internal method here as it's simple and uses instance config
-    _getMinProfitThresholdWei(profitToken) {
-        if (!profitToken || !profitToken.symbol) return this.config.MIN_PROFIT_THRESHOLDS?.DEFAULT || 0n;
-        const threshold = this.minProfitThresholdsConfig[profitToken.symbol.toUpperCase()] || this.minProfitThresholdsConfig.NATIVE || this.minProfitThresholdsConfig.DEFAULT;
-        try { const thresholdString = String(threshold || '0'); return ethers.parseUnits(thresholdString, profitToken.decimals); }
-        catch (e) { logger.warn(`[ProfitCalc] Failed parseUnits for threshold '${threshold}' for ${profitToken.symbol}, using default.`); const defaultThresholdString = String(this.config.MIN_PROFIT_THRESHOLDS?.DEFAULT || '0'); try { return ethers.parseUnits(defaultThresholdString, this.nativeDecimals); } catch { return 0n; } }
+    const BPS_DIVISOR = 10000n;
+    const slippageFactor = BPS_DIVISOR - BigInt(Math.floor(slippageToleranceBps)); // Use floor just in case
+
+    // Ensure slippage factor doesn't go below 0 (more than 100% slippage)
+    if (slippageFactor < 0n) {
+        logger.warn(`${logPrefix} [calculateMinAmountOut] Slippage tolerance ${slippageToleranceBps} > 10000 BPS. Returning 0n.`);
+        return 0n;
     }
 
-    // Calculate method remains the same - orchestrates calls to evaluateOpportunity
-    async calculate(opportunities, signerAddress) {
-        if (!opportunities || !Array.isArray(opportunities)) return []; if (!signerAddress || !ethers.isAddress(signerAddress)) { logger.error("[PC.calculate] Invalid signerAddress."); return []; } logger.info(`[ProfitCalculator] Evaluating ${opportunities.length} opps for signer ${signerAddress}...`); const profitableTrades = []; const calculationPromises = opportunities.map(opp => this.evaluateOpportunity(opp, signerAddress)); const results = await Promise.allSettled(calculationPromises); results.forEach((result, index) => { const opp = opportunities[index]; const pairKey = opp?.pairKey || 'N/A'; if (result.status === 'fulfilled' && result.value?.isProfitable) { profitableTrades.push(result.value.tradeData); const profitEth = ethers.formatEther(result.value.netProfitNativeWei || 0n); logger.info(`[ProfitCalculator] ✅ PROFITABLE: Pair ${pairKey}, Net ~${profitEth} ${this.nativeSymbol}`); } else if (result.status === 'rejected') { logger.warn(`[ProfitCalculator] ❌ Eval CRASHED for Opp ${pairKey}: ${result.reason?.message || result.reason}`); } else if (result.status === 'fulfilled' && result.value && !result.value.isProfitable) { const profitEth = ethers.formatEther(result.value.netProfitNativeWei || 0n); logger.info(`[ProfitCalculator] ➖ NOT Profitable: Pair ${pairKey}, Reason: ${result.value.reason || 'Unknown'}, Net ~${profitEth} ${this.nativeSymbol}`); } else if (result.status === 'fulfilled' && !result.value) { logger.error(`[ProfitCalculator] ❌ Eval returned unexpected null/undefined for Opp ${pairKey}`); } }); logger.info(`[ProfitCalculator] Finished eval. Found ${profitableTrades.length} profitable trades.`); return profitableTrades;
-    }
+    // Calculate minimum amount out: amountOut * (1 - slippage)
+    // = amountOut * ( (10000 - slippageBps) / 10000 )
+    return (amountOut * slippageFactor) / BPS_DIVISOR;
+}
+// +++ END ADDED FUNCTION +++
 
-    /**
-     * Evaluates a single opportunity by calling imported helper functions.
-     * @returns {Promise<{isProfitable: boolean, netProfitNativeWei: bigint|null, reason: string, tradeData: object|null}>}
-     */
-    async evaluateOpportunity(opportunity, signerAddress) {
-        const logPrefix = `[ProfitCalc Opp ${opportunity?.pairKey}]`;
-        logger.debug(`${logPrefix} evaluateOpportunity called...`);
 
-        try {
-            // Step 1: Validate & Setup
-            const validationResult = ProfitCalcUtils.validateAndSetup(opportunity, this.config, logPrefix);
-            if (!validationResult.isValid) return { isProfitable: false, reason: validationResult.reason, tradeData: null };
-            const { initialToken, intermediateToken, finalToken, amountInStart, poolBuyState, poolSellState } = validationResult;
+// --- Validation & Setup Helper ---
+function validateAndSetup(opportunity, config, logPrefix) {
+    // ... (rest of function unchanged) ...
+    if (opportunity?.type !== 'spatial' || !Array.isArray(opportunity.path) || opportunity.path.length !== 2 || !opportunity.tokenIn || !opportunity.tokenIntermediate || !opportunity.tokenOut) { return { isValid: false, reason: "Malformed structure (requires spatial, 2-hop path, tokenIn/Intermediate/Out)" }; } const step1 = opportunity.path[0]; const step2 = opportunity.path[1]; const poolBuyState = step1?.poolState; const poolSellState = step2?.poolState; if (!poolBuyState || !poolSellState) { return { isValid: false, reason: "Missing pool state in path" }; } const initialToken = config.TOKENS[opportunity.tokenIn.symbol]; const intermediateToken = config.TOKENS[opportunity.tokenIntermediate.symbol]; const finalToken = config.TOKENS[opportunity.tokenOut.symbol]; if (!initialToken || !intermediateToken || !finalToken || initialToken.symbol !== finalToken.symbol) { return { isValid: false, reason: `Token lookup failed or tokenIn/Out mismatch (Symbols: ${opportunity.tokenIn?.symbol} vs ${opportunity.tokenOut?.symbol})` }; } const amountInStart = BigInt(opportunity.amountIn || 0n); if (amountInStart <= 0n) { return { isValid: false, reason: "Invalid amountIn (must be positive)" }; } logger.debug(`${logPrefix} Validation OK. Initial: ${ethers.formatUnits(amountInStart, initialToken.decimals)} ${initialToken.symbol}`); return { isValid: true, initialToken, intermediateToken, finalToken, amountInStart, poolBuyState, poolSellState };
+}
 
-            // Step 2: Simulate Swaps
-            const simResult = await ProfitCalcUtils.simulatePath(this.swapSimulator, initialToken, intermediateToken, finalToken, amountInStart, poolBuyState, poolSellState, logPrefix);
-            if (!simResult.success) return { isProfitable: false, reason: simResult.reason, tradeData: null };
-            const { amountIntermediate, finalAmountOut, grossProfitWei_InitialToken } = simResult;
+// --- Simulation Helper ---
+async function simulatePath(swapSimulator, initialToken, intermediateToken, finalToken, amountInStart, poolBuyState, poolSellState, logPrefix) {
+    // ... (rest of function unchanged) ...
+    const sim1Result = await swapSimulator.simulateSwap(poolBuyState, initialToken, amountInStart); if (!sim1Result.success || !sim1Result.amountOut || sim1Result.amountOut <= 0n) { return { success: false, reason: `Leg 1 Sim Fail: ${sim1Result.error || 'Zero output'}` }; } const amountIntermediate = sim1Result.amountOut; logger.debug(`${logPrefix} Sim Hop 1 Out: ${ethers.formatUnits(amountIntermediate, intermediateToken.decimals)} ${intermediateToken.symbol}`); const sim2Result = await swapSimulator.simulateSwap(poolSellState, intermediateToken, amountIntermediate); if (!sim2Result.success || !sim2Result.amountOut || sim2Result.amountOut <= 0n) { return { success: false, reason: `Leg 2 Sim Fail: ${sim2Result.error || 'Zero output'}` }; } const finalAmountOut = sim2Result.amountOut; logger.debug(`${logPrefix} Sim Hop 2 Out: ${ethers.formatUnits(finalAmountOut, finalToken.decimals)} ${finalToken.symbol}`); const grossProfitWei_InitialToken = finalAmountOut - amountInStart; if (grossProfitWei_InitialToken <= 0n) { return { success: false, reason: "Negative gross profit (sim)", grossProfitWei_InitialToken }; } logger.debug(`${logPrefix} Gross Profit (Sim): ${ethers.formatUnits(grossProfitWei_InitialToken, initialToken.decimals)} ${initialToken.symbol}`); return { success: true, amountIntermediate, finalAmountOut, grossProfitWei_InitialToken };
+}
 
-            // Step 3: Estimate Gas Cost & Check Validity
-            const gasDetails = await ProfitCalcUtils.estimateGas(this.gasEstimator, opportunity, signerAddress, logPrefix);
-            if (!gasDetails.success) return { isProfitable: false, reason: gasDetails.reason, tradeData: null };
-            const { gasCostNativeWei, gasLimitEstimate } = gasDetails;
+// --- Gas Estimation Helper ---
+async function estimateGas(gasEstimator, opportunity, signerAddress, logPrefix) {
+    // ... (rest of function unchanged) ...
+    logger.debug(`${logPrefix} Estimating gas...`); const gasCostDetails = await gasEstimator.estimateTxGasCost(opportunity, signerAddress); if (!gasCostDetails?.totalCostWei || gasCostDetails.totalCostWei <= 0n || !gasCostDetails.estimateGasSuccess) { const reason = !gasCostDetails?.estimateGasSuccess ? "estimateGas reverted (path invalid)" : "Gas cost estimation failed"; return { success: false, reason: reason }; } const gasCostNativeWei = gasCostDetails.totalCostWei; const gasLimitEstimate = gasCostDetails.pathGasLimit; if (!gasLimitEstimate || gasLimitEstimate <= 0n) { return { success: false, reason: "Invalid gas limit in gasCostDetails" }; } logger.debug(`${logPrefix} Est. Gas Cost: ${ethers.formatEther(gasCostNativeWei)} ETH, Gas Limit: ${gasLimitEstimate.toString()}`); return { success: true, gasCostNativeWei, gasLimitEstimate };
+}
 
-            // Step 4: Calculate Net Profit (includes Aave fee logic)
-            const profitDetails = await ProfitCalcUtils.calculateNetProfitDetails(this, grossProfitWei_InitialToken, initialToken, gasCostNativeWei, opportunity, amountInStart, logPrefix); // Pass instance 'this'
-            if (!profitDetails.success) return { isProfitable: false, reason: profitDetails.reason, netProfitNativeWei: profitDetails.netProfitNativeWei, tradeData: null };
-            const { netProfitNativeWei, grossProfitNativeWei } = profitDetails;
+// --- Net Profit Calculation Helper (Includes Aave Fee Logic) ---
+async function calculateNetProfitDetails(pcInstance, grossProfitWei_InitialToken, initialToken, gasCostNativeWei, opportunity, amountInStart, logPrefix) {
+    // ... (rest of function unchanged) ...
+    const { provider, config, nativeSymbol, nativeDecimals, chainlinkFeeds, aaveFeeBps } = pcInstance; const grossProfitNativeWei = await convertTokenAmountToNative( grossProfitWei_InitialToken, initialToken, chainlinkFeeds, nativeSymbol, nativeDecimals, provider ); if (grossProfitNativeWei === null || grossProfitNativeWei <= 0n) { return { success: false, reason: "Gross profit conversion failed", netProfitNativeWei: null, grossProfitNativeWei: null }; } logger.debug(`${logPrefix} Gross Profit (Native): ${ethers.formatEther(grossProfitNativeWei)} ${nativeSymbol}`); let totalFeesNativeWei = gasCostNativeWei; let aaveFeeNativeWei = 0n; const likelyUsesAave = opportunity.path[0].dex !== 'uniswapV3'; if (likelyUsesAave && aaveFeeBps !== undefined && aaveFeeBps > 0n) { logger.debug(`${logPrefix} Path starts non-V3 (${opportunity.path[0].dex}), attempting to calculate Aave fee...`); try { const borrowedAmountNativeWei = await convertTokenAmountToNative( amountInStart, initialToken, chainlinkFeeds, nativeSymbol, nativeDecimals, provider ); if (borrowedAmountNativeWei !== null && borrowedAmountNativeWei > 0n) { aaveFeeNativeWei = (borrowedAmountNativeWei * aaveFeeBps) / 10000n; logger.debug(`${logPrefix} Adding estimated Aave Fee (Native): ${ethers.formatEther(aaveFeeNativeWei)} ${nativeSymbol}`); totalFeesNativeWei = totalFeesNativeWei + aaveFeeNativeWei; } else { logger.warn(`${logPrefix} Could not convert borrow amount to native value to estimate Aave fee accurately.`); } } catch (feeConvError) { logger.error(`${logPrefix} Error calculating/converting Aave fee: ${feeConvError.message}`); } } const netProfitNativeWei = grossProfitNativeWei - totalFeesNativeWei; if (netProfitNativeWei <= 0n) { logger.debug(`${logPrefix} Net profit <= 0 after total fees: ${ethers.formatEther(netProfitNativeWei)} ${nativeSymbol}`); return { success: false, reason: "Net profit <= 0 after fees", netProfitNativeWei, grossProfitNativeWei }; } logger.debug(`${logPrefix} Net Profit (Native, after fees): ${ethers.formatEther(netProfitNativeWei)} ${nativeSymbol}`); return { success: true, netProfitNativeWei, grossProfitNativeWei };
+}
 
-            // Step 5: Apply Buffer & Compare vs Threshold
-            const thresholdResult = ProfitCalcUtils.checkThreshold(this, netProfitNativeWei, logPrefix); // Pass instance 'this'
-            if (!thresholdResult.isProfitable) return { isProfitable: false, reason: thresholdResult.reason, netProfitNativeWei: netProfitNativeWei, tradeData: null };
+// --- Threshold Check Helper ---
+function checkThreshold(pcInstance, netProfitNativeWei, logPrefix) {
+    // ... (rest of function unchanged) ...
+    const { nativeToken, profitBufferPercent } = pcInstance; try { const thresholdNativeWei = pcInstance._getMinProfitThresholdWei(nativeToken); const bufferMultiplier = 10000n - (profitBufferPercent * 100n); if (bufferMultiplier <= 0n) throw new Error("Invalid profit buffer percentage."); const bufferedNetProfitNativeWei = (netProfitNativeWei * bufferMultiplier) / 10000n; const isProfitableAfterThreshold = bufferedNetProfitNativeWei > thresholdNativeWei; logger.debug(`${logPrefix} Buffered Net: ${ethers.formatEther(bufferedNetProfitNativeWei)}, Threshold: ${ethers.formatEther(thresholdNativeWei)}. Profitable: ${isProfitableAfterThreshold}`); if (!isProfitableAfterThreshold) { return { isProfitable: false, reason: "Below profit threshold", thresholdNativeWei }; } return { isProfitable: true, thresholdNativeWei }; } catch (evalError) { logger.error(`${logPrefix} Error during threshold check: ${evalError.message}`); throw new ArbitrageError(`Threshold check error: ${evalError.message}`, 'THRESHOLD_ERROR', evalError); }
+}
 
-            // Step 6: Build final trade data object
-            const finalTradeData = await ProfitCalcUtils.buildTradeData( // Await async buildTradeData
-                this, opportunity, amountInStart, amountIntermediate, finalAmountOut,
-                grossProfitWei_InitialToken, grossProfitNativeWei, gasCostNativeWei,
-                netProfitNativeWei, gasLimitEstimate, thresholdResult.thresholdNativeWei,
-                initialToken
-            );
+// --- Build Trade Data Helper ---
+async function buildTradeData( pcInstance, opportunity, amountInStart, amountIntermediate, finalAmountOut, grossProfitWei_InitialToken, grossProfitNativeWei, gasCostNativeWei, netProfitNativeWei, gasLimitEstimate, thresholdNativeWei, initialToken) {
+    // ... (rest of function unchanged) ...
+    const { provider, config, nativeSymbol, nativeDecimals, chainlinkFeeds } = pcInstance; let profitPercentage = 0; try { const amountInNative = await convertTokenAmountToNative(amountInStart, initialToken, chainlinkFeeds, nativeSymbol, nativeDecimals, provider); if (amountInNative !== null && amountInNative > 0n) { profitPercentage = Number((netProfitNativeWei * 1000000n) / amountInNative) / 10000; } else { logger.warn(`[ProfitCalcUtils _buildTradeData] Could not convert amountIn to native.`); } } catch (percError) { logger.warn(`[ProfitCalcUtils _buildTradeData] Failed to calculate profitPercentage: ${percError.message}`); } const finalTradeData = { ...opportunity, amountIn: amountInStart.toString(), intermediateAmountOut: amountIntermediate.toString(), amountOut: finalAmountOut.toString(), profitAmount: grossProfitWei_InitialToken.toString(), profitAmountNativeWei: grossProfitNativeWei.toString(), gasCostNativeWei: gasCostNativeWei.toString(), netProfitNativeWei: netProfitNativeWei.toString(), gasEstimate: gasLimitEstimate.toString(), profitPercentage: profitPercentage, thresholdNativeWei: thresholdNativeWei.toString(), timestamp: Date.now() }; return finalTradeData;
+}
 
-            return { isProfitable: true, netProfitNativeWei, reason: "Passed threshold", tradeData: finalTradeData };
-
-        } catch (error) {
-             logger.error(`${logPrefix} Unexpected error during evaluation: ${error.message}`, error);
-             if (!(error instanceof ArbitrageError)) { throw error; } // Re-throw unexpected
-             return { isProfitable: false, reason: error.message, tradeData: null }; // Return structure for handled ArbitrageErrors
-        }
-    }
-
-} // End ProfitCalculator class
-
-module.exports = ProfitCalculator;
+// +++ ADDED calculateMinAmountOut TO EXPORTS +++
+module.exports = {
+    calculateMinAmountOut, // Export the function
+    validateAndSetup,
+    simulatePath,
+    estimateGas,
+    calculateNetProfitDetails,
+    checkThreshold,
+    buildTradeData,
+};
