@@ -1,5 +1,5 @@
 // scripts/deploy.js
-// --- VERSION v3.6 --- Use ethers.getAddress() for constructor args
+// --- VERSION v3.7 --- Try lowercase before getAddress
 
 const hre = require("hardhat");
 const ethers = hre.ethers; // Use ethers from Hardhat Runtime Environment
@@ -38,7 +38,9 @@ async function main() {
         UNISWAP_V3_ROUTER_ADDRESS = ethers.getAddress(UNISWAP_V3_ROUTER_RAW);
         SUSHI_ROUTER_ADDRESS = ethers.getAddress(SUSHI_ROUTER_RAW);
         AAVE_V3_POOL_ADDRESS = ethers.getAddress(AAVE_V3_POOL_RAW);
-        AAVE_ADDRESSES_PROVIDER = ethers.getAddress(AAVE_ADDRESSES_PROVIDER_RAW);
+        // --- Try lowercase first ---
+        AAVE_ADDRESSES_PROVIDER = ethers.getAddress(AAVE_ADDRESSES_PROVIDER_RAW.toLowerCase());
+        // --- ---
         console.log("Checksummed addresses verified.");
     } catch (checksumError) {
          console.error("❌ FATAL: Error checksumming addresses defined in script:", checksumError);
@@ -48,7 +50,7 @@ async function main() {
 
     // --- Deployment ---
     console.log(`Deploying contract with:`);
-    console.log(`   Uniswap V3 Router: ${UNISWAP_V3_ROUTER_ADDRESS}`); // Log checksummed
+    console.log(`   Uniswap V3 Router: ${UNISWAP_V3_ROUTER_ADDRESS}`);
     console.log(`   SushiSwap Router:  ${SUSHI_ROUTER_ADDRESS}`);
     console.log(`   Aave V3 Pool:      ${AAVE_V3_POOL_ADDRESS}`);
     console.log(`   Aave Addr Prov:  ${AAVE_ADDRESSES_PROVIDER}`);
@@ -93,7 +95,6 @@ async function main() {
 
     } catch (error) {
         console.error("\n❌ Deployment script failed:");
-        // Log the specific error message if available
         if (error instanceof Error) {
            console.error(`   Reason: ${error.message}`);
         } else {
