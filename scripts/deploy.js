@@ -1,11 +1,17 @@
 // scripts/deploy.js
+// --- VERSION v3.5 --- Updated for 4 constructor arguments
+
 const hre = require("hardhat");
 const ethers = hre.ethers; // Use ethers from Hardhat Runtime Environment
 
 // --- Configuration ---
 // Make sure these addresses are correct for the target network (Arbitrum One)
-const UNISWAP_V3_ROUTER_ADDRESS = "0xE592427A0AEce92De3Edee1F18E0157C05861564";
-const AAVE_V3_POOL_ADDRESS = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"; // <<< ADDED Aave Pool Address
+// Verify these addresses on Arbiscan or official documentation!
+const UNISWAP_V3_ROUTER_ADDRESS = "0xE592427A0AEce92De3Edee1F18E0157C05861564"; // Check if this is the correct V3 router you use
+const SUSHI_ROUTER_ADDRESS = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"; // Arbitrum Sushi Router V2
+const AAVE_V3_POOL_ADDRESS = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"; // Arbitrum Aave V3 Pool
+const AAVE_ADDRESSES_PROVIDER = "0xa9768dEaF220135113516e574640BeA2979DBf85"; // Arbitrum Aave V3 Addresses Provider
+
 const CONFIRMATIONS_TO_WAIT = 2; // Number of block confirmations to wait for
 
 async function main() {
@@ -30,19 +36,25 @@ async function main() {
     // --- Deployment ---
     console.log(`Deploying contract with:`);
     console.log(`   Uniswap V3 Router: ${UNISWAP_V3_ROUTER_ADDRESS}`);
-    console.log(`   Aave V3 Pool:      ${AAVE_V3_POOL_ADDRESS}`); // Log Aave address
+    console.log(`   SushiSwap Router:  ${SUSHI_ROUTER_ADDRESS}`); // Log Sushi Router
+    console.log(`   Aave V3 Pool:      ${AAVE_V3_POOL_ADDRESS}`);
+    console.log(`   Aave Addr Prov:  ${AAVE_ADDRESSES_PROVIDER}`); // Log Aave Addr Prov
 
     try {
         // Get the contract factory
         const FlashSwapFactory = await ethers.getContractFactory("FlashSwap");
 
-        // Start the deployment transaction - PROVIDE BOTH ARGUMENTS
+        // Start the deployment transaction - PROVIDE ALL FOUR ARGUMENTS
+        console.log("Deploying with 4 arguments...");
         const flashSwapContract = await FlashSwapFactory.deploy(
-            UNISWAP_V3_ROUTER_ADDRESS,
-            AAVE_V3_POOL_ADDRESS  // <<< Pass Aave Pool as second argument
+            UNISWAP_V3_ROUTER_ADDRESS, // Arg 1
+            SUSHI_ROUTER_ADDRESS,      // Arg 2 <<< ADDED
+            AAVE_V3_POOL_ADDRESS,      // Arg 3
+            AAVE_ADDRESSES_PROVIDER    // Arg 4 <<< ADDED
         );
+        console.log("Deploy call sent...");
 
-        // --- Wait for Deployment (Unchanged) ---
+        // --- Wait for Deployment ---
         const deployTxResponse = flashSwapContract.deploymentTransaction();
         if (!deployTxResponse) { throw new Error("Deployment transaction response not found after deploy() call."); }
         console.log("⏳ Waiting for deployment transaction to be mined...");
@@ -61,10 +73,11 @@ async function main() {
         console.log(`   Gas Used: ${deployReceipt.gasUsed.toString()}`);
         console.log("----------------------------------------------------");
         console.log("➡️ NEXT STEPS:");
-        console.log("   1. Update ARBITRUM_FLASH_SWAP_ADDRESS in your .env file with the new address.");
-        console.log("   2. Add ARBITRUM_AAVE_POOL_ADDRESS=${AAVE_V3_POOL_ADDRESS} to your .env file.");
-        console.log("   3. Update config/arbitrum.js and config/index.js to load the Aave address.");
-        console.log("   4. Implement off-chain JS logic for Aave path handling.");
+        console.log(`   1. Update ARBITRUM_FLASH_SWAP_ADDRESS in your .env file with: ${deployedAddress}`);
+        // No longer needed as these are constructor args now
+        // console.log(`   2. Add ARBITRUM_AAVE_POOL_ADDRESS=${AAVE_V3_POOL_ADDRESS} to your .env file.`);
+        // console.log(`   3. Update config/arbitrum.js and config/index.js to load the Aave address.`);
+        console.log(`   4. Ensure your .env has ARBITRUM_RPC_URLS, PRIVATE_KEY, etc.`);
         console.log("----------------------------------------------------");
 
 
