@@ -13,6 +13,8 @@ import "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3FlashCallback.s
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
 import "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol";
+import "./interfaces/IUniswapV2Router02.sol";
+import "./interfaces/IDODOV1V2Pool.sol";
 
 // --- Interface for SushiSwap Router (Uniswap V2 Router Interface) ---
 interface IUniswapV2Router02 {
