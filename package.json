@@ -20,6 +20,7 @@
         "hardhat": "^2.22.19"
     },
     "dependencies": {
+        "@aave/core-v3": "^1.19.3",
         "@uniswap/sdk-core": "3.1.0",
         "@uniswap/v3-sdk": "3.9.0",
         "async-mutex": "^0.5.0",
