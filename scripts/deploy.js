@@ -1,16 +1,15 @@
 // scripts/deploy.js
-// --- VERSION v3.5 --- Updated for 4 constructor arguments
+// --- VERSION v3.6 --- Use ethers.getAddress() for constructor args
 
 const hre = require("hardhat");
 const ethers = hre.ethers; // Use ethers from Hardhat Runtime Environment
 
 // --- Configuration ---
-// Make sure these addresses are correct for the target network (Arbitrum One)
-// Verify these addresses on Arbiscan or official documentation!
-const UNISWAP_V3_ROUTER_ADDRESS = "0xE592427A0AEce92De3Edee1F18E0157C05861564"; // Check if this is the correct V3 router you use
-const SUSHI_ROUTER_ADDRESS = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"; // Arbitrum Sushi Router V2
-const AAVE_V3_POOL_ADDRESS = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"; // Arbitrum Aave V3 Pool
-const AAVE_ADDRESSES_PROVIDER = "0xa9768dEaF220135113516e574640BeA2979DBf85"; // Arbitrum Aave V3 Addresses Provider
+// Store raw addresses as strings
+const UNISWAP_V3_ROUTER_RAW = "0xE592427A0AEce92De3Edee1F18E0157C05861564";
+const SUSHI_ROUTER_RAW = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506";
+const AAVE_V3_POOL_RAW = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
+const AAVE_ADDRESSES_PROVIDER_RAW = "0xa9768dEaF220135113516e574640BeA2979DBf85";
 
 const CONFIRMATIONS_TO_WAIT = 2; // Number of block confirmations to wait for
 
@@ -33,24 +32,38 @@ async function main() {
         console.error("❌ Error fetching deployer balance:", error);
     }
 
+    // --- Get Checksummed Addresses using ethers ---
+    let UNISWAP_V3_ROUTER_ADDRESS, SUSHI_ROUTER_ADDRESS, AAVE_V3_POOL_ADDRESS, AAVE_ADDRESSES_PROVIDER;
+    try {
+        UNISWAP_V3_ROUTER_ADDRESS = ethers.getAddress(UNISWAP_V3_ROUTER_RAW);
+        SUSHI_ROUTER_ADDRESS = ethers.getAddress(SUSHI_ROUTER_RAW);
+        AAVE_V3_POOL_ADDRESS = ethers.getAddress(AAVE_V3_POOL_RAW);
+        AAVE_ADDRESSES_PROVIDER = ethers.getAddress(AAVE_ADDRESSES_PROVIDER_RAW);
+        console.log("Checksummed addresses verified.");
+    } catch (checksumError) {
+         console.error("❌ FATAL: Error checksumming addresses defined in script:", checksumError);
+         process.exit(1);
+    }
+
+
     // --- Deployment ---
     console.log(`Deploying contract with:`);
-    console.log(`   Uniswap V3 Router: ${UNISWAP_V3_ROUTER_ADDRESS}`);
-    console.log(`   SushiSwap Router:  ${SUSHI_ROUTER_ADDRESS}`); // Log Sushi Router
+    console.log(`   Uniswap V3 Router: ${UNISWAP_V3_ROUTER_ADDRESS}`); // Log checksummed
+    console.log(`   SushiSwap Router:  ${SUSHI_ROUTER_ADDRESS}`);
     console.log(`   Aave V3 Pool:      ${AAVE_V3_POOL_ADDRESS}`);
-    console.log(`   Aave Addr Prov:  ${AAVE_ADDRESSES_PROVIDER}`); // Log Aave Addr Prov
+    console.log(`   Aave Addr Prov:  ${AAVE_ADDRESSES_PROVIDER}`);
 
     try {
         // Get the contract factory
         const FlashSwapFactory = await ethers.getContractFactory("FlashSwap");
 
-        // Start the deployment transaction - PROVIDE ALL FOUR ARGUMENTS
+        // Start the deployment transaction - Pass checksummed addresses
         console.log("Deploying with 4 arguments...");
         const flashSwapContract = await FlashSwapFactory.deploy(
             UNISWAP_V3_ROUTER_ADDRESS, // Arg 1
-            SUSHI_ROUTER_ADDRESS,      // Arg 2 <<< ADDED
+            SUSHI_ROUTER_ADDRESS,      // Arg 2
             AAVE_V3_POOL_ADDRESS,      // Arg 3
-            AAVE_ADDRESSES_PROVIDER    // Arg 4 <<< ADDED
+            AAVE_ADDRESSES_PROVIDER    // Arg 4
         );
         console.log("Deploy call sent...");
 
@@ -74,16 +87,18 @@ async function main() {
         console.log("----------------------------------------------------");
         console.log("➡️ NEXT STEPS:");
         console.log(`   1. Update ARBITRUM_FLASH_SWAP_ADDRESS in your .env file with: ${deployedAddress}`);
-        // No longer needed as these are constructor args now
-        // console.log(`   2. Add ARBITRUM_AAVE_POOL_ADDRESS=${AAVE_V3_POOL_ADDRESS} to your .env file.`);
-        // console.log(`   3. Update config/arbitrum.js and config/index.js to load the Aave address.`);
-        console.log(`   4. Ensure your .env has ARBITRUM_RPC_URLS, PRIVATE_KEY, etc.`);
+        console.log(`   2. Ensure your .env has ARBITRUM_RPC_URLS, PRIVATE_KEY, etc.`);
         console.log("----------------------------------------------------");
 
 
     } catch (error) {
         console.error("\n❌ Deployment script failed:");
-        console.error(error);
+        // Log the specific error message if available
+        if (error instanceof Error) {
+           console.error(`   Reason: ${error.message}`);
+        } else {
+           console.error(error);
+        }
         process.exitCode = 1;
     }
 }
