@@ -61,7 +61,7 @@ const ARBITRUM_CONFIG = {
 
     // Finder Specific Settings
     FINDER_SETTINGS: {
-        SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS: 5n,
+        SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS: 0n,
         SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS: 5000n,
         SPATIAL_SIMULATION_INPUT_AMOUNTS: {
             'USDC':   ethers.parseUnits('100', 6),
