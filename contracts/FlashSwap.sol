@@ -291,10 +291,11 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
         }
     }
 
-    // --- _executeSwapPath (General path executor for Aave flash loans - supports DODO, Sushi, UniV3) ---
+        // --- _executeSwapPath (General path executor for Aave flash loans - supports DODO, Sushi, UniV3) ---
     // Executes a sequence of swaps defined by the _path array.
     function _executeSwapPath(SwapStep[] memory _path) internal returns (uint finalAmount) {
         // The initial amount is the balance of the first token in the path, which was borrowed
+        // This balance is available *during* the flashloan execution.
         uint amountIn = IERC20(_path[0].tokenIn).balanceOf(address(this));
         require(amountIn > 0, "FS:PSA0"); // Amount in must be positive to start the path
 
@@ -308,7 +309,11 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
                               step.dexType == DEX_TYPE_SUSHISWAP ? address(SUSHI_ROUTER) :
                               step.pool; // DODO uses the pool address as spender
 
+            // We approve max uint256 to the spender. This is safe during a flashloan
+            // because our balance of amountIn is exactly what was borrowed (or received from the previous swap).
+            // If the spender misbehaves, it can only take the tokens currently held *for this swap step*.
             _approveSpenderIfNeeded(step.tokenIn, spender, amountIn);
+
 
             // Execute the swap based on the DEX type
             if (step.dexType == DEX_TYPE_UNISWAP_V3) {
@@ -322,33 +327,229 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
                     step.minOut
                 );
             } else if (step.dexType == DEX_TYPE_SUSHISWAP) {
-                // Sushiswap uses a path array [tokenIn, tokenOut] for simple swaps
+                // Sushiswap (Uniswap V2 compatible) uses a path array [tokenIn, tokenOut] for simple swaps
                 address[] memory path = new address[](2);
                 path[0] = step.tokenIn;
                 path[1] = step.tokenOut;
 
                 // Use try/catch for better error messages on swap failure
                 try SUSHI_ROUTER.swapExactTokensForTokens(
-                    amountIn,
-                    step.minOut,
-                    path,
-                    address(this), // Send output tokens to this contract
-                    block.timestamp + DEADLINE_OFFSET
+                    amountIn,            // The exact amount of tokenIn to swap
+                    step.minOut,         // The minimum amount of tokenOut to receive
+                    path,                // The swap path (tokenIn -> tokenOut)
+                    address(this),       // The recipient of the output tokens
+                    block.timestamp + DEADLINE_OFFSET // The swap deadline
                 ) returns (uint[] memory amounts) {
-                    // The last element in amounts is the amount of the output token received
-                    amountOut = amounts[amounts.length - 1];
+                    // The amounts array contains the amounts at each step of the path.
+                    // For a 2-token path, amounts[0] is amountIn, amounts[1] is amountOut.
+                    amountOut = amounts[amounts.length - 1]; // Get the last amount (the output)
                     emit SwapExecuted(i+1, DEX_TYPE_SUSHISWAP, step.tokenIn, step.tokenOut, amountIn, amountOut);
                 } catch Error(string memory reason) {
-                    revert(string(abi.encodePacked("FS:S", _numToString(i+1), "F:", reason)));
+                    revert(string(abi.encodePacked("FS:S", _numToString(i+1), "F:", reason))); // Sushi Swap Failed (string error)
                 } catch {
-                    revert(string(abi.encodePacked("FS:S", _numToString(i+1), "FL"))); // Fallback for non-string errors
+                    revert(string(abi.encodePacked("FS:S", _numToString(i+1), "FL"))); // Sushi Swap Failed (Fallback)
                 }
             } else if (step.dexType == DEX_TYPE_DODO) {
-                // --- DODO Swaps (Currently Disabled) ---
-                // Integrate DODO swap logic here if enabling. It typically involves calling
-                // a buy/sell function directly on the DODO pool contract (step.pool).
-                // Example (replace with actual DODO pool interface calls):
-                // IDODOV1V2Pool dodoPool = IDODOV1V2Pool(step.pool);
-                // // Determine buy or sell based on tokenIn/tokenOut relative to base/quote
-                // // Need logic here to figure out if it's a buy or sell operation and call the right function.
-                // // This requires knowing the base and quote tokens of the DODO pool and the
+                // --- DODO Swaps (V1/V2 Pool Interaction) ---
+                // Instantiate the DODO pool interface using the pool address from the SwapStep
+                IDODOV1V2Pool dodoPool = IDODOV1V2Pool(step.pool);
+
+                // Get the base and quote tokens of this specific DODO pool
+                address baseToken = dodoPool.baseToken();
+                address quoteToken = dodoPool.quoteToken();
+
+                // Determine swap direction (sell base for quote, or buy base with quote)
+                if (step.tokenIn == baseToken && step.tokenOut == quoteToken) {
+                    // Selling Base token (step.tokenIn) for Quote token (step.tokenOut)
+                    // The amountIn is the amount of baseToken we have to sell.
+                    try dodoPool.sellBase(
+                        amountIn,            // amountIn: The exact amount of base token to sell
+                        step.minOut,         // minQuoteReceive: Minimum amount of quote token to receive
+                        address(this),       // beneficiary: Recipient of the quote tokens
+                        block.timestamp + DEADLINE_OFFSET // deadline
+                    ) returns (uint256 receivedAmount) {
+                        amountOut = receivedAmount; // The amount of quote token received
+                        emit SwapExecuted(i+1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, amountIn, amountOut);
+                    } catch Error(string memory reason) {
+                        revert(string(abi.encodePacked("FS:D", _numToString(i+1), "SF:", reason))); // DODO Sell Failed (string error)
+                    } catch {
+                        revert(string(abi.encodePacked("FS:D", _numToString(i+1), "SFL"))); // DODO Sell Failed (Fallback)
+                    }
+                } else if (step.tokenIn == quoteToken && step.tokenOut == baseToken) {
+                    // Buying Base token (step.tokenOut) with Quote token (step.tokenIn)
+                    // The amountIn is the amount of quoteToken we have to use for buying base.
+                     try dodoPool.buyBase(
+                        amountIn,           // quoteBuyAmount: The exact amount of quote token to spend
+                        step.minOut,        // minBaseReceive: Minimum amount of base token to receive
+                        address(this),      // beneficiary: Recipient of the base tokens
+                        block.timestamp + DEADLINE_OFFSET // deadline
+                    ) returns (uint256 receivedAmount) {
+                        amountOut = receivedAmount; // The amount of base token received
+                        emit SwapExecuted(i+1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, amountIn, amountOut);
+                    } catch Error(string memory reason) {
+                         revert(string(abi.encodePacked("FS:D", _numToString(i+1), "BF:", reason))); // DODO Buy Failed (string error)
+                    } catch {
+                         revert(string(abi.encodePacked("FS:D", _numToString(i+1), "BFL"))); // DODO Buy Failed (Fallback)
+                    }
+                } else {
+                    // The tokenIn/tokenOut pair provided in the SwapStep does not match the
+                    // baseToken/quoteToken pair of the specified DODO pool address.
+                    revert("FS:DODO_INVALID_PAIR");
+                }
+            } else {
+                revert("FS:IDT"); // Invalid DEX Type provided in SwapStep
+            }
+
+            // After the swap, the amountIn for the *next* step is the amountOut received from *this* step.
+            // The balance of step.tokenOut is now amountOut.
+            amountIn = amountOut;
+            // Crucially, ensure we received a non-zero amount from the swap for the path to continue.
+            require(amountIn > 0, string(abi.encodePacked("FS:PS", _numToString(i+1), "Z"))); // Swap X output zero
+        }
+
+        // After the loop finishes, the final amount received is the output of the last swap.
+        finalAmount = amountIn;
+    }
+
+    // --- Helper Functions ---
+    // Checks current allowance and approves spender if it's less than max uint256.
+    // Approves max uint256 to minimize approval transactions.
+    function _approveSpenderIfNeeded(address _token, address _spender, uint _amount) internal {
+         // If the amount to approve is zero, no need to do anything.
+         // This check is mainly for clarity, as safeApprove(0, max) is usually fine.
+         if (_amount == 0) {
+             return;
+         }
+
+        // Check current allowance. If it's less than the maximum possible value,
+        // approve the maximum value. This allows the spender to move any amount
+        // up to the contract's balance of this token without needing future approvals.
+        // Using type(uint256).max is standard practice for indefinite approvals.
+        if (IERC20(_token).allowance(address(this), _spender) < type(uint256).max) {
+             // safeApprove handles the check for zero allowance first internally for compatibility.
+            IERC20(_token).safeApprove(_spender, type(uint256).max);
+        }
+        // Else: allowance is already type(uint256).max or sufficient, no action needed.
+    }
+
+     // Helper function to convert uint to string (used for error messages)
+     // Required for Solidity 0.7.x as abi.encodePacked doesn't natively handle uint to string.
+    function _numToString(uint _num) internal pure returns (string memory) {
+        if (_num == 0) return "0";
+        uint j = _num;
+        uint len;
+        while (j != 0) {
+            len++;
+            j /= 10;
+        }
+        bytes memory bstr = new bytes(len);
+        uint k = len;
+        while (_num != 0) {
+            k = k-1;
+            uint8 temp = (48 + uint8(_num % 10)); // Get the last digit as ASCII: _num % 10 is the digit, +48 converts it to ASCII char
+            bytes1 b1 = bytes1(temp);
+            bstr[k] = b1;
+            _num /= 10;
+        }
+        return string(bstr);
+    }
+
+
+    // --- External Functions ---
+    // Function called by the bot's off-chain logic to initiate a Uniswap V3 flash loan
+    function initiateUniswapV3FlashLoan(
+        CallbackType _callbackType, // Type of trade path (e.g., TWO_HOP, TRIANGULAR)
+        address _poolAddress,      // The Uniswap V3 pool to borrow from
+        uint _amount0,             // Amount of token0 to borrow (can be 0)
+        uint _amount1,             // Amount of token1 to borrow (can be 0)
+        bytes calldata _params     // Abi-encoded parameters specific to the callbackType
+    ) external onlyOwner {
+        // Fetch pool details to construct callback data
+        IUniswapV3Pool pool = IUniswapV3Pool(_poolAddress);
+        address token0 = pool.token0();
+        address token1 = pool.token1();
+        uint24 fee = pool.fee();
+
+        // Encode data that will be passed to uniswapV3FlashCallback
+        bytes memory data = abi.encode(
+            FlashCallbackData({
+                callbackType: _callbackType,
+                amount0Borrowed: _amount0,
+                amount1Borrowed: _amount1,
+                caller: msg.sender, // The address that initiated this function call (the bot)
+                poolBorrowedFrom: _poolAddress, // The specific V3 pool the loan came from
+                token0: token0,
+                token1: token1,
+                fee: fee, // The fee tier of the pool
+                params: _params // The specific trade path params encoded earlier by the bot
+            })
+        );
+
+        emit FlashSwapInitiated(msg.sender, _poolAddress, _callbackType, _amount0, _amount1);
+
+        // Execute the flash loan. This calls uniswapV3FlashCallback on this contract.
+        // The amounts _amount0 and _amount1 are instantly available to this contract.
+        pool.flash(address(this), _amount0, _amount1, data);
+    }
+
+    // Function called by the bot's off-chain logic to initiate an Aave V3 flash loan
+    function initiateAaveFlashLoan(
+        address _asset,         // The address of the asset to borrow
+        uint _amount,          // The amount of the asset to borrow
+        SwapStep[] calldata _path // The array of swap steps to execute for the arbitrage
+    ) external onlyOwner {
+        // Aave requires arrays for assets, amounts, and interest rate modes, even for a single asset loan
+        address[] memory assets = new address[](1);
+        assets[0] = _asset;
+
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = _amount;
+
+        uint256[] memory modes = new uint256[](1);
+        modes[0] = 0; // 0 = Stable interest rate mode (though for flash loans, interest is paid immediately)
+
+        // Encode the swap path details to be passed to executeOperation
+        bytes memory params = abi.encode(ArbParams({
+            path: _path,
+            initiator: msg.sender // The address that initiated this function call (the bot)
+        }));
+
+        emit AaveFlashLoanInitiated(msg.sender, _asset, _amount);
+
+        // Execute the flash loan. This calls executeOperation on this contract.
+        // The borrowed _amount of _asset is instantly available to this contract within executeOperation.
+        AAVE_POOL.flashLoan(
+            address(this), // receiverAddress: This contract
+            assets,        // assets: Array containing the borrowed asset
+            amounts,       // amounts: Array containing the borrowed amount
+            modes,         // interestRateModes: 0 for stable (irrelevant for flashloan repayment)
+            address(this), // onBehalfOf: This contract (the one taking the temporary debt)
+            params,        // params: Arbitrary data (the encoded swap path)
+            0              // referralCode
+        );
+    }
+
+    // --- Emergency Functions ---
+    // Allows the owner to withdraw any stranded ERC20 tokens from the contract.
+    // Useful if tokens are accidentally sent directly or somehow remain after a failed trade.
+    function emergencyWithdraw(address _token) external onlyOwner {
+        uint balance = IERC20(_token).balanceOf(address(this));
+        require(balance > 0, "FS:NW"); // Nothing to withdraw
+        IERC20(_token).safeTransfer(owner, balance);
+        emit EmergencyWithdrawal(_token, owner, balance);
+    }
+
+    // Allows the owner to withdraw any stranded Ether from the contract.
+    // Useful if ETH is accidentally sent directly.
+    function emergencyWithdrawETH() external onlyOwner {
+        uint balance = address(this).balance;
+        require(balance > 0, "FS:NWE"); // Nothing to withdraw
+        owner.transfer(balance);
+        emit EmergencyWithdrawal(address(0), owner, balance); // Use address(0) for ETH token address
+    }
+
+    // --- Fallback ---
+    // Receive function: Allows the contract to receive Ether.
+    // Needed if the owner uses emergencyWithdrawETH or if ETH is sent directly.
+    receive() external payable {}
+}
