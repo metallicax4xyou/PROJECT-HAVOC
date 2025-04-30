@@ -34,7 +34,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     IPool public immutable AAVE_POOL;
     address public immutable AAVE_ADDRESSES_PROVIDER;
     uint constant DEADLINE_OFFSET = 60;
-    address public constant TREASURY = 0x000000000000000000000000000000000000dEaD; // TEMP BURN ADDRESS
+    address public constant TREASURY = 0x50d3414C549a0A9Df8d29eD5872FDaEf97d6748d
 
     // --- DEX Type Constants ---
     uint8 constant DEX_TYPE_UNISWAP_V3 = 0;
