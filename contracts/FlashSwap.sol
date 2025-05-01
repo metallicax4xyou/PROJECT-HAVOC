@@ -16,7 +16,7 @@ import "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol";
 import "./interfaces/IUniswapV2Router02.sol";
 import "./interfaces/IDODOV1V2Pool.sol"; // Keep import for context, even if disabled
 // --- Aave Imports ---
-interface IPool { function flashLoan( address receiverAddress, address[] calldata assets, uint256[] calldata amounts, uint256[] caldata interestRateModes, address onBehalfOf, bytes calldata params, uint16 referralCode ) external; }
+interface IPool { function flashLoan( address receiverAddress, address[] calldata assets, uint256[] calldata amounts, uint256[] calldata interestRateModes, address onBehalfOf, bytes calldata params, uint16 referralCode ) external; }
 interface IFlashLoanReceiver { function executeOperation( address[] calldata assets, uint256[] calldata amounts, uint256[] calldata premiums, address initiator, bytes calldata params ) external returns (bool); function ADDRESSES_PROVIDER() external view returns (address); function POOL() external view returns (address); }
 
 
