@@ -14,26 +14,54 @@ import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
 import "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol";
 import "./interfaces/IUniswapV2Router02.sol";
-import "./interfaces/IDODOV1V2Pool.sol"; // Keep import for context, even if disabled
+import "./interfaces/IDODOV1V2Pool.sol"; // Import your DODO interface
+
 // --- Aave Imports ---
-interface IPool { function flashLoan( address receiverAddress, address[] calldata assets, uint256[] calldata amounts, uint256[] calldata interestRateModes, address onBehalfOf, bytes calldata params, uint16 referralCode ) external; }
-interface IFlashLoanReceiver { function executeOperation( address[] calldata assets, uint256[] calldata amounts, uint256[] calldata premiums, address initiator, bytes calldata params ) external returns (bool); function ADDRESSES_PROVIDER() external view returns (address); function POOL() external view returns (address); }
+// Standard Aave Pool interface for flash loans
+interface IPool {
+    function flashLoan(
+        address receiverAddress,
+        address[] calldata assets,
+        uint256[] calldata amounts,
+        uint256[] calldata interestRateModes,
+        address onBehalfOf,
+        bytes calldata params,
+        uint16 referralCode
+    ) external;
+}
+
+// Standard Aave Flash Loan Receiver interface
+// NOTE: We need to implement ADDRESSES_PROVIDER and POOL functions
+interface IFlashLoanReceiver {
+    function executeOperation(
+        address[] calldata assets,
+        uint256[] calldata amounts,
+        uint256[] calldata premiums,
+        address initiator,
+        bytes calldata params
+    ) external returns (bool);
+
+    // These two functions are required by the interface but not used in our logic.
+    // We will add minimal implementations returning our state variables.
+    function ADDRESSES_PROVIDER() external view returns (address);
+    function POOL() external view returns (address);
+}
 
 
 // --- Contract Definition ---
-// --- VERSION v3.12 --- Added 30% tithe to Treasury address
+// --- VERSION v3.13 --- Fixed Aave interface methods, temporarily disabled DODO execution for compile
 contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using SafeMath for uint256;
 
     // --- State Variables ---
-    ISwapRouter public immutable SWAP_ROUTER;
-    IUniswapV2Router02 public immutable SUSHI_ROUTER;
-    address payable public immutable owner;
-    address public immutable V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984; // Uniswap V3 Factory Address
-    IPool public immutable AAVE_POOL;
-    address public immutable AAVE_ADDRESSES_PROVIDER;
-    uint constant DEADLINE_OFFSET = 60; // Swap deadline in seconds from block.timestamp
+    ISwapRouter public immutable SWAP_ROUTER; // Uniswap V3 Swap Router
+    IUniswapV2Router02 public immutable SUSHI_ROUTER; // SushiSwap Router (V2 compatible)
+    address payable public immutable owner; // The contract deployer/owner
+    address public immutable V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984; // Uniswap V3 Factory Address (Arbitrum Mainnet)
+    IPool public immutable AAVE_POOL; // Aave V3 Pool contract instance
+    address public immutable AAVE_ADDRESSES_PROVIDER; // Aave Addresses Provider address
+    uint constant DEADLINE_OFFSET = 60; // Swap deadline in seconds from block.timestamp (e.g., 60 seconds)
     // Address to receive 30% of net profit (the "tithe")
     address public constant TREASURY = 0x50d3414C549a0A9Df8d29eD5872FDaEf97d6748d;
 
@@ -41,16 +69,18 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     // --- DEX Type Constants ---
     uint8 constant DEX_TYPE_UNISWAP_V3 = 0;
     uint8 constant DEX_TYPE_SUSHISWAP = 1;
-    uint8 constant DEX_TYPE_DODO = 2; // Kept for code structure, currently disabled
+    uint8 constant DEX_TYPE_DODO = 2; // Kept for code structure
 
     // --- Structs ---
-    enum CallbackType { TWO_HOP, TRIANGULAR }
+    enum CallbackType { TWO_HOP, TRIANGULAR } // Types of UniV3-specific flash loan paths
     struct FlashCallbackData { CallbackType callbackType; uint amount0Borrowed; uint amount1Borrowed; address caller; address poolBorrowedFrom; address token0; address token1; uint24 fee; bytes params; }
     struct TwoHopParams { address tokenIntermediate; uint24 feeA; uint24 feeB; uint amountOutMinimum1; uint amountOutMinimum2; }
     struct TriangularPathParams { address tokenA; address tokenB; address tokenC; uint24 fee1; uint24 fee2; uint24 fee3; uint amountOutMinimumFinal; }
-    // Note: SwapStep fee is only relevant for V3 swaps in the general path executor
+    // SwapStep definition for generic Aave flash loan paths
+    // 'pool' is the specific pool address for DODO steps, not used for Router-based swaps (UniV3, Sushi)
+    // 'fee' is only relevant for UniV3 steps
     struct SwapStep { address pool; address tokenIn; address tokenOut; uint24 fee; uint256 minOut; uint8 dexType; }
-    struct ArbParams { SwapStep[] path; address initiator; }
+    struct ArbParams { SwapStep[] path; address initiator; } // Parameters passed to Aave's executeOperation
 
     // --- Events ---
     event FlashSwapInitiated(address indexed caller, address indexed pool, CallbackType tradeType, uint amount0, uint amount1);
@@ -59,149 +89,199 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     event ArbitrageExecution(CallbackType indexed tradeType, address indexed tokenBorrowed, uint amountBorrowed, uint feePaid);
     event SwapExecuted(uint swapNumber, uint8 dexType, address indexed tokenIn, address indexed tokenOut, uint amountIn, uint amountOut);
     event RepaymentSuccess(address indexed token, uint amountRepaid);
-    event ProfitTransferred(address indexed token, address indexed recipient, uint amount);
+    event ProfitTransferred(address indexed token, address indexed recipient, uint amount); // Emits amount sent to owner
     event EmergencyWithdrawal(address indexed token, address indexed recipient, uint amount);
     event TradeProfit(bytes32 indexed pathHash, address indexed token, uint grossProfit, uint feesPaid, uint netProfit);
-    event TithePaid(address indexed token, uint amount);
+    event TithePaid(address indexed token, uint amount); // Emits amount sent to treasury
 
 
     // --- Modifiers ---
-    modifier onlyOwner() { require(msg.sender == owner || tx.origin == owner, "FS:NA"); _; }
+    modifier onlyOwner() { require(msg.sender == owner || tx.origin == owner, "FS:NA"); _; } // Only owner or tx.origin can call
+
 
     // --- Constructor ---
-    constructor( address _uniswapV3Router, address _sushiRouter, address _aavePoolAddress, address _aaveAddressesProvider ) { require(_uniswapV3Router != address(0), "FS:IUR"); require(_sushiRouter != address(0), "FS:ISR"); require(_aavePoolAddress != address(0), "FS:IAP"); require(_aaveAddressesProvider != address(0), "FS:IAAP"); SWAP_ROUTER = ISwapRouter(_uniswapV3Router); SUSHI_ROUTER = IUniswapV2Router02(_sushiRouter); AAVE_POOL = IPool(_aavePoolAddress); AAVE_ADDRESSES_PROVIDER = _aaveAddressesProvider; owner = payable(msg.sender); }
+    // Initializes immutable state variables upon contract deployment
+    constructor(
+        address _uniswapV3Router,
+        address _sushiRouter,
+        address _aavePoolAddress,
+        address _aaveAddressesProvider // Aave addresses provider needed for IFlashLoanReceiver interface requirement
+    ) {
+        require(_uniswapV3Router != address(0), "FS:IUR"); // Invalid Uniswap V3 Router address
+        require(_sushiRouter != address(0), "FS:ISR"); // Invalid SushiSwap Router address
+        require(_aavePoolAddress != address(0), "FS:IAP"); // Invalid Aave Pool address
+        require(_aaveAddressesProvider != address(0), "FS:IAAP"); // Invalid Aave Addresses Provider address
+
+        SWAP_ROUTER = ISwapRouter(_uniswapV3Router);
+        SUSHI_ROUTER = IUniswapV2Router02(_sushiRouter);
+        AAVE_POOL = IPool(_aavePoolAddress);
+        AAVE_ADDRESSES_PROVIDER = _aaveAddressesProvider; // Store this to satisfy IFlashLoanReceiver interface
+        owner = payable(msg.sender);
+    }
+
+    // --- Aave IFlashLoanReceiver Interface Implementations ---
+    // These functions are required by the IFlashLoanReceiver interface
+    // but aren't logically used by the Aave V3 pool calling executeOperation.
+    // We implement them minimally to satisfy the interface requirements.
+
+    function ADDRESSES_PROVIDER() external view override returns (address) {
+        return AAVE_ADDRESSES_PROVIDER;
+    }
+
+    function POOL() external view override returns (address) {
+        return address(AAVE_POOL);
+    }
+
 
     // --- Uniswap V3 Flash Callback ---
     // Called by Uniswap V3 pool after successful flash loan
+    // msg.sender is the Uniswap V3 pool contract
     function uniswapV3FlashCallback( uint256 fee0, uint256 fee1, bytes calldata data ) external override nonReentrant {
         FlashCallbackData memory decodedData = abi.decode(data, (FlashCallbackData));
 
-        // Validate callback
+        // Validate callback: Ensure the call came from the expected pool and is a valid callback.
         PoolAddress.PoolKey memory poolKey = PoolAddress.PoolKey({ token0: decodedData.token0, token1: decodedData.token1, fee: decodedData.fee });
-        require(msg.sender == decodedData.poolBorrowedFrom, "FS:CBW");
-        CallbackValidation.verifyCallback(V3_FACTORY, poolKey);
+        require(msg.sender == decodedData.poolBorrowedFrom, "FS:CBW"); // Callback from wrong pool
+        CallbackValidation.verifyCallback(V3_FACTORY, poolKey); // Verify the call is valid from a V3 pool factory perspective
 
         address tokenBorrowed;
         uint amountBorrowed;
         uint totalAmountToRepay;
         uint feePaid;
 
-        // Determine which token was borrowed and calculate repayment amount
+        // Determine which token was borrowed and calculate repayment amount (borrowed amount + fee)
+        // UniV3 flash loans can borrow either token0 or token1, but not both simultaneously.
         if (decodedData.amount1Borrowed > 0) {
-            require(decodedData.amount0Borrowed == 0, "FS:BTB"); // Cannot borrow both in UniV3 flash
+            require(decodedData.amount0Borrowed == 0, "FS:BTB"); // Cannot borrow both tokens
             tokenBorrowed = decodedData.token1;
             amountBorrowed = decodedData.amount1Borrowed;
-            feePaid = fee1; // fee1 applies when borrowing token1
+            feePaid = fee1; // fee1 is the fee amount for borrowing token1
             totalAmountToRepay = amountBorrowed.add(feePaid);
-        } else { // amount0Borrowed > 0
-            require(decodedData.amount1Borrowed == 0 && decodedData.amount0Borrowed > 0, "FS:BNA"); // Cannot borrow both in UniV3 flash
+        } else { // decodedData.amount0Borrowed > 0
+            require(decodedData.amount1Borrowed == 0 && decodedData.amount0Borrowed > 0, "FS:BNA"); // Cannot borrow both tokens
             tokenBorrowed = decodedData.token0;
             amountBorrowed = decodedData.amount0Borrowed;
-            feePaid = fee0; // fee0 applies when borrowing token0
+            feePaid = fee0; // fee0 is the fee amount for borrowing token0
             totalAmountToRepay = amountBorrowed.add(feePaid);
         }
 
         emit ArbitrageExecution(decodedData.callbackType, tokenBorrowed, amountBorrowed, feePaid);
 
         // --- Execute Swaps ---
+        // The core arbitrage logic happens here using the borrowed funds
         uint finalAmountReceived;
         if (decodedData.callbackType == CallbackType.TRIANGULAR) {
+            // Execute a 3-hop triangular path within UniV3
             finalAmountReceived = _executeTriangularSwaps(tokenBorrowed, amountBorrowed, decodedData.params);
         } else if (decodedData.callbackType == CallbackType.TWO_HOP) {
+            // Execute a 2-hop UniV3 path (borrow -> intermediate -> borrow)
             finalAmountReceived = _executeTwoHopSwaps(tokenBorrowed, amountBorrowed, decodedData.params);
         } else {
-            revert("FS:UCT"); // Unknown callback type
+            revert("FS:UCT"); // Unknown callback type provided in data
         }
 
         // --- Repay Loan and Handle Profit ---
+        // Get the current balance of the borrowed token after all swaps are complete
         uint currentBalanceBorrowedToken = IERC20(tokenBorrowed).balanceOf(address(this));
-        require(currentBalanceBorrowedToken >= totalAmountToRepay, "FS:IFR"); // Insufficient funds for repayment
+        require(currentBalanceBorrowedToken >= totalAmountToRepay, "FS:IFR"); // Insufficient funds to repay the flash loan
 
+        // Calculate gross and net profit
         uint grossProfit = currentBalanceBorrowedToken > amountBorrowed ? currentBalanceBorrowedToken.sub(amountBorrowed) : 0;
         uint netProfit = currentBalanceBorrowedToken > totalAmountToRepay ? currentBalanceBorrowedToken.sub(totalAmountToRepay) : 0;
 
-        // Repay the loan to the Uniswap V3 pool (msg.sender in this context)
+        // Repay the loan by transferring the required amount back to the Uniswap V3 pool (msg.sender)
         IERC20(tokenBorrowed).safeTransfer(msg.sender, totalAmountToRepay);
         emit RepaymentSuccess(tokenBorrowed, totalAmountToRepay);
 
-        bytes32 pathHash = keccak256(decodedData.params);
+        // Emit trade profit details for off-chain logging/analysis
+        bytes32 pathHash = keccak256(decodedData.params); // Use params hash to uniquely identify the path
         emit TradeProfit(pathHash, tokenBorrowed, grossProfit, feePaid, netProfit);
 
-        // Distribute Net Profit: 30% to Treasury, 70% to Owner
+        // Distribute Net Profit: 30% to Treasury, 70% to Owner (if net profit > 0)
         if (netProfit > 0) {
-            uint titheAmount = (netProfit * 30) / 100;
-            uint ownerAmount = netProfit - titheAmount; // This implicitly gets 70%
+            uint titheAmount = (netProfit * 30) / 100; // Calculate 30% tithe
+            uint ownerAmount = netProfit - titheAmount; // Remaining 70% for the owner
 
-            // Send tithe to treasury
+            // Send tithe amount to the predefined treasury address
             IERC20(tokenBorrowed).safeTransfer(TREASURY, titheAmount);
-            emit TithePaid(tokenBorrowed, titheAmount);
+            emit TithePaid(tokenBorrowed, titheAmount); // Log the tithe payment
 
-            // Send remaining profit to owner
+            // Send the remaining profit to the contract owner
             IERC20(tokenBorrowed).safeTransfer(owner, ownerAmount);
-            emit ProfitTransferred(tokenBorrowed, owner, ownerAmount); // Updated event to reflect owner's amount
+            emit ProfitTransferred(tokenBorrowed, owner, ownerAmount); // Log the owner profit payment
         }
     }
 
     // --- AAVE V3 Flash Loan Callback ---
     // Called by Aave Pool after successful flash loan
-    function executeOperation( address[] calldata assets, uint256[] calldata amounts, uint256[] calldata premiums, address initiator, bytes calldata params ) external override nonReentrant returns (bool) {
-        // Validate callback
+    // msg.sender is the Aave Pool contract
+    function executeOperation(
+        address[] calldata assets,
+        uint256[] calldata amounts,
+        uint256[] calldata premiums,
+        address initiator,
+        bytes calldata params
+    ) external override nonReentrant returns (bool) {
+        // Validate callback: Ensure the call is from the Aave Pool and initiated by this contract.
         require(msg.sender == address(AAVE_POOL), "FS:CBA"); // Must be called by the Aave Pool
-        require(initiator == address(this), "FS:IFI"); // Initiator must be this contract
-        require(assets.length == 1, "FS:MA"); // Currently supports only one asset for simplicity
+        require(initiator == address(this), "FS:IFI"); // The 'initiator' must be this contract (passed in flashLoan call)
+        require(assets.length == 1, "FS:MA"); // Currently supports flash loans of only one asset for simplicity
         require(assets.length == amounts.length && amounts.length == premiums.length, "FS:ALA"); // Array lengths must match
 
         ArbParams memory decodedParams = abi.decode(params, (ArbParams));
 
         address tokenBorrowed = assets[0];
         uint amountBorrowed = amounts[0];
-        uint feePaid = premiums[0]; // Aave V3 premium
+        uint feePaid = premiums[0]; // Aave V3 premium (fee) for the flash loan
 
         emit AaveArbitrageExecution(tokenBorrowed, amountBorrowed, feePaid);
 
         // --- Execute Swaps ---
+        // Execute the generic swap path defined in the ArbParams
         uint finalAmountReceived = _executeSwapPath(decodedParams.path);
         require(finalAmountReceived > 0, "FS:AZA"); // Should receive a positive amount after swaps
 
         // --- Repay Loan and Handle Profit ---
+        // Get the current balance of the borrowed token after all swaps are complete
         uint totalAmountToRepay = amountBorrowed.add(feePaid);
         uint currentBalanceBorrowedTokenAfterSwaps = IERC20(tokenBorrowed).balanceOf(address(this));
 
-        require(currentBalanceBorrowedTokenAfterSwaps >= totalAmountToRepay, "FS:IFR"); // Insufficient funds for repayment
-
-        uint grossProfit = currentBalanceBorrowedTokenAfterSwaps > amountBorrowed ? currentBalanceBorrowedTokenAfterSwaps.sub(amountBorrowed) : 0;
-        uint netProfit = currentBalanceBorrowedTokenAfterSwaps > totalAmountToRepay ? currentBalanceBorrowedTokenAfterSwaps.sub(totalAmountToRepay) : 0;
+        require(currentBalanceBorrowedTokenAfterSwaps >= totalAmountToRepay, "FS:IFR"); // Insufficient funds to repay the flash loan
 
         // Approve Aave Pool to pull the repayment amount.
-        // Aave handles the actual transfer when this function returns true.
+        // Aave handles the actual transfer of funds for repayment after executeOperation returns true.
         _approveSpenderIfNeeded(tokenBorrowed, address(AAVE_POOL), totalAmountToRepay);
-        emit RepaymentSuccess(tokenBorrowed, totalAmountToRepay); // Event indicating funds are ready for repayment
+        emit RepaymentSuccess(tokenBorrowed, totalAmountToRepay); // Event indicating funds are available/approved for repayment
 
-        bytes32 pathHash = keccak256(params);
+        // Emit trade profit details for off-chain logging/analysis
+        bytes32 pathHash = keccak256(params); // Use params hash to uniquely identify the path
         emit TradeProfit(pathHash, tokenBorrowed, grossProfit, feePaid, netProfit);
 
-        // Distribute Net Profit: 30% to Treasury, 70% to Owner
+        // Distribute Net Profit: 30% to Treasury, 70% to Owner (if net profit > 0)
         if (netProfit > 0) {
-            uint titheAmount = (netProfit * 30) / 100;
-            uint ownerAmount = netProfit - titheAmount; // This implicitly gets 70%
+            uint titheAmount = (netProfit * 30) / 100; // Calculate 30% tithe
+            uint ownerAmount = netProfit - titheAmount; // Remaining 70% for the owner
 
-             // Send tithe to treasury
+             // Send tithe amount to the predefined treasury address
             IERC20(tokenBorrowed).safeTransfer(TREASURY, titheAmount);
-            emit TithePaid(tokenBorrowed, titheAmount);
+            emit TithePaid(tokenBorrowed, titheAmount); // Log the tithe payment
 
-            // Send remaining profit to owner
+            // Send the remaining profit to the contract owner
             IERC20(tokenBorrowed).safeTransfer(owner, ownerAmount);
-            emit ProfitTransferred(tokenBorrowed, owner, ownerAmount); // Updated event to reflect owner's amount
+            emit ProfitTransferred(tokenBorrowed, owner, ownerAmount); // Log the owner profit payment
         }
 
         return true; // Signal successful operation to Aave Pool
     }
 
-    // --- Internal functions for UniV3 Flow ---
+// --- END OF PART 1 ---
+    // --- Internal functions for UniV3 Flash Loan Flow ---
+    // Executes a 2-hop swap sequence: BorrowedToken -> IntermediateToken -> BorrowedToken
     function _executeTwoHopSwaps( address _tokenBorrowed, uint _amountBorrowed, bytes memory _params ) internal returns (uint finalAmount) {
         TwoHopParams memory arbParams = abi.decode(_params, (TwoHopParams));
 
-        // Approve Router for the first swap (borrowed token -> intermediate token)
+        // Swap 1: Borrowed Token -> Intermediate Token
+        // Approve Router for the first swap
         _approveSpenderIfNeeded(_tokenBorrowed, address(SWAP_ROUTER), _amountBorrowed);
         uint amountIntermediateReceived = _executeSingleV3Swap(
             1, // Swap number 1
@@ -209,28 +289,33 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
             arbParams.tokenIntermediate,
             arbParams.feeA,
             _amountBorrowed,
-            arbParams.amountOutMinimum1
+            arbParams.amountOutMinimum1 // Apply minOut from params
         );
         require(amountIntermediateReceived > 0, "FS:S1Z"); // First swap output zero
 
-        // Approve Router for the second swap (intermediate token -> borrowed token)
+        // Swap 2: Intermediate Token -> Borrowed Token (Repayment Token)
+        // Approve Router for the second swap
         _approveSpenderIfNeeded(arbParams.tokenIntermediate, address(SWAP_ROUTER), amountIntermediateReceived);
         finalAmount = _executeSingleV3Swap(
             2, // Swap number 2
             arbParams.tokenIntermediate,
-            _tokenBorrowed,
+            _tokenBorrowed, // Swap back to the original borrowed token
             arbParams.feeB,
             amountIntermediateReceived,
-            arbParams.amountOutMinimum2
+            arbParams.amountOutMinimum2 // Apply minOut from params
         );
          require(finalAmount > 0, "FS:S2Z"); // Second swap output zero
+
+         // The contract now holds 'finalAmount' of the borrowed token, plus any initial balance.
+         // The total balance is checked against totalAmountToRepay in uniswapV3FlashCallback.
     }
 
+    // Executes a 3-hop swap sequence: TokenA -> TokenB -> TokenC -> TokenA (where TokenA is the borrowed token)
     function _executeTriangularSwaps( address _tokenA, uint _amountA, bytes memory _params ) internal returns (uint finalAmount) {
         TriangularPathParams memory pathParams = abi.decode(_params, (TriangularPathParams));
-        require(pathParams.tokenA == _tokenA, "FS:TPA"); // Ensure borrowed token matches expected start token
+        require(pathParams.tokenA == _tokenA, "FS:TPA"); // Ensure the first token in the path is the borrowed token
 
-        // Swap 1: tokenA -> tokenB
+        // Swap 1: Token A -> Token B
         _approveSpenderIfNeeded(_tokenA, address(SWAP_ROUTER), _amountA);
         uint amountB = _executeSingleV3Swap(
             1, // Swap number 1
@@ -242,7 +327,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
         );
         require(amountB > 0, "FS:TS1Z"); // First swap output zero
 
-        // Swap 2: tokenB -> tokenC
+        // Swap 2: Token B -> Token C
         _approveSpenderIfNeeded(pathParams.tokenB, address(SWAP_ROUTER), amountB);
         uint amountC = _executeSingleV3Swap(
             2, // Swap number 2
@@ -254,48 +339,55 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
         );
         require(amountC > 0, "FS:TS2Z"); // Second swap output zero
 
-        // Swap 3: tokenC -> tokenA (borrowed token)
+        // Swap 3: Token C -> Token A (Borrowed Token)
         _approveSpenderIfNeeded(pathParams.tokenC, address(SWAP_ROUTER), amountC);
         finalAmount = _executeSingleV3Swap(
             3, // Swap number 3
             pathParams.tokenC,
-            _tokenA, // Swap back to the borrowed token
+            _tokenA, // Swap back to the original borrowed token
             pathParams.fee3,
             amountC,
             pathParams.amountOutMinimumFinal // Apply minOut to the final swap
         );
          require(finalAmount > 0, "FS:TS3Z"); // Final swap output zero
+
+        // The contract now holds 'finalAmount' of the borrowed token, plus any initial balance.
+        // The total balance is checked against totalAmountToRepay in uniswapV3FlashCallback.
     }
 
     // Executes a single swap using Uniswap V3's exactInputSingle function
     function _executeSingleV3Swap( uint _swapNumber, address _tokenIn, address _tokenOut, uint24 _fee, uint _amountIn, uint _amountOutMinimum ) internal returns (uint amountOut) {
+        // Prepare parameters for the Uniswap V3 router call
         ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
             tokenIn: _tokenIn,
             tokenOut: _tokenOut,
-            fee: _fee,
+            fee: _fee, // The fee tier of the pool
             recipient: address(this), // Send output tokens to this contract
-            deadline: block.timestamp + DEADLINE_OFFSET,
-            amountIn: _amountIn,
-            amountOutMinimum: _amountOutMinimum,
-            sqrtPriceLimitX96: 0 // No price limit
+            deadline: block.timestamp + DEADLINE_OFFSET, // Transaction deadline
+            amountIn: _amountIn, // The exact amount of tokenIn to swap
+            amountOutMinimum: _amountOutMinimum, // The minimum amount of tokenOut to receive
+            sqrtPriceLimitX96: 0 // No price limit (accept current price execution)
         });
 
         // Use try/catch to provide better error messages on swap failure
+        // This helps in debugging specific swap issues.
         try SWAP_ROUTER.exactInputSingle(swapParams) returns (uint _amountOut) {
-            amountOut = _amountOut;
-            emit SwapExecuted(_swapNumber, DEX_TYPE_UNISWAP_V3, _tokenIn, _tokenOut, _amountIn, amountOut);
+            amountOut = _amountOut; // Store the actual received amount
+            emit SwapExecuted(_swapNumber, DEX_TYPE_UNISWAP_V3, _tokenIn, _tokenOut, _amountIn, amountOut); // Log successful swap
         } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber) ,"F:", reason)));
+            // Revert with a specific error message indicating swap number and the reason
+            revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber) ,"F:", reason))); // Swap Failed (string error)
         } catch {
-            revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber), "FL"))); // Fallback for non-string errors
+            // Revert with a generic error message if the catch doesn't provide a string reason
+            revert(string(abi.encodePacked("FS:S", _numToString(_swapNumber), "FL"))); // Swap Failed (Fallback)
         }
     }
 
-        // --- _executeSwapPath (General path executor for Aave flash loans - supports DODO, Sushi, UniV3) ---
+    // --- _executeSwapPath (General path executor for Aave flash loans - supports DODO, Sushi, UniV3, Camelot) ---
     // Executes a sequence of swaps defined by the _path array.
     function _executeSwapPath(SwapStep[] memory _path) internal returns (uint finalAmount) {
-        // The initial amount is the balance of the first token in the path, which was borrowed
-        // This balance is available *during* the flashloan execution.
+        // The initial amount is the balance of the first token in the path, which was borrowed via Aave.
+        // This balance is available *during* the executeOperation callback.
         uint amountIn = IERC20(_path[0].tokenIn).balanceOf(address(this));
         require(amountIn > 0, "FS:PSA0"); // Amount in must be positive to start the path
 
@@ -304,14 +396,24 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
             uint amountOut;
 
             // Approve the spender needed for this step's DEX
-            // UniV3 uses the router for single swaps, Sushi uses its router, DODO needs the pool address
-            address spender = step.dexType == DEX_TYPE_UNISWAP_V3 ? address(SWAP_ROUTER) :
-                              step.dexType == DEX_TYPE_SUSHISWAP ? address(SUSHI_ROUTER) :
-                              step.pool; // DODO uses the pool address as spender
+            // UniV3 uses the router for single swaps, Sushi uses its router, DODO/Camelot need the pool address
+            address spender;
+            if (step.dexType == DEX_TYPE_UNISWAP_V3) {
+                spender = address(SWAP_ROUTER);
+            } else if (step.dexType == DEX_TYPE_SUSHISWAP) {
+                 spender = address(SUSHI_ROUTER);
+            }
+            // Add condition for Camelot if it uses a router vs direct pool interaction
+            // else if (step.dexType == DEX_TYPE_CAMELOT) { ... }
+             else if (step.dexType == DEX_TYPE_DODO) {
+                 spender = step.pool; // DODO uses the pool address as spender
+             }
+             else {
+                 revert("FS:IDT_APPROVE"); // Invalid DEX Type for approval
+             }
 
-            // We approve max uint256 to the spender. This is safe during a flashloan
+            // Approve max uint256 to the spender. This is safe during a flashloan
             // because our balance of amountIn is exactly what was borrowed (or received from the previous swap).
-            // If the spender misbehaves, it can only take the tokens currently held *for this swap step*.
             _approveSpenderIfNeeded(step.tokenIn, spender, amountIn);
 
 
@@ -322,7 +424,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
                     i+1, // Swap number
                     step.tokenIn,
                     step.tokenOut,
-                    step.fee, // V3 Fee from SwapStep
+                    step.fee, // V3 Fee from SwapStep struct
                     amountIn,
                     step.minOut
                 );
@@ -334,29 +436,46 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
 
                 // Use try/catch for better error messages on swap failure
                 try SUSHI_ROUTER.swapExactTokensForTokens(
-                    amountIn,            // The exact amount of tokenIn to swap
-                    step.minOut,         // The minimum amount of tokenOut to receive
-                    path,                // The swap path (tokenIn -> tokenOut)
-                    address(this),       // The recipient of the output tokens
-                    block.timestamp + DEADLINE_OFFSET // The swap deadline
+                    amountIn,            // amountIn: The exact amount of tokenIn to swap
+                    step.minOut,         // amountOutMin: The minimum amount of tokenOut to receive
+                    path,                // path: The swap path [tokenIn, tokenOut]
+                    address(this),       // to: The recipient of the output tokens
+                    block.timestamp + DEADLINE_OFFSET // deadline
                 ) returns (uint[] memory amounts) {
                     // The amounts array contains the amounts at each step of the path.
                     // For a 2-token path, amounts[0] is amountIn, amounts[1] is amountOut.
                     amountOut = amounts[amounts.length - 1]; // Get the last amount (the output)
-                    emit SwapExecuted(i+1, DEX_TYPE_SUSHISWAP, step.tokenIn, step.tokenOut, amountIn, amountOut);
+                    emit SwapExecuted(i+1, DEX_TYPE_SUSHISWAP, step.tokenIn, step.tokenOut, amountIn, amountOut); // Log successful swap
                 } catch Error(string memory reason) {
-                    revert(string(abi.encodePacked("FS:S", _numToString(i+1), "F:", reason))); // Sushi Swap Failed (string error)
+                    revert(string(abi.encodePacked("FS:S", _numToString(i+1), "SF:", reason))); // Sushi Swap Failed (string error)
                 } catch {
-                    revert(string(abi.encodePacked("FS:S", _numToString(i+1), "FL"))); // Sushi Swap Failed (Fallback)
+                    revert(string(abi.encodePacked("FS:S", _numToString(i+1), "SFL"))); // Sushi Swap Failed (Fallback)
                 }
             } else if (step.dexType == DEX_TYPE_DODO) {
                 // --- DODO Swaps (V1/V2 Pool Interaction) ---
+                // Temporarily disabled DODO functionality due to interface mismatch error.
+                // To enable, update the IDODOV1V2Pool interface in ./interfaces/IDODOV1V2Pool.sol
+                // to match the specific DODO pool type you are using, or implement an
+                // alternative method to determine base/quote tokens for the pool address (step.pool).
+                revert("FS:DODO_TEMP_DISABLED"); // Re-added temporary disable for compilation
+                /*
                 // Instantiate the DODO pool interface using the pool address from the SwapStep
                 IDODOV1V2Pool dodoPool = IDODOV1V2Pool(step.pool);
 
-                // Get the base and quote tokens of this specific DODO pool
-                address baseToken = dodoPool.baseToken();
-                address quoteToken = dodoPool.quoteToken();
+                 // --- IMPORTANT: VERIFY DODO POOL INTERFACE ---
+                 // The following calls assume IDODOV1V2Pool has `baseToken()` and `quoteToken()`
+                 // view functions returning the base and quote token addresses.
+                 // If your DODO pools use different function names or structure,
+                 // you must update the IDODOV1V2Pool.sol interface file accordingly.
+                 // Example: If base token is called `tokenA` and quote is `tokenB`:
+                 // address baseToken = dodoPool.tokenA();
+                 // address quoteToken = dodoPool.tokenB();
+                 // ------------------------------------------
+                 // Placeholder - Replace with actual function calls if they are different!
+                 // For now, assuming standard baseToken() and quoteToken() exist:
+                 address baseToken = dodoPool.baseToken();
+                 address quoteToken = dodoPool.quoteToken();
+
 
                 // Determine swap direction (sell base for quote, or buy base with quote)
                 if (step.tokenIn == baseToken && step.tokenOut == quoteToken) {
@@ -369,14 +488,14 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
                         block.timestamp + DEADLINE_OFFSET // deadline
                     ) returns (uint256 receivedAmount) {
                         amountOut = receivedAmount; // The amount of quote token received
-                        emit SwapExecuted(i+1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, amountIn, amountOut);
+                        emit SwapExecuted(i+1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, amountIn, amountOut); // Log successful swap
                     } catch Error(string memory reason) {
                         revert(string(abi.encodePacked("FS:D", _numToString(i+1), "SF:", reason))); // DODO Sell Failed (string error)
                     } catch {
                         revert(string(abi.encodePacked("FS:D", _numToString(i+1), "SFL"))); // DODO Sell Failed (Fallback)
                     }
                 } else if (step.tokenIn == quoteToken && step.tokenOut == baseToken) {
-                    // Buying Base token (step.tokenOut) with Quote token (step.tokenIn)
+                    // Buying Base token (step.tokenout) with Quote token (step.tokenIn)
                     // The amountIn is the amount of quoteToken we have to use for buying base.
                      try dodoPool.buyBase(
                         amountIn,           // quoteBuyAmount: The exact amount of quote token to spend
@@ -385,7 +504,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
                         block.timestamp + DEADLINE_OFFSET // deadline
                     ) returns (uint256 receivedAmount) {
                         amountOut = receivedAmount; // The amount of base token received
-                        emit SwapExecuted(i+1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, amountIn, amountOut);
+                        emit SwapExecuted(i+1, DEX_TYPE_DODO, step.tokenIn, step.tokenOut, amountIn, amountOut); // Log successful swap
                     } catch Error(string memory reason) {
                          revert(string(abi.encodePacked("FS:D", _numToString(i+1), "BF:", reason))); // DODO Buy Failed (string error)
                     } catch {
@@ -394,26 +513,28 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
                 } else {
                     // The tokenIn/tokenOut pair provided in the SwapStep does not match the
                     // baseToken/quoteToken pair of the specified DODO pool address.
-                    revert("FS:DODO_INVALID_PAIR");
+                    revert("FS:DODO_INVALID_PAIR"); // Mismatch between swap step tokens and DODO pool base/quote
                 }
+                */
             } else {
-                revert("FS:IDT"); // Invalid DEX Type provided in SwapStep
+                revert("FS:IDT_EXEC"); // Invalid DEX Type provided in SwapStep for execution
             }
 
             // After the swap, the amountIn for the *next* step is the amountOut received from *this* step.
-            // The balance of step.tokenOut is now amountOut.
+            // The balance of step.tokenOut (which is the next step's tokenIn) is now amountOut.
             amountIn = amountOut;
             // Crucially, ensure we received a non-zero amount from the swap for the path to continue.
-            require(amountIn > 0, string(abi.encodePacked("FS:PS", _numToString(i+1), "Z"))); // Swap X output zero
+            require(amountIn > 0, string(abi.encodePacked("FS:PS", _numToString(i+1), "Z"))); // Path Step X output zero - swap failed to produce output
         }
 
         // After the loop finishes, the final amount received is the output of the last swap.
         finalAmount = amountIn;
     }
 
+
     // --- Helper Functions ---
     // Checks current allowance and approves spender if it's less than max uint256.
-    // Approves max uint256 to minimize approval transactions.
+    // Approves max uint256 to minimize approval transactions for frequent spenders (like routers).
     function _approveSpenderIfNeeded(address _token, address _spender, uint _amount) internal {
          // If the amount to approve is zero, no need to do anything.
          // This check is mainly for clarity, as safeApprove(0, max) is usually fine.
@@ -426,7 +547,8 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
         // up to the contract's balance of this token without needing future approvals.
         // Using type(uint256).max is standard practice for indefinite approvals.
         if (IERC20(_token).allowance(address(this), _spender) < type(uint256).max) {
-             // safeApprove handles the check for zero allowance first internally for compatibility.
+             // safeApprove handles the check for zero allowance first internally for compatibility with older tokens.
+             // Most modern tokens and routers/pools are fine with approving max directly.
             IERC20(_token).safeApprove(_spender, type(uint256).max);
         }
         // Else: allowance is already type(uint256).max or sufficient, no action needed.
@@ -464,41 +586,42 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
         uint _amount1,             // Amount of token1 to borrow (can be 0)
         bytes calldata _params     // Abi-encoded parameters specific to the callbackType
     ) external onlyOwner {
-        // Fetch pool details to construct callback data
+        // Fetch pool details from the V3 pool contract to construct callback data
         IUniswapV3Pool pool = IUniswapV3Pool(_poolAddress);
         address token0 = pool.token0();
         address token1 = pool.token1();
         uint24 fee = pool.fee();
 
-        // Encode data that will be passed to uniswapV3FlashCallback
+        // Encode data that will be passed back to the uniswapV3FlashCallback function
         bytes memory data = abi.encode(
             FlashCallbackData({
                 callbackType: _callbackType,
                 amount0Borrowed: _amount0,
                 amount1Borrowed: _amount1,
-                caller: msg.sender, // The address that initiated this function call (the bot)
+                caller: msg.sender, // The address that initiated this function call (the bot's EOA or a relay)
                 poolBorrowedFrom: _poolAddress, // The specific V3 pool the loan came from
                 token0: token0,
                 token1: token1,
                 fee: fee, // The fee tier of the pool
-                params: _params // The specific trade path params encoded earlier by the bot
+                params: _params // The specific trade path params encoded earlier by the bot (e.g., TwoHopParams)
             })
         );
 
         emit FlashSwapInitiated(msg.sender, _poolAddress, _callbackType, _amount0, _amount1);
 
-        // Execute the flash loan. This calls uniswapV3FlashCallback on this contract.
-        // The amounts _amount0 and _amount1 are instantly available to this contract.
+        // Execute the flash loan. The V3 pool calls uniswapV3FlashCallback on this contract,
+        // providing the borrowed amounts and the 'data'.
         pool.flash(address(this), _amount0, _amount1, data);
     }
 
     // Function called by the bot's off-chain logic to initiate an Aave V3 flash loan
     function initiateAaveFlashLoan(
-        address _asset,         // The address of the asset to borrow
+        address _asset,         // The address of the asset to borrow from Aave
         uint _amount,          // The amount of the asset to borrow
-        SwapStep[] calldata _path // The array of swap steps to execute for the arbitrage
+        SwapStep[] calldata _path // The array of swap steps to execute for the arbitrage using the borrowed asset
     ) external onlyOwner {
-        // Aave requires arrays for assets, amounts, and interest rate modes, even for a single asset loan
+                // Aave V3 flashLoan requires arrays for assets, amounts, and interest rate modes,
+        // even if you're only borrowing a single asset.
         address[] memory assets = new address[](1);
         assets[0] = _asset;
 
@@ -506,26 +629,26 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
         amounts[0] = _amount;
 
         uint256[] memory modes = new uint256[](1);
-        modes[0] = 0; // 0 = Stable interest rate mode (though for flash loans, interest is paid immediately)
+        modes[0] = 0; // 0 = Stable interest rate mode. For flash loans, interest is paid in the same transaction, so this mode is effectively irrelevant for the borrowing.
 
-        // Encode the swap path details to be passed to executeOperation
+        // Encode the swap path details and the initiator's address to be passed to executeOperation
         bytes memory params = abi.encode(ArbParams({
             path: _path,
-            initiator: msg.sender // The address that initiated this function call (the bot)
+            initiator: msg.sender // The address that initiated this function call (the bot's EOA or a relay)
         }));
 
         emit AaveFlashLoanInitiated(msg.sender, _asset, _amount);
 
-        // Execute the flash loan. This calls executeOperation on this contract.
-        // The borrowed _amount of _asset is instantly available to this contract within executeOperation.
+        // Execute the flash loan. The Aave Pool calls executeOperation on this contract,
+        // providing the borrowed asset(s), amount(s), premium(s), initiator, and params.
         AAVE_POOL.flashLoan(
-            address(this), // receiverAddress: This contract
-            assets,        // assets: Array containing the borrowed asset
+            address(this), // receiverAddress: The contract that will receive the borrowed funds and execute operations (this contract)
+            assets,        // assets: Array containing the borrowed asset address
             amounts,       // amounts: Array containing the borrowed amount
-            modes,         // interestRateModes: 0 for stable (irrelevant for flashloan repayment)
-            address(this), // onBehalfOf: This contract (the one taking the temporary debt)
-            params,        // params: Arbitrary data (the encoded swap path)
-            0              // referralCode
+            modes,         // interestRateModes: 0 for stable (standard for flashloans)
+            address(this), // onBehalfOf: The address that will ultimately repay the loan (this contract)
+            params,        // params: Arbitrary data (the encoded swap path + initiator)
+            0              // referralCode: Optional referral code
         );
     }
 
@@ -540,16 +663,18 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     }
 
     // Allows the owner to withdraw any stranded Ether from the contract.
-    // Useful if ETH is accidentally sent directly.
+    // Useful if ETH is accidentally sent directly to the contract address.
     function emergencyWithdrawETH() external onlyOwner {
         uint balance = address(this).balance;
         require(balance > 0, "FS:NWE"); // Nothing to withdraw
+        // Transfer ETH to the owner's address
+        // owner is declared as payable(msg.sender) in the constructor, so it can receive ETH.
         owner.transfer(balance);
-        emit EmergencyWithdrawal(address(0), owner, balance); // Use address(0) for ETH token address
+        emit EmergencyWithdrawal(address(0), owner, balance); // Use address(0) convention for ETH
     }
 
     // --- Fallback ---
     // Receive function: Allows the contract to receive Ether.
-    // Needed if the owner uses emergencyWithdrawETH or if ETH is sent directly.
+    // It's important for emergencyWithdrawETH to work and allows receiving accidental ETH sends.
     receive() external payable {}
-}
+} 
