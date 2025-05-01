@@ -1,5 +1,5 @@
 // core/flashSwapManager.js
-// --- VERSION 1.5 --- Added debug logs for __dirname and process.cwd()
+// --- VERSION 1.6 --- Corrected path.resolve components for ABI requirement
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
@@ -8,6 +8,8 @@ const { AbiCoder } = require('ethers'); // Import AbiCoder
 const path = require('path'); // Import Node.js path module
 
 // --- DEBUGGING PATHS ---
+// Log the directory of the current script (__dirname) and the process's current working directory (process.cwd())
+// This helps diagnose path resolution issues.
 const currentDirDebug = __dirname;
 const processCwdDebug = process.cwd();
 logger.debug(`[FlashSwapManager Debug Path] __dirname: ${currentDirDebug}`);
@@ -15,15 +17,15 @@ logger.debug(`[FlashSwapManager Debug Path] process.cwd(): ${processCwdDebug}`);
 // --- END DEBUGGING PATHS ---
 
 
-// --- USING ABSOLUTE PATH FOR ABI (Using path.resolve) ---
+// --- USING ABSOLUTE PATH FOR ABI (Using path.resolve with corrected components) ---
 // Get the directory of the current script (core/)
 const currentDir = __dirname;
 
 // Construct the absolute path to the FlashSwap contract artifact using path.resolve.
-// path.resolve(from, to) resolves 'to' relative to 'from'.
-// path.resolve(currentDir, '..', '..', 'artifacts', 'contracts', 'FlashSwap.sol', 'FlashSwap.json')
-// This means: start at currentDir, go up one level, go up another level, then into artifacts/...
-const flashSwapArtifactPath = path.resolve(currentDir, '..', '..', 'artifacts', 'contracts', 'FlashSwap.sol', 'FlashSwap.json');
+// We start at `currentDir` (core/).
+// We go up one level (`..`) to the project root (/workspaces/arbitrum-flash).
+// Then we navigate into `artifacts`, `contracts`, `FlashSwap.sol`, `FlashSwap.json`.
+const flashSwapArtifactPath = path.resolve(currentDir, '..', 'artifacts', 'contracts', 'FlashSwap.sol', 'FlashSwap.json');
 
 logger.debug(`[FlashSwapManager] Attempting to load ABI from resolved path: ${flashSwapArtifactPath}`);
 
@@ -55,7 +57,7 @@ class FlashSwapManager {
         this.provider = provider;
 
         // Ensure the flash swap contract address is provided and is not the zero address
-        // Note: Config validation for this happens before this point.
+        // Note: Config validation for this happens before this point, but check here too.
         if (!this.config.FLASH_SWAP_CONTRACT_ADDRESS || this.config.FLASH_SWAP_CONTRACT_ADDRESS === ethers.ZeroAddress) {
              // This error should ideally be caught during config loading, but check here too.
              logger.error('[FlashSwapManager] Critical Error: Flash Swap contract address is the Zero Address.');
