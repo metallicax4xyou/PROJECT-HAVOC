@@ -1,5 +1,5 @@
 // config/index.js
-// --- VERSION 1.4 --- Bypassed strict validation for FLASH_SWAP_CONTRACT_ADDRESS
+// --- VERSION 1.5 --- Added debug logs for FLASH_SWAP_CONTRACT_ADDRESS validation bypass
 
 require('dotenv').config(); // Load environment variables from .env
 const { ethers } = require('ethers'); // Ethers.js for Ethereum interaction
@@ -23,7 +23,7 @@ const { TOKENS } = require('../constants/tokens'); // Defined token objects
  * @throws {Error} If critical configuration is missing or invalid.
  */
 function loadConfig() {
-    logger.debug('[loadConfig v1.4] Starting loadConfig function...');
+    logger.debug('[loadConfig v1.5] Starting loadConfig function... (with extra address debug)');
 
     // Determine the target network from environment variables
     const networkName = process.env.NETWORK?.toLowerCase();
@@ -43,33 +43,42 @@ function loadConfig() {
     // Validate and get the private key (removes 0x if present)
     const validatedPrivateKey = ConfigHelpers.Validators.validatePrivateKey(process.env.PRIVATE_KEY, 'PRIVATE_KEY');
     if (!validatedPrivateKey) {
-         throw new Error(`[Config] CRITICAL: Invalid or missing PRIVATE_KEY environment variable. Check PRIVATE_KEY in your .env.`);
+         // Note: We don't throw here immediately so the config can still load
+         // and other issues might be found. The bot startup will fail later if PK is null.
+         logger.warn(`[Config] WARNING: Invalid or missing PRIVATE_KEY environment variable. Bot will likely fail later.`);
     }
 
 
-    // --- TEMPORARY BYPASS: Validate Flash Swap Address ---
+    // --- TEMPORARY BYPASS: Validate Flash Swap Address (with extra debug) ---
     // The standard ethers.isAddress validator seems to be failing for some valid addresses.
     // This section performs a simpler format check and assigns the address directly.
     const flashSwapEnvKey = `${networkName.toUpperCase()}_FLASH_SWAP_ADDRESS`;
-    const rawFlashSwapAddress = process.env[flashSwapEnvKey]?.trim(); // Get raw value and trim
+    const rawFlashSwapAddress = process.env[flashSwapEnvKey]; // Get raw value (don't trim yet for debug)
+
+    logger.debug(`[Config Debug Address] Raw ${flashSwapEnvKey}: "${rawFlashSwapAddress}"`);
+    const trimmedFlashSwapAddress = rawFlashSwapAddress?.trim();
+    logger.debug(`[Config Debug Address] Trimmed ${flashSwapEnvKey}: "${trimmedFlashSwapAddress}"`);
+    logger.debug(`[Config Debug Address] Trimmed Length: ${trimmedFlashSwapAddress?.length}`);
+    logger.debug(`[Config Debug Address] Trimmed Starts With '0x': ${trimmedFlashSwapAddress?.startsWith('0x')}`);
+
 
     let finalFlashSwapAddress = ethers.ZeroAddress; // Default to zero address
 
     // Perform a basic format check (non-empty, correct length, starts with 0x)
-    if (rawFlashSwapAddress && rawFlashSwapAddress.length === 42 && rawFlashSwapAddress.startsWith('0x')) {
+    if (trimmedFlashSwapAddress && trimmedFlashSwapAddress.length === 42 && trimmedFlashSwapAddress.startsWith('0x')) {
          // Simple format check passed. Attempt to normalize to checksum address.
          try {
-              finalFlashSwapAddress = ethers.getAddress(rawFlashSwapAddress); // Normalize to checksum address
-              logger.debug(`[Config] Assigned & Normalized ${flashSwapEnvKey}: ${finalFlashSwapAddress}`);
+              finalFlashSwapAddress = ethers.getAddress(trimmedFlashSwapAddress); // Normalize to checksum address
+              logger.debug(`[Config Debug Address] Basic check PASSED. Assigned & Normalized ${flashSwapEnvKey}: ${finalFlashSwapAddress}`);
          } catch (e) {
               // If normalization fails (which shouldn't happen for a valid 0x address),
               // log a warning and fall back to using the raw address string.
-              logger.warn(`[Config] Failed to normalize ${flashSwapEnvKey} "${rawFlashSwapAddress}", using raw string. Error: ${e.message}`);
-              finalFlashSwapAddress = rawFlashSwapAddress; // Fallback to raw string
+              logger.warn(`[Config Debug Address] Normalization FAILED for "${trimmedFlashSwapAddress}", using raw. Error: ${e.message}`);
+              finalFlashSwapAddress = trimmedFlashSwapAddress; // Fallback to raw string
          }
     } else {
          // If the basic format check fails, log a critical error.
-         logger.error(`[Config Check] CRITICAL: ${flashSwapEnvKey} in .env is missing or appears invalid: "${rawFlashSwapAddress}". Cannot initialize FlashSwapManager.`);
+         logger.error(`[Config Check] CRITICAL: ${flashSwapEnvKey} in .env is missing or appears invalid after trim: "${trimmedFlashSwapAddress}". Cannot initialize FlashSwapManager.`);
          // finalFlashSwapAddress remains ethers.ZeroAddress, which will cause FlashSwapManager to fail
     }
     // --- END TEMPORARY BYPASS ---
@@ -204,6 +213,10 @@ function loadConfig() {
          logger.error(`[Config Check] CRITICAL: FLASH_SWAP_CONTRACT_ADDRESS is still the Zero Address after loading.`);
           // Note: A more robust approach would throw here if it's still zero.
      }
+      // Check PRIVATE_KEY again - it was validated but we didn't throw immediately
+     if (!baseConfig.PRIVATE_KEY) {
+          logger.error(`[Config Check] CRITICAL: PRIVATE_KEY is missing or invalid. Cannot proceed with bot operations.`);
+     }
      // Warning for Aave Pool address if it's still not set
      if (!baseConfig.AAVE_POOL_ADDRESS) { logger.warn(`[Config Check] WARNING: AAVE_POOL_ADDRESS is not set. Aave flash loans will fail.`); }
 
@@ -258,12 +271,15 @@ try {
     config = loadConfig(); // Load the config
 
     // Perform final critical checks on the loaded config object
+    // These checks will cause the module load to fail if critical items are missing.
     const essentialKeys = ['NAME','CHAIN_ID','TOKENS','RPC_URLS','PRIVATE_KEY','FLASH_SWAP_CONTRACT_ADDRESS', 'AAVE_POOL_ADDRESS', 'MIN_PROFIT_THRESHOLDS','CHAINLINK_FEEDS','GAS_COST_ESTIMATES', 'POOL_CONFIGS', 'FINDER_SETTINGS', 'AAVE_FLASH_LOAN_FEE_BPS'];
     const missingEssential = essentialKeys.filter(key =>
-         // Check if key is missing, null, or undefined. For FLASH_SWAP_CONTRACT_ADDRESS, also check if it's the ZeroAddress string.
+         // Check if key is missing, null, or undefined. For addresses, also check if it's the ZeroAddress string.
         !(key in config) || config[key] === null || config[key] === undefined ||
-        (key === 'FLASH_SWAP_CONTRACT_ADDRESS' && config[key] === ethers.ZeroAddress) // Add check for zero address
+        ((key === 'FLASH_SWAP_CONTRACT_ADDRESS' || key === 'AAVE_POOL_ADDRESS') && config[key] === ethers.ZeroAddress) ||
+        (key === 'PRIVATE_KEY' && config[key] === null) // Explicitly check for null Private Key
     );
+
 
     if (missingEssential.length > 0) {
         throw new Error(`[Config Export] CRITICAL: Final configuration object is missing essential keys or values are zero/null: ${missingEssential.join(', ')}`);
