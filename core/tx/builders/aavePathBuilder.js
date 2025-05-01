@@ -1,5 +1,5 @@
 // core/tx/builders/aavePathBuilder.js
-// --- VERSION v1.1 --- Corrects minOut calc during gas estimation.
+// --- VERSION v1.2 --- Added Tithe Recipient field to ArbParams.
 
 const { ethers } = require('ethers');
 const logger = require('../../../utils/logger'); // Adjust path if needed
@@ -39,16 +39,17 @@ function mapDexType(dexString) {
  * Uses amountIn from opportunity, but finalAmount from simulationResult.
  * Applies slippage only to the final amountOut for the last step's minOut.
  * Handles gas estimation mode where simulationResult provides minimal amounts.
+ * Includes the Tithe recipient address from config.
  *
  * @param {object} opportunity The tradeData object (containing path, amountIn, tokenIn).
  * @param {object} simulationResult Contains simulation amounts { initialAmount, hop1AmountOut, finalAmount }. Used for minOut calculation.
- * @param {object} config The application config object (needed for SLIPPAGE).
+ * @param {object} config The application config object (needed for SLIPPAGE, TITHE_WALLET_ADDRESS).
  * @param {object} flashSwapManagerInstance Needed to get the initiator address.
  * @returns {{ params: object, borrowTokenAddress: string, borrowAmount: bigint, typeString: string, contractFunctionName: string }}
  * @throws {ArbitrageError} If inputs are invalid or processing fails.
  */
 async function buildAavePathParams(opportunity, simulationResult, config, flashSwapManagerInstance) {
-    const functionSig = `[ParamBuilder AavePath v1.1]`; // Added version
+    const functionSig = `[ParamBuilder AavePath v1.2]`; // Updated version
     logger.debug(`${functionSig} Building parameters...`);
 
     // --- Input Validation ---
@@ -56,8 +57,12 @@ async function buildAavePathParams(opportunity, simulationResult, config, flashS
     if (!opportunity.tokenIn?.address || !opportunity.amountIn) { throw new ArbitrageError('Missing borrow token address or amountIn in opportunity object.', 'PARAM_BUILD_ERROR', { opportunity }); }
     // Now check simulationResult for finalAmount needed for minOut calculation
     if (simulationResult?.finalAmount === undefined || simulationResult?.finalAmount === null) { throw new ArbitrageError('Missing finalAmount in simulationResult object.', 'PARAM_BUILD_ERROR', { simulationResult }); }
-    if (!config?.SLIPPAGE_TOLERANCE_BPS === undefined) { throw new ArbitrageError('Missing SLIPPAGE_TOLERANCE_BPS in config.', 'CONFIG_ERROR'); }
+    if (config?.SLIPPAGE_TOLERANCE_BPS === undefined) { throw new ArbitrageError('Missing SLIPPAGE_TOLERANCE_BPS in config.', 'CONFIG_ERROR'); }
     if (!flashSwapManagerInstance || typeof flashSwapManagerInstance.getSignerAddress !== 'function') { throw new ArbitrageError('Invalid or missing flashSwapManagerInstance.', 'PARAM_BUILD_ERROR'); }
+    // Validate Tithe Recipient Address - NEW VALIDATION
+    if (!config.TITHE_WALLET_ADDRESS || !ethers.isAddress(config.TITHE_WALLET_ADDRESS)) {
+         throw new ArbitrageError('Missing or invalid TITHE_WALLET_ADDRESS in config. Tithe mechanism requires this.', 'CONFIG_ERROR');
+    }
     // --- End Validation ---
 
     // --- Determine Borrow Details (Use Opportunity for actual borrow amount) ---
@@ -107,12 +112,21 @@ async function buildAavePathParams(opportunity, simulationResult, config, flashS
     // --- Get Initiator Address ---
     const initiatorAddress = await flashSwapManagerInstance.getSignerAddress();
 
+    // --- Get Tithe Recipient Address from config ---
+    const titheRecipientAddress = config.TITHE_WALLET_ADDRESS;
+    // Note: Tithe percentage calculation and transfer logic will be in FlashSwap.sol
+
     // --- Construct ArbParams Object ---
-    const params = { path: swapStepArray, initiator: initiatorAddress };
+    const params = {
+        path: swapStepArray,
+        initiator: initiatorAddress,
+        titheRecipient: titheRecipientAddress, // <<< Added Tithe recipient here
+    };
 
     // --- Define Type String (MUST MATCH FlashSwap.sol ArbParams struct) ---
     const swapStepTypeString = "tuple(address pool, address tokenIn, address tokenOut, uint24 fee, uint256 minOut, uint8 dexType)";
-    const typeString = `tuple(${swapStepTypeString}[] path, address initiator)`;
+    // Add ', address titheRecipient' inside the outer tuple string definition
+    const typeString = `tuple(${swapStepTypeString}[] path, address initiator, address titheRecipient)`; // <<< Updated type string here
 
     // --- Return Result ---
     logger.debug(`${functionSig} Parameters built successfully for initiateAaveFlashLoan.`);
@@ -125,4 +139,5 @@ async function buildAavePathParams(opportunity, simulationResult, config, flashS
 
 module.exports = {
     buildAavePathParams,
+    // Add other builders if they are in this file, though based on paramBuilder.js, they are separate files
 };
