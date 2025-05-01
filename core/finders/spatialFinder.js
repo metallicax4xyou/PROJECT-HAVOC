@@ -1,5 +1,5 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.10 --- Fixed ReferenceError for poolBuyT0WithT1/poolSellT0ForT1 scope. Corrected validation for 0n values. Filters DODO quote sell first hop.
+// --- VERSION v1.11 --- Fixed ReferenceError by declaring poolBuy/poolSell vars before if block. Corrected validation for 0n values. Filters DODO quote sell first hop.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
@@ -60,7 +60,7 @@ class SpatialFinder {
         this.simulationInputAmounts = simulationAmounts; // Store the simulation amounts object
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.10] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`);
+        logger.info(`[SpatialFinder v1.11] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`);
     }
 
     /**
@@ -178,7 +178,6 @@ class SpatialFinder {
         }
         return null; // Return null if price calculation fails for any reason
     }
-
 // --- END OF PART 1 ---
     /**
      * Finds potential spatial arbitrage opportunities among the provided pool states.
@@ -267,8 +266,11 @@ class SpatialFinder {
                     const priceA_0_per_1_scaled = poolA.price0_1_scaled; // Price T0/T1 scaled on pool A
                     const priceB_0_per_1_scaled = poolB.price0_1_scaled; // Price T0/T1 scaled on pool B
 
-                    // Determine the pool where T0 is cheaper (for buying T0 with T1) and the pool where T0 is more expensive (for selling T0 for T1) based on T0/T1 price
+                    // --- FIX: Declare variables before the if block ---
                     let poolLowPrice0_1, poolHighPrice0_1;
+                    // --- END FIX ---
+
+                    // Determine the pool where T0 is cheaper (for buying T0 with T1) and the pool where T0 is more expensive (for selling T0 for T1) based on T0/T1 price
                     if (priceA_0_per_1_scaled < priceB_0_per_1_scaled) { // Pool A has lower T0/T1 price (T0 is cheaper relative to T1)
                         poolLowPrice0_1 = poolA; // Buy T0 here (Swap T1 -> T0)
                         poolHighPrice0_1 = poolB; // Sell T0 here (Swap T0 -> T1)
@@ -293,7 +295,9 @@ class SpatialFinder {
 
                     // Filter out opportunities with implausibly large raw price differences (potential data errors or manipulations)
                     if (rawDiffBips > this.maxReasonablePriceDiffBips) {
-                         logger.debug(`[SF] Skipping implausible raw price diff > ${this.maxReasonablePriceDiffBips} BIPS between ${poolBuyT0WithT1.name} and ${poolSellT0ForT1.name}`);
+                         // logger.debug(`[SF] Skipping implausible raw price diff > ${this.maxReasonablePriceDiffBips} BIPS between ${poolBuyT0WithT1.name} and ${poolSellT0ForT1.name}`);
+                         // Use the correct variables for logging
+                         logger.debug(`[SF] Skipping implausible raw price diff > ${this.maxReasonablePriceDiffBips} BIPS between ${poolLowPrice0_1.name} and ${poolHighPrice0_1.name}`);
                         continue; // Skip opportunities with huge price gaps (often indicate data issues)
                     }
 
@@ -326,7 +330,6 @@ class SpatialFinder {
 
                          // Create the potential opportunity object using the determined buy/sell pools and tokens
                          // Pass the pools in the order of the planned swaps: (Borrowed -> Intermediate) then (Intermediate -> Borrowed)
-                         // --- FIX: Pass poolLowPrice0_1 (T1->T0) and poolHighPrice0_1 (T0->T1) ---
                          const opportunity = this._createOpportunity(
                              poolLowPrice0_1, // This pool is used for the first swap: tokenBorrowedOrRepaid (T1) -> tokenIntermediate (T0)
                              poolHighPrice0_1, // This pool is used for the second swap: tokenIntermediate (T0) -> tokenBorrowedOrRepaid (T1)
@@ -334,8 +337,6 @@ class SpatialFinder {
                              tokenBorrowedOrRepaid, // The token assumed to be borrowed/repaid (T1)
                              tokenIntermediate // The intermediate token (T0)
                          );
-                         // --- END FIX ---
-
 
                          // Add the created opportunity to the list if it was successfully created (_createOpportunity didn't return null)
                          if (opportunity) {
@@ -366,7 +367,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapT1toT0, poolSwapT0toT1, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.10]`; // Version bump
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.11]`; // Version bump
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
