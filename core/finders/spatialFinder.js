@@ -1,5 +1,5 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.11 --- Fixed ReferenceError by declaring poolBuy/poolSell vars before if block. Corrected validation for 0n values. Filters DODO quote sell first hop.
+// --- VERSION v1.12 --- Corrected token order mismatch validation in _createOpportunity. Fixed ReferenceError. Filters DODO quote sell first hop.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
@@ -60,7 +60,7 @@ class SpatialFinder {
         this.simulationInputAmounts = simulationAmounts; // Store the simulation amounts object
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.11] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`);
+        logger.info(`[SpatialFinder v1.12] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`);
     }
 
     /**
@@ -178,6 +178,7 @@ class SpatialFinder {
         }
         return null; // Return null if price calculation fails for any reason
     }
+
 // --- END OF PART 1 ---
     /**
      * Finds potential spatial arbitrage opportunities among the provided pool states.
@@ -295,7 +296,6 @@ class SpatialFinder {
 
                     // Filter out opportunities with implausibly large raw price differences (potential data errors or manipulations)
                     if (rawDiffBips > this.maxReasonablePriceDiffBips) {
-                         // logger.debug(`[SF] Skipping implausible raw price diff > ${this.maxReasonablePriceDiffBips} BIPS between ${poolBuyT0WithT1.name} and ${poolSellT0ForT1.name}`);
                          // Use the correct variables for logging
                          logger.debug(`[SF] Skipping implausible raw price diff > ${this.maxReasonablePriceDiffBips} BIPS between ${poolLowPrice0_1.name} and ${poolHighPrice0_1.name}`);
                         continue; // Skip opportunities with huge price gaps (often indicate data issues)
@@ -367,7 +367,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapT1toT0, poolSwapT0toT1, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.11]`; // Version bump
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.12]`; // Version bump
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
@@ -375,19 +375,53 @@ class SpatialFinder {
             return null; // Cannot create opportunity without valid token addresses
         }
 
-        // Ensure the pools provided match the expected token flow directions based on the determined borrow/intermediate tokens
-        // First hop validation: poolSwapT1toT0 should swap from tokenBorrowedOrRepaid to tokenIntermediate
-        if (poolSwapT1toT0.tokenIn?.address?.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase() ||
-            poolSwapT1toT0.tokenOut?.address?.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
-             logger.error(`${logPrefix} Critical: First pool token order mismatch. Expected ${tokenBorrowedOrRepaid.symbol}->${tokenIntermediate.symbol} on ${poolSwapT1toT0.address}. Actual: ${poolSwapT1toT0.tokenIn?.symbol}->${poolSwapT1toT0.tokenOut?.symbol}`);
-             return null; // Skip if the first pool's defined tokens don't match the expected swap direction
+        // --- CORRECTED VALIDATION: Check pool's token0/token1 match expected swap direction ---
+        let firstHopInputToken, firstHopOutputToken;
+        // Determine the actual tokenIn/tokenOut for the first pool based on the pool's canonical order (token0/token1)
+        if (poolSwapT1toT0.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) {
+             // Pool is ordered T1/T0 relative to borrowed/intermediate. Swapping T1 -> T0.
+             firstHopInputToken = poolSwapT1toT0.token0; // T1 is token0 of the pool
+             firstHopOutputToken = poolSwapT1toT0.token1; // T0 is token1 of the pool
+        } else if (poolSwapT1toT0.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) {
+             // Pool is ordered T0/T1 relative to borrowed/intermediate. Swapping T1 -> T0.
+             firstHopInputToken = poolSwapT1toT0.token1; // T1 is token1 of the pool
+             firstHopOutputToken = poolSwapT1toT0.token0; // T0 is token0 of the pool
+        } else {
+             // The tokens of the pool don't match the expected borrowed/intermediate tokens for the first swap direction.
+             // This indicates a deeper issue in how the opportunity was constructed or pool data.
+             logger.error(`${logPrefix} Critical: First pool token mismatch with expected swap direction (${tokenBorrowedOrRepaid.symbol}->${tokenIntermediate.symbol}). Pool ${poolSwapT1toT0.address} has tokens ${poolSwapT1toT0.token0?.symbol}/${poolSwapT1toT0.token1?.symbol}.`);
+             return null;
         }
-        // Second hop validation: poolSwapT0toT1 should swap from tokenIntermediate to tokenBorrowedOrRepaid
-         if (poolSwapT0toT1.tokenIn?.address?.toLowerCase() !== tokenIntermediate.address.toLowerCase() ||
-            poolSwapT0toT1.tokenOut?.address?.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase()) {
-             logger.error(`${logPrefix} Critical: Second pool token order mismatch. Expected ${tokenIntermediate.symbol}->${tokenBorrowedOrRepaid.symbol} on ${poolSwapT0toT1.address}. Actual: ${poolSwapT0toT1.tokenIn?.symbol}->${poolSwapT0toT1.tokenOut?.symbol}`);
-             return null; // Skip if the second pool's defined tokens don't match the expected swap direction
+
+         // Verify the determined output token matches the expected intermediate token
+         if (firstHopOutputToken?.address?.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
+               logger.error(`${logPrefix} Critical: First pool output token mismatch with expected intermediate token. Expected ${tokenIntermediate.symbol}. Actual: ${firstHopOutputToken?.symbol}`);
+              return null;
          }
+
+
+        let secondHopInputToken, secondHopOutputToken;
+        // Determine the actual tokenIn/tokenOut for the second pool based on the pool's canonical order (token0/token1)
+        if (poolSwapT0toT1.token0?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) {
+              // Pool is ordered T0/T1 relative to intermediate/borrowed. Swapping T0 -> T1.
+             secondHopInputToken = poolSwapT0toT1.token0; // T0 is token0 of the pool
+             secondHopOutputToken = poolSwapT0toT1.token1; // T1 is token1 of the pool
+        } else if (poolSwapT0toT1.token1?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) {
+             // Pool is ordered T1/T0 relative to intermediate/borrowed. Swapping T0 -> T1.
+             secondHopInputToken = poolSwapT0toT1.token1; // T0 is token1 of the pool
+             secondHopOutputToken = poolSwapT0toT1.token0; // T1 is token0 of the pool
+        } else {
+             // The tokens of the pool don't match the expected intermediate/borrowed tokens for the second swap direction.
+             logger.error(`${logPrefix} Critical: Second pool token mismatch with expected swap direction (${tokenIntermediate.symbol}->${tokenBorrowedOrRepaid.symbol}). Pool ${poolSwapT0toT1.address} has tokens ${poolSwapT0toT1.token0?.symbol}/${poolSwapT0toT1.token1?.symbol}.`);
+             return null;
+        }
+
+         // Verify the determined output token matches the expected borrowed token
+         if (secondHopOutputToken?.address?.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase()) {
+             logger.error(`${logPrefix} Critical: Second pool output token mismatch with expected borrowed token. Expected ${tokenBorrowedOrRepaid.symbol}. Actual: ${secondHopOutputToken?.symbol}`);
+             return null;
+         }
+        // --- END CORRECTED VALIDATION ---
 
 
         // --- *** ADDED DODO QUOTE SELL FILTER *** ---
