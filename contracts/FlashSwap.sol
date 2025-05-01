@@ -88,6 +88,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     event ProfitTransferred(address indexed token, address indexed recipient, uint amount); // Emits amount sent to owner/initiator
     event EmergencyWithdrawal(address indexed token, address indexed recipient, uint amount);
     // Added recipient to TithePaid event
+    event TradeProfit(bytes32 indexed pathHash, address indexed tokenBorrowed, uint256 grossProfit, uint256 feePaid, uint256 netProfit);
     event TithePaid(address indexed token, uint amount, address indexed recipient); // Emits amount sent to tithe recipient
 
 
