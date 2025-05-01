@@ -1,5 +1,6 @@
 // constants/abis.js
 // Using CommonJS - Updated FlashSwap ABI path to use compiled artifact
+// Corrected DODOV1V2Pool ABI filename
 
 const logger = require('../utils/logger'); // Use logger for safe loading
 const path = require('path'); // Import Node.js path module
@@ -38,7 +39,9 @@ const IUniswapV3PoolABI = safeRequire(path.resolve(__dirname, '..', 'abis', 'IUn
 const IQuoterV2ABI = safeRequire(path.resolve(__dirname, '..', 'abis', 'IQuoterV2.json'));
 const TickLensABI = safeRequire(path.resolve(__dirname, '..', 'abis', 'TickLens.json'));
 const DODOZooABI = safeRequire(path.resolve(__dirname, '..', 'abis', 'DODOZoo.json'));
-const DODOV1V2PoolABI = safeRequire(path.resolve(__dirname, '..', 'abis', 'IDODOV1V2Pool.json')); // Assuming your DODO interface ABI is named IDODOV1V2Pool.json
+// --- CORRECTED FILENAME HERE ---
+const DODOV1V2PoolABI = safeRequire(path.resolve(__dirname, '..', 'abis', 'DODOV1V2Pool.json')); // Corrected filename to DODOV1V2Pool.json
+// --- END CORRECTED FILENAME ---
 
 
 // --- Central ABIS Object ---
@@ -51,18 +54,19 @@ const ABIS = {
   IQuoterV2: IQuoterV2ABI,
   TickLens: TickLensABI,
   DODOZoo: DODOZooABI,
-  DODOV1V2Pool: DODOV1V2PoolABI,
+  DODOV1V2Pool: DODOV1V2PoolABI, // Use the ABI loaded from the correct file
 };
 
 // Optional: Log loaded ABIs for verification (only logs keys that loaded successfully)
-const loadedAbiKeys = Object.keys(ABIS).filter(k => ABIS[k] !== null);
+// Filter out nulls before joining, exclude keys with null values from the log
+const loadedAbiKeys = Object.keys(ABIS).filter(key => ABIS[key] !== null);
 logger.debug(`[ABI Load] Loaded ABIs: ${loadedAbiKeys.join(', ')}`);
 
 // Check for any failed loads and log a warning (useful during development)
 Object.keys(ABIS).forEach(key => {
     if (!ABIS[key]) {
         // Log a warning if an expected ABI failed to load
-        logger.warn(`[ABI Load] WARNING: ABI for "${key}" failed to load.`);
+        logger.warn(`[ABI Load] WARNING: ABI for "${key}" failed to load. Check file path and name.`);
     }
 });
 
