@@ -1,5 +1,5 @@
 // core/flashSwapManager.js
-// --- VERSION 1.2 --- Used absolute path for ABI requirement
+// --- VERSION 1.4 --- Used path.resolve with __dirname for ABI requirement path
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
@@ -7,18 +7,24 @@ const NonceManager = require('../utils/nonceManager'); // Import NonceManager
 const { AbiCoder } = require('ethers'); // Import AbiCoder
 const path = require('path'); // Import Node.js path module
 
-// --- USING ABSOLUTE PATH FOR ABI ---
-// Construct the absolute path to the FlashSwap contract artifact.
-// __dirname is the directory of the current script (core/).
-// We go up two levels (../..), then navigate to artifacts/contracts/FlashSwap.sol/FlashSwap.json
-const flashSwapArtifactPath = path.join(__dirname, '../../artifacts/contracts/FlashSwap.sol/FlashSwap.json');
+// --- USING ABSOLUTE PATH FOR ABI (Using path.resolve) ---
+// Get the directory of the current script (core/)
+const currentDir = __dirname;
+
+// Construct the absolute path to the FlashSwap contract artifact using path.resolve.
+// path.resolve(from, to) resolves 'to' relative to 'from'.
+// path.resolve(currentDir, '..', '..', 'artifacts', 'contracts', 'FlashSwap.sol', 'FlashSwap.json')
+// This means: start at currentDir, go up one level, go up another level, then into artifacts/...
+const flashSwapArtifactPath = path.resolve(currentDir, '..', '..', 'artifacts', 'contracts', 'FlashSwap.sol', 'FlashSwap.json');
+
+logger.debug(`[FlashSwapManager] Attempting to load ABI from resolved path: ${flashSwapArtifactPath}`);
 
 let FlashSwapArtifact;
 try {
     // Require the FlashSwap contract artifact using the constructed absolute path.
     // This contains the ABI needed to interact with the deployed contract.
     FlashSwapArtifact = require(flashSwapArtifactPath);
-    logger.debug(`[FlashSwapManager] Successfully loaded ABI from: ${flashSwapArtifactPath}`);
+    logger.debug('[FlashSwapManager] Successfully loaded ABI.');
 } catch (e) {
     logger.error(`[FlashSwapManager] CRITICAL ERROR: Failed to load ABI from path: ${flashSwapArtifactPath}`, e);
      // Re-throw a clear error indicating the ABI loading failed
