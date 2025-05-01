@@ -22,7 +22,7 @@ interface IPool { // Aave V3 Pool interface for flash loans
         address receiverAddress,
         address[] calldata assets,
         uint256[] calldata amounts,
-        uint256[] calvala interestRateModes,
+        uint256[] calldata interestRateModes, // CORRECTED: was 'calvala'
         address onBehalfOf,
         bytes calldata params,
         uint16 referralCode
@@ -76,7 +76,8 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     struct SwapStep { address pool; address tokenIn; address tokenOut; uint24 fee; uint256 minOut; uint8 dexType; }
     // Added titheRecipient to ArbParams
     struct ArbParams { SwapStep[] path; address initiator; address titheRecipient; } // Parameters passed to Aave's executeOperation
-    
+
+
     // --- Events ---
     event FlashSwapInitiated(address indexed caller, address indexed pool, CallbackType tradeType, uint amount0, uint amount1);
     event AaveFlashLoanInitiated(address indexed caller, address indexed asset, uint amount);
@@ -121,7 +122,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     function POOL() external view override returns (address) {
         return address(AAVE_POOL);
     }
-    
+
     // --- Uniswap V3 Flash Callback ---
     // Called by Uniswap V3 pool after successful flash loan
     // msg.sender is the Uniswap V3 pool contract
@@ -293,7 +294,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
          require(finalAmount > 0, "FS:S2Z");
          // Note: Profit calculation and repayment are handled in uniswapV3FlashCallback
     }
-    
+
     // Executes a 3-hop swap sequence: TokenA -> TokenB -> TokenC -> TokenA
     function _executeTriangularSwaps( address _tokenA, uint _amountA, bytes memory _params ) internal returns (uint finalAmount) {
         TriangularPathParams memory pathParams = abi.decode(_params, (TriangularPathParams));
@@ -360,12 +361,13 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
         }
     }
 
-    // --- _executeSwapPath (General path executor for Aave flash loans) ---
+        // --- _executeSwapPath (General path executor for Aave flash loans) ---
     // Executes a sequence of swaps defined by the _path array across supported DEXs.
     function _executeSwapPath(SwapStep[] memory _path) internal returns (uint finalAmount) {
         uint amountIn = IERC20(_path[0].tokenIn).balanceOf(address(this));
         require(amountIn > 0, "FS:PSA0");
 
+        // --- Start of the section from the image ---
         for (uint i = 0; i < _path.length; i++) {
             SwapStep memory step = _path[i];
             uint amountOut;
@@ -459,146 +461,7 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
             // Ensure we received a positive amount from the swap
             require(amountIn > 0, string(abi.encodePacked("FS:PS", _numToString(i+1), "Z")));
         }
+        // --- End of the section from the image ---
 
         finalAmount = amountIn; // The final amount received after the last swap
     }
-
-    // --- Helper Functions ---
-    // Approves spender for maximum amount if current allowance is less than max uint256.
-    // Prevents issues with allowances needing to be reset after spending.
-    // Using type(uint256).max is standard practice for DEX routers/pools.
-    function _approveSpenderIfNeeded(address _token, address _spender, uint _amount) internal {
-         if (_amount == 0) { return; } // No need to approve if amount is zero
-        // Check current allowance. If it's less than uint256.max, approve max.
-        if (IERC20(_token).allowance(address(this), _spender) < type(uint256).max) {
-            IERC20(_token).safeApprove(_spender, type(uint256).max);
-        }
-    }
-
-     // Helper function to convert uint to string (for revert messages)
-    function _numToString(uint _num) internal pure returns (string memory) {
-        if (_num == 0) return "0";
-        uint j = _num;
-        uint len;
-        while (j != 0) {
-            len++;
-            j /= 10;
-        }
-        bytes memory bstr = new bytes(len);
-        uint k = len;
-        while (_num != 0) {
-            k = k-1;
-            uint8 temp = (48 + uint8(_num % 10)); // Convert digit to ASCII character
-            bytes1 b1 = bytes1(temp);
-            bstr[k] = b1;
-            _num /= 10;
-        }
-        return string(bstr);
-    }
-    
-    // --- External Functions ---
-    // Initiates a Uniswap V3 flash loan by calling the pool's flash function.
-    // This contract acts as the receiver.
-    function initiateUniswapV3FlashLoan(
-        CallbackType _callbackType,
-        address _poolAddress, // The V3 pool address
-        uint _amount0, // Amount of token0 to borrow
-        uint _amount1, // Amount of token1 to borrow
-        bytes calldata _params, // Encoded parameters for the callback logic (e.g., TwoHopParams or TriangularPathParams)
-        address _titheRecipient // <<< Added tithe recipient here
-    ) external onlyOwner {
-        IUniswapV3Pool pool = IUniswapV3Pool(_poolAddress);
-        address token0 = pool.token0();
-        address token1 = pool.token1();
-        uint24 fee = pool.fee();
-
-        // Encode data to be passed to uniswapV3FlashCallback
-        bytes memory data = abi.encode(
-            FlashCallbackData({
-                callbackType: _callbackType,
-                amount0Borrowed: _amount0,
-                amount1Borrowed: _amount1,
-                caller: msg.sender, // Should be 'owner' based on onlyOwner modifier
-                poolBorrowedFrom: _poolAddress,
-                token0: token0,
-                token1: token1,
-                fee: fee,
-                params: _params,
-                titheRecipient: _titheRecipient // <<< Added tithe recipient here
-            })
-        );
-
-        emit FlashSwapInitiated(msg.sender, _poolAddress, _callbackType, _amount0, _amount1);
-
-        // Initiate the flash loan from the V3 pool
-        pool.flash(address(this), _amount0, _amount1, data);
-    }
-
-    // Initiates an Aave V3 flash loan by calling the Aave pool's flashLoan function.
-    // This contract acts as the receiver.
-    function initiateAaveFlashLoan(
-        address _asset, // The asset to borrow
-        uint _amount, // The amount to borrow
-        // The _params bytes calldata will contain the encoded ArbParams struct
-        // ArbParams now includes path, initiator, and titheRecipient (handled by off-chain builder and struct definition in part 1)
-        bytes calldata _params
-    ) external onlyOwner {
-        // Decode the params here to get the titheRecipient for the event,
-        // or rely on the executeOperation decoding.
-        // Relying on executeOperation decoding is fine.
-        // We just need the asset and amount for the event here.
-
-        address[] memory assets = new address[](1);
-        assets[0] = _asset;
-
-        uint256[] memory amounts = new uint256[](1);
-        amounts[0] = _amount;
-
-        uint256[] memory modes = new uint256[](1); // 0 = NoDebt, 1 = Stable, 2 = Variable
-        modes[0] = 0; // Arbitrage usually uses NoDebt flash loans
-
-        // The 'params' argument for Aave's flashLoan contains custom data
-        // that Aave will pass back to our executeOperation function.
-        // This is where we put our encoded ArbParams struct.
-        bytes memory paramsForAave = _params; // Pass the params received from the off-chain caller directly
-
-        // Decode params only for logging the recipient in the event here
-        ArbParams memory decodedParamsForEvent = abi.decode(paramsForAave, (ArbParams));
-        // Emit AaveFlashLoanInitiated event - could include titheRecipient here too if desired
-        // emit AaveFlashLoanInitiated(msg.sender, _asset, _amount); // Original event
-        // Alternative event with more info:
-        emit AaveFlashLoanInitiated(decodedParamsForEvent.initiator, _asset, _amount); // Using initiator from decoded params
-
-
-        // Initiate the flash loan from the Aave Pool
-        AAVE_POOL.flashLoan(
-            address(this), // receiverAddress: This contract
-            assets,
-            amounts,
-            modes,
-            address(this), // onBehalfOf: This contract (msg.sender for Aave)
-            paramsForAave, // params: Our custom data (encoded ArbParams)
-            0 // referralCode
-        );
-    }
-
-    // --- Emergency Functions ---
-    // Allows owner to withdraw stranded ERC20 tokens
-    function emergencyWithdraw(address _token) external onlyOwner {
-        uint balance = IERC20(_token).balanceOf(address(this));
-        require(balance > 0, "FS:NW");
-        IERC20(_token).safeTransfer(owner, balance);
-        emit EmergencyWithdrawal(_token, owner, balance);
-    }
-
-    // Allows owner to withdraw stranded Ether
-    function emergencyWithdrawETH() external onlyOwner {
-        uint balance = address(this).balance;
-        require(balance > 0, "FS:NWE");
-        payable(owner).transfer(balance); // Use payable(owner) for transfer
-        emit EmergencyWithdrawal(address(0), owner, balance);
-    }
-
-    // --- Fallback ---
-    receive() external payable {} // Allows receiving Ether
-}
