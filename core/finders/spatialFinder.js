@@ -1,5 +1,5 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.9 --- Corrected validation for 0n values in constructor. Filters out paths requiring DODO quote sell as first hop.
+// --- VERSION v1.10 --- Fixed ReferenceError for poolBuyT0WithT1/poolSellT0ForT1 scope. Corrected validation for 0n values. Filters DODO quote sell first hop.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
@@ -60,7 +60,7 @@ class SpatialFinder {
         this.simulationInputAmounts = simulationAmounts; // Store the simulation amounts object
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.9] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`);
+        logger.info(`[SpatialFinder v1.10] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`);
     }
 
     /**
@@ -82,7 +82,7 @@ class SpatialFinder {
 
     /**
      * Calculates the price of token0 in terms of token1 (token0/token1) for a given pool state.
-     * The price is returned as a BigInt scaled by 1e18 (or potentially 1e36 depending on implementation details).
+     * Returns the price scaled by 1e18 for consistent BigInt arithmetic.
      * This scaled price is used for comparing prices across different pools and DEX types.
      * @param {object} poolState - The state object for a specific pool, including token info and DEX-specific data (e.g., sqrtPriceX96, reserves).
      * @returns {bigint | null} The price of token0 in token1 scaled by 1e18 (or relevant scale), or null if calculation fails or data is insufficient.
@@ -106,7 +106,7 @@ class SpatialFinder {
                         // getUniV3Price returns price T0/T1 scaled by 1e18
                         return getUniV3Price(BigInt(poolState.sqrtPriceX96), token0, token1); // Ensure sqrtPriceX96 is BigInt
                     }
-                    break; // Exit switch if sqrtPriceX96 is missing or invalid
+                    break; // Exit switch if sqrtPriceX96 is missing
 
                 case 'sushiswap': // Assuming SushiSwap uses Uniswap V2 logic
                     // V2 price is calculated from reserves
@@ -148,6 +148,15 @@ class SpatialFinder {
                             // Price(T0 in T1) = (1e18 * 1e18) / priceBaseInQuote (scaled).
                             if (priceBaseInQuote === 0n) return null; // Avoid division by zero
                             // This calculation `(BIGNUMBER_1E18 * BIGNUMBER_1E18) / priceBaseInQuote`
+                            // effectively scales the inverse price by 1e18 * 1e18. Let's stick to 1e18 scaling.
+                            // Correct inverse scaling for price T1/T0 scaled by 1e18 to get T0/T1 scaled by 1e18:
+                            // Price(T0/T1) = (Amount of T0) / (Amount of T1)
+                            // Price(T1/T0) = (Amount of T1) / (Amount of T0)
+                            // If priceBaseInQuote is Price(T1 in T0) scaled by 1e18, and T1 is Base, T0 is Quote:
+                            // priceBaseInQuote = (Amount of T1 / Amount of T0) * 1e18
+                            // We need Price(T0 in T1) = (Amount of T0 / Amount of T1) * 1e18
+                            // This is 1 / (priceBaseInQuote / 1e18) * 1e18 = (1e18 * 1e18) / priceBaseInQuote.
+                            // Yes, the original formula `(BIGNUMBER_1E18 * BIGNUMBER_1E18) / priceBaseInQuote`
                             // seems correct for getting T0/T1 scaled by 1e18 if priceBaseInQuote is T1/T0 scaled by 1e18.
                             return (BIGNUMBER_1E18 * BIGNUMBER_1E18) / priceBaseInQuote; // Price T0/T1 scaled by 1e18
                         }
@@ -169,6 +178,7 @@ class SpatialFinder {
         }
         return null; // Return null if price calculation fails for any reason
     }
+
 // --- END OF PART 1 ---
     /**
      * Finds potential spatial arbitrage opportunities among the provided pool states.
@@ -316,13 +326,16 @@ class SpatialFinder {
 
                          // Create the potential opportunity object using the determined buy/sell pools and tokens
                          // Pass the pools in the order of the planned swaps: (Borrowed -> Intermediate) then (Intermediate -> Borrowed)
+                         // --- FIX: Pass poolLowPrice0_1 (T1->T0) and poolHighPrice0_1 (T0->T1) ---
                          const opportunity = this._createOpportunity(
-                             poolBuyT0WithT1, // This pool is used for the first swap: tokenBorrowedOrRepaid (T1) -> tokenIntermediate (T0)
-                             poolSellT0ForT1, // This pool is used for the second swap: tokenIntermediate (T0) -> tokenBorrowedOrRepaid (T1)
+                             poolLowPrice0_1, // This pool is used for the first swap: tokenBorrowedOrRepaid (T1) -> tokenIntermediate (T0)
+                             poolHighPrice0_1, // This pool is used for the second swap: tokenIntermediate (T0) -> tokenBorrowedOrRepaid (T1)
                              canonicalKey, // Canonical key of the pair
                              tokenBorrowedOrRepaid, // The token assumed to be borrowed/repaid (T1)
                              tokenIntermediate // The intermediate token (T0)
                          );
+                         // --- END FIX ---
+
 
                          // Add the created opportunity to the list if it was successfully created (_createOpportunity didn't return null)
                          if (opportunity) {
@@ -353,7 +366,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapT1toT0, poolSwapT0toT1, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.9]`;
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.10]`; // Version bump
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
