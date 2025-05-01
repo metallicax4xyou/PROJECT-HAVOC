@@ -1,11 +1,19 @@
 // core/flashSwapManager.js
-// --- VERSION 1.4 --- Used path.resolve with __dirname for ABI requirement path
+// --- VERSION 1.5 --- Added debug logs for __dirname and process.cwd()
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
 const NonceManager = require('../utils/nonceManager'); // Import NonceManager
 const { AbiCoder } = require('ethers'); // Import AbiCoder
 const path = require('path'); // Import Node.js path module
+
+// --- DEBUGGING PATHS ---
+const currentDirDebug = __dirname;
+const processCwdDebug = process.cwd();
+logger.debug(`[FlashSwapManager Debug Path] __dirname: ${currentDirDebug}`);
+logger.debug(`[FlashSwapManager Debug Path] process.cwd(): ${processCwdDebug}`);
+// --- END DEBUGGING PATHS ---
+
 
 // --- USING ABSOLUTE PATH FOR ABI (Using path.resolve) ---
 // Get the directory of the current script (core/)
