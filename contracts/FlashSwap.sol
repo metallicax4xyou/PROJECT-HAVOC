@@ -265,7 +265,8 @@ contract FlashSwap is IUniswapV3FlashCallback, IFlashLoanReceiver, ReentrancyGua
     
         // --- Internal functions for UniV3 Flash Loan Flow ---
         // Executes a 2-hop swap sequence: BorrowedToken -> IntermediateToken -> BorrowedToken
-            function _executeTwoHopSwaps( address _tokenBorrowed, uint _amountBorrowed, bytes memory _params ) internal returns (uint finalAmount) {}
+
+        function _executeTwoHopSwaps( address _tokenBorrowed, uint _amountBorrowed, bytes memory _params ) internal returns (uint finalAmount) {}
         TwoHopParams memory arbParams = abi.decode(_params, (TwoHopParams));
 
         // Swap 1: Borrowed Token -> Intermediate Token
