@@ -1,5 +1,5 @@
 // scripts/deploy.js
-// --- VERSION v3.8 --- Use getNamedSigner('deployer') for robustness
+// --- VERSION v3.9 --- Revert to getSigners, add validation
 
 const hre = require("hardhat");
 const ethers = hre.ethers; // Use ethers from Hardhat Runtime Environment
@@ -17,18 +17,27 @@ async function main() {
     console.log(`🚀 Deploying FlashSwap contract to ${hre.network.name}...`);
 
     // --- Get Network and Deployer Signer Info ---
-    // Use getNamedSigner for more robust account retrieval in Hardhat environments
     let deployer;
     try {
-        // 'deployer' is a convention often used by Hardhat plugins, or defaults to the first signer
-        deployer = await ethers.getNamedSigner('deployer');
+        const signers = await ethers.getSigners();
+        if (signers.length === 0) {
+             // This should not happen when running `npx hardhat node` with default accounts,
+             // or when `PRIVATE_KEY` is set for a non-local network.
+             throw new Error("No signers available from ethers.getSigners(). Ensure your network config has accounts or you are running a node that provides them.");
+        }
+        deployer = signers[0]; // Get the first signer
         if (!deployer?.address) {
-             throw new Error("Could not retrieve deployer signer.");
+             // Extra check in case the first element is unexpectedly undefined
+             throw new Error("First signer retrieved is undefined or missing address.");
         }
     } catch (signerError) {
          console.error("❌ FATAL: Error getting deployer signer:", signerError.message);
-         // If using 'remote' accounts, ensure the Hardhat node is running with funded accounts.
-         console.log("Hint: If running against a local node, ensure the node is started and configured correctly (e.g., with --fork and funded accounts).");
+         // Provide hints based on common causes
+         if (hre.network.name === 'localFork' || hre.network.name === 'hardhat') {
+              console.log("Hint: If running against a local node (`hardhat node`), ensure it is running and configured to provide accounts (e.g., default behavior or `accounts: 'remote'` for `localFork`).");
+         } else {
+              console.log("Hint: Ensure PRIVATE_KEY is correctly set in your .env for network", hre.network.name);
+         }
          process.exit(1);
     }
 
@@ -39,8 +48,8 @@ async function main() {
     try {
         const balance = await ethers.provider.getBalance(deployer.address);
         console.log(`Account Balance (${network.name} ETH): ${ethers.formatEther(balance)}`);
-        if (balance === 0n && network.chainId !== 31337) { // Only warn for zero balance on non-local chains
-            console.warn("⚠️ Warning: Deployer account has zero balance.");
+        if (balance === 0n && network.chainId !== 31337 && network.chainId !== 1337) { // Only warn for zero balance on non-local chains (31337 is Hardhat default)
+            console.warn("⚠️ Warning: Deployer account has zero balance on a non-local network.");
         }
     } catch (error) {
         console.error("❌ Error fetching deployer balance:", error);
