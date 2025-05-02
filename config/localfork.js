@@ -1,5 +1,5 @@
 // config/localfork.js
-// --- VERSION v1.2 --- Moved MIN_PROFIT_THRESHOLDS inside the export object and added USDC.e entry.
+// --- VERSION v1.3 --- Moved MIN_PROFIT_THRESHOLDS inside the export object and added entries for all tokens.
 // Configuration for the local Hardhat Fork of Arbitrum.
 // Mostly mirrors arbitrum.js, but explicitly sets the FlashSwap contract address.
 
@@ -88,22 +88,23 @@ const LOCAL_FORK_CONFIG = {
     // Gas & Profitability Settings (using the copied estimates and defaults)
     GAS_COST_ESTIMATES: GAS_COST_ESTIMATES,
 
-    // --- MOVED INSIDE THE OBJECT AND ADDED USDC.e ENTRY ---
+    // --- MOVED INSIDE THE OBJECT AND ADDED ALL TOKEN ENTRIES ---
     MIN_PROFIT_THRESHOLDS: {
         NATIVE: 0.00005, // Threshold in native currency (ETH)
         DEFAULT: 0.00005, // Default threshold for tokens without specific entry (in Native equivalent)
-        'USDC': 0.00005, // Example: Threshold for USDC (in Native equivalent)
-        'USDC.e': 0.00005, // Added entry for USDC.e
-        'USDT': 0.00005, // Example: Threshold for USDT (in Native equivalent)
-        'DAI': 0.00005, // Example: Threshold for DAI (in Native equivalent)
-        'WETH': 0.00005, // Example: Threshold for WETH (in Native equivalent)
-        'WBTC': 0.00005, // Example: Threshold for WBTC (in Native equivalent)
-        'ARB': 0.00005, // Example: Threshold for ARB (in Native equivalent)
-        'FRAX': 0.00005, // Example: Threshold for FRAX (in Native equivalent)
-        'LINK': 0.00005, // Example: Threshold for LINK (in Native equivalent)
-        'GMX': 0.00005, // Example: Threshold for GMX (in Native equivalent)
-        'MAGIC': 0.00005, // Example: Threshold for MAGIC (in Native equivalent)
-        // Add entries for any other tokens used in your pools/strategies
+        // Add entries for ALL tokens defined in TOKENS constant
+        'WETH': 0.00005,
+        'USDC': 0.00005,
+        'USDC.e': 0.00005, // Use quotes for keys with dots
+        'USDT': 0.00005,
+        'ARB': 0.00005,
+        'DAI': 0.00005,
+        'WBTC': 0.00005,
+        'LINK': 0.00005,
+        'FRAX': 0.00005,
+        'GMX': 0.00005,
+        'MAGIC': 0.00005,
+        // Ensure all tokens from ../constants/tokens.js are listed here
     },
     // --- ---
 
