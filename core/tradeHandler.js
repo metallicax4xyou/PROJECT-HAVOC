@@ -1,5 +1,5 @@
 // core/tradeHandler.js
-// --- VERSION v1.2 --- Adds Aave V3 flash loan path selection and execution logic.
+// --- VERSION v1.3 --- Passes titheRecipient from config to builders.
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
@@ -11,6 +11,7 @@ const { executeTransaction } = require('./txExecutor');
  * Processes profitable trades, selects the best, determines flash loan provider (UniV3 or Aave),
  * builds/encodes parameters, and executes the appropriate transaction.
  * Handles V3->V3 (UniV3 FlashLoan) and any path starting non-V3 (Aave FlashLoan).
+ * Now retrieves and passes the titheRecipient from config to the builders.
  */
 async function processAndExecuteTrades(
     trades,
@@ -20,7 +21,20 @@ async function processAndExecuteTrades(
     loggerInstance = logger // Allow passing logger, default to global
 ) {
     const isDryRun = config.DRY_RUN === 'true' || config.DRY_RUN === true;
-    const logPrefix = '[TradeHandler v1.2]';
+    const logPrefix = '[TradeHandler v1.3]'; // Updated version
+
+    // --- Retrieve Tithe Recipient from Config ---
+    const titheRecipient = config.TITHE_WALLET_ADDRESS;
+    if (!titheRecipient || !ethers.isAddress(titheRecipient)) {
+        // This is a critical error, should have been caught by config validation,
+        // but double-check here before attempting to use it.
+        loggerInstance.error(`${logPrefix} CRITICAL ERROR: TITHE_WALLET_ADDRESS is missing or invalid in configuration. Cannot proceed with execution.`);
+        // Depending on desired behavior, you might throw an error, exit, or log and return.
+        // Returning allows other parts of the bot to potentially continue.
+        return;
+    }
+    loggerInstance.debug(`${logPrefix} Tithe Recipient Address: ${titheRecipient}`);
+
 
     if (!flashSwapManagerInstance || trades.length === 0) {
         loggerInstance.info(`${logPrefix} No trades or FlashSwapManager missing. Skipping.`);
@@ -36,6 +50,8 @@ async function processAndExecuteTrades(
                  providerType = (trade.path[0].dex === 'uniswapV3') ? 'UNIV3' : 'AAVE';
              }
             loggerInstance.info(`${logPrefix} [DRY RUN Trade ${index + 1}] Provider: ${providerType}, Type: ${trade.type}, Path: ${trade.path?.map(p=>p.dex).join('->') || 'N/A'}, Profit: ${ethers.formatEther(trade.netProfitNativeWei || 0n)} ${config.NATIVE_CURRENCY_SYMBOL}`);
+            // --- Log Tithe Recipient in Dry Run if desired ---
+            // loggerInstance.debug(`${logPrefix} [DRY RUN Trade ${index + 1}] Tithe Recipient: ${titheRecipient}`);
         });
         return;
     }
@@ -111,7 +127,8 @@ async function processAndExecuteTrades(
             loggerInstance.debug(`${logPrefix} Selected builder: ${builderFunction.name}`);
 
             // --- 3.A.2 Call UniV3 Builder ---
-            buildResult = builderFunction(tradeToExecute, simResultForBuilder, config);
+            // --- PASSING titheRecipient to the builder ---
+            buildResult = builderFunction(tradeToExecute, simResultForBuilder, config, titheRecipient); // <-- Passed titheRecipient here
             if (!buildResult || !buildResult.params || !buildResult.borrowTokenAddress || !buildResult.borrowAmount || !buildResult.typeString || !buildResult.contractFunctionName) {
                 throw new Error("UniV3 parameter builder failed to return expected structure.");
             }
@@ -132,11 +149,12 @@ async function processAndExecuteTrades(
             loggerInstance.debug(`${logPrefix} UniV3 Flash Loan Amounts: Amt0=${amount0ToBorrow}, Amt1=${amount1ToBorrow}`);
 
             // --- 3.A.5 Prepare Contract Call Arguments ---
+            // Assuming FlashSwap.sol's flash() function signature is (address pool, uint256 amount0, uint256 amount1, bytes calldata data)
             contractCallArgs = [
                 borrowPoolState.address, // address _poolAddress
                 amount0ToBorrow,         // uint _amount0
                 amount1ToBorrow,         // uint _amount1
-                encodedParamsBytes       // bytes calldata _params
+                encodedParamsBytes       // bytes calldata _params (contains the actual swap params + titheRecipient)
             ];
 
         } else if (providerType === 'AAVE') {
@@ -145,7 +163,8 @@ async function processAndExecuteTrades(
              if (!TxParamBuilder.buildAavePathParams) { // Check if builder exists
                  throw new Error("Aave parameter builder (buildAavePathParams) not found in paramBuilder index.");
              }
-             buildResult = await TxParamBuilder.buildAavePathParams(tradeToExecute, simResultForBuilder, config, flashSwapManagerInstance); // Pass manager
+             // --- PASSING titheRecipient to the Aave builder ---
+             buildResult = await TxParamBuilder.buildAavePathParams(tradeToExecute, simResultForBuilder, config, flashSwapManagerInstance, titheRecipient); // <-- Passed titheRecipient here
              if (!buildResult || !buildResult.params || !buildResult.borrowTokenAddress || !buildResult.borrowAmount || !buildResult.typeString || !buildResult.contractFunctionName) {
                  throw new Error("Aave parameter builder failed to return expected structure.");
              }
@@ -157,10 +176,11 @@ async function processAndExecuteTrades(
              const encodedArbParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [buildResult.params]);
 
              // --- 3.B.3 Prepare Contract Call Arguments ---
+             // Assuming FlashSwap.sol's initiateAaveFlashLoan signature is (address[] assets, uint256[] amounts, bytes params)
              contractCallArgs = [
                  [buildResult.borrowTokenAddress], // address[] memory assets
                  [buildResult.borrowAmount],       // uint256[] memory amounts
-                 encodedArbParamsBytes             // bytes memory params
+                 encodedArbParamsBytes             // bytes memory params (contains the actual swap path + titheRecipient)
              ];
 
         } else {
@@ -170,8 +190,14 @@ async function processAndExecuteTrades(
 
 
         // --- 4. Get Gas Limit ---
+        // Note: Gas estimation should ideally happen AFTER params are fully built,
+        // possibly simulating the *entire* flash loan call.
+        // This current gas estimate is from the initial opportunity finding, which might be
+        // less accurate for the final transaction. Consider refining gas estimation later (Phase 1).
         const gasLimit = BigInt(tradeToExecute.gasEstimate || 0n);
         if (gasLimit <= 0n) {
+            // Log a warning or error, but maybe don't hard-fail if gasEstimatorInstance can provide a fallback?
+            // For now, keep it as an error as in original code.
             throw new Error("Missing or invalid gas estimate (gasLimit) on trade data.");
         }
         loggerInstance.debug(`${logPrefix} Using Gas Limit: ${gasLimit.toString()}`);
@@ -193,12 +219,17 @@ async function processAndExecuteTrades(
         // --- 6. Log Result & Handle Stop ---
         if (executionResult.success) {
             loggerInstance.info(`${logPrefix} 🎉🎉🎉 SUCCESSFULLY EXECUTED via ${providerType}. Tx: ${executionResult.txHash}`);
+            // --- Log Tithe Recipient on Success ---
+            loggerInstance.info(`${logPrefix} Tithe Destination: ${titheRecipient}`);
+
             if (config.STOP_ON_FIRST_EXECUTION) {
                 loggerInstance.warn(`${logPrefix} STOP_ON_FIRST_EXECUTION is true. Signaling stop... (Manual restart needed)`);
                 process.exit(0); // Simple exit for now
             }
         } else {
             loggerInstance.error(`${logPrefix} Execution FAILED via ${providerType}. See logs above for details. Hash: ${executionResult.txHash || 'N/A'}`);
+             // Log Tithe Recipient even on failure for debugging? Maybe too much info.
+             // loggerInstance.debug(`${logPrefix} Tithe Destination (Attempted): ${titheRecipient}`);
         }
 
     } catch (execError) {
