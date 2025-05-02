@@ -1,5 +1,5 @@
 // core/tx/builders/aavePathBuilder.js
-// --- VERSION v1.2 --- Added Tithe Recipient field to ArbParams.
+// --- VERSION v1.3 --- Accepts titheRecipient as explicit argument.
 
 const { ethers } = require('ethers');
 const logger = require('../../../utils/logger'); // Adjust path if needed
@@ -39,17 +39,18 @@ function mapDexType(dexString) {
  * Uses amountIn from opportunity, but finalAmount from simulationResult.
  * Applies slippage only to the final amountOut for the last step's minOut.
  * Handles gas estimation mode where simulationResult provides minimal amounts.
- * Includes the Tithe recipient address from config.
+ * Accepts the Tithe recipient address as an explicit argument.
  *
  * @param {object} opportunity The tradeData object (containing path, amountIn, tokenIn).
  * @param {object} simulationResult Contains simulation amounts { initialAmount, hop1AmountOut, finalAmount }. Used for minOut calculation.
- * @param {object} config The application config object (needed for SLIPPAGE, TITHE_WALLET_ADDRESS).
+ * @param {object} config The application config object (needed for SLIPPAGE).
  * @param {object} flashSwapManagerInstance Needed to get the initiator address.
+ * @param {string} titheRecipient - The address to send the tithe to. <-- Added titheRecipient parameter
  * @returns {{ params: object, borrowTokenAddress: string, borrowAmount: bigint, typeString: string, contractFunctionName: string }}
  * @throws {ArbitrageError} If inputs are invalid or processing fails.
  */
-async function buildAavePathParams(opportunity, simulationResult, config, flashSwapManagerInstance) {
-    const functionSig = `[ParamBuilder AavePath v1.2]`; // Updated version
+async function buildAavePathParams(opportunity, simulationResult, config, flashSwapManagerInstance, titheRecipient) { // <-- Added titheRecipient here
+    const functionSig = `[ParamBuilder AavePath v1.3]`; // Updated version
     logger.debug(`${functionSig} Building parameters...`);
 
     // --- Input Validation ---
@@ -59,9 +60,9 @@ async function buildAavePathParams(opportunity, simulationResult, config, flashS
     if (simulationResult?.finalAmount === undefined || simulationResult?.finalAmount === null) { throw new ArbitrageError('Missing finalAmount in simulationResult object.', 'PARAM_BUILD_ERROR', { simulationResult }); }
     if (config?.SLIPPAGE_TOLERANCE_BPS === undefined) { throw new ArbitrageError('Missing SLIPPAGE_TOLERANCE_BPS in config.', 'CONFIG_ERROR'); }
     if (!flashSwapManagerInstance || typeof flashSwapManagerInstance.getSignerAddress !== 'function') { throw new ArbitrageError('Invalid or missing flashSwapManagerInstance.', 'PARAM_BUILD_ERROR'); }
-    // Validate Tithe Recipient Address - NEW VALIDATION
-    if (!config.TITHE_WALLET_ADDRESS || !ethers.isAddress(config.TITHE_WALLET_ADDRESS)) {
-         throw new ArbitrageError('Missing or invalid TITHE_WALLET_ADDRESS in config. Tithe mechanism requires this.', 'CONFIG_ERROR');
+    // Validate Tithe Recipient Address - Use the passed argument
+    if (!titheRecipient || typeof titheRecipient !== 'string' || !ethers.isAddress(titheRecipient)) { // <-- Validating the passed argument
+         throw new ArbitrageError('Missing or invalid titheRecipient address provided.', 'PARAM_BUILD_ERROR');
     }
     // --- End Validation ---
 
@@ -100,8 +101,24 @@ async function buildAavePathParams(opportunity, simulationResult, config, flashS
         const stepMinOut = (i === opportunity.path.length - 1) ? minAmountOutFinal : 0n;
         const dexType = mapDexType(step.dex);
         let feeUint24 = 0;
-        if (step.fee !== undefined && step.fee !== null) { feeUint24 = Number(step.fee); if (isNaN(feeUint24) || feeUint24 < 0 || feeUint24 > 16777215) { logger.warn(`${functionSig} Invalid fee ${step.fee} for step ${i}. Using 0.`); feeUint24 = 0; }
-        } else if (step.dex === 'uniswapV3') { logger.warn(`${functionSig} Missing fee for V3 step ${i}. Using 0.`); feeUint24 = 0; }
+        // --- Handle fee for V3 steps ---
+        if (step.dex === 'uniswapV3') {
+            if (step.fee !== undefined && step.fee !== null) {
+                 feeUint24 = Number(step.fee);
+                 if (isNaN(feeUint24) || feeUint24 < 0 || feeUint24 > 16777215) {
+                     logger.warn(`${functionSig} Invalid V3 fee ${step.fee} for step ${i}. Using 0.`);
+                     feeUint24 = 0;
+                 }
+            } else {
+                // V3 steps MUST have a fee. This is a potential issue in the opportunity data.
+                logger.error(`${functionSig} Missing required fee for Uniswap V3 step at index ${i}. Aborting.`);
+                throw new ArbitrageError(`Missing required fee for Uniswap V3 step at index ${i}.`, 'PARAM_BUILD_ERROR', { step });
+            }
+        } else {
+             // For non-V3 DEXs, fee might be irrelevant or handled differently. Defaulting to 0.
+             feeUint24 = 0;
+        }
+
 
         swapStepArray.push({
             pool: step.address, tokenIn: step.tokenInAddress, tokenOut: step.tokenOutAddress,
@@ -112,15 +129,15 @@ async function buildAavePathParams(opportunity, simulationResult, config, flashS
     // --- Get Initiator Address ---
     const initiatorAddress = await flashSwapManagerInstance.getSignerAddress();
 
-    // --- Get Tithe Recipient Address from config ---
-    const titheRecipientAddress = config.TITHE_WALLET_ADDRESS;
+    // --- Use the passed titheRecipient argument ---
+    const titheRecipientAddress = titheRecipient;
     // Note: Tithe percentage calculation and transfer logic will be in FlashSwap.sol
 
     // --- Construct ArbParams Object ---
     const params = {
         path: swapStepArray,
         initiator: initiatorAddress,
-        titheRecipient: titheRecipientAddress, // <<< Added Tithe recipient here
+        titheRecipient: titheRecipientAddress, // <<< Using the passed Tithe recipient here
     };
 
     // --- Define Type String (MUST MATCH FlashSwap.sol ArbParams struct) ---
