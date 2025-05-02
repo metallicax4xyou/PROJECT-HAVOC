@@ -39,7 +39,8 @@ class PoolScanner {
          // *** CORRECTED PATH ***
         const DodoFetcher = require('./fetchers/dodoFetcher');
         const key = 'dodo';
-        thisers[key] = new DodoFetcher(config);
+        // FIX TYPO HERE: Changed 'thisers[key]' to 'this.fetchers[key]'
+        this.fetchers[key] = new DodoFetcher(config);
         logger.debug(`[PoolScanner] Initialized fetcher: Key='${key}', Constructor=${this.fetchers[key]?.constructor?.name || 'Unknown'}`);
       } catch (e) { logger.error(`[PoolScanner] Failed to initialize DodoFetcher: ${e.message}`, e.stack); }
     } else { logger.info('[PoolScanner] DODO fetcher disabled by config.'); }
