@@ -75,7 +75,7 @@ function loadConfig() {
         // Use the networkName from metadata to load the correct file
         // Ensure the file name matches the lowercase networkName, but the exported object might have the uppercase NAME
         networkSpecificSettings = require(`./${networkName}.js`); // Use lowercase networkName for file path
-        logger.log(`[Config] Loaded network settings from ./${networkName}.js`);
+        logger.info(`[Config] Loaded network settings from ./${networkName}.js`);
     } catch (e) {
         throw new Error(`[Config] CRITICAL: Failed to load config/${networkName}.js. Make sure it exists and is valid: ${e.message}`);
     }
