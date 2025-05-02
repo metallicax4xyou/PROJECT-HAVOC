@@ -1,6 +1,6 @@
 // core/calculation/priceCalculation.js
 // Utility functions for calculating raw and effective prices for arbitrage finders.
-// --- VERSION v1.1 --- Corrected Uniswap V3, SushiSwap, and DODO price calculation logic to use 1e18 scaling.
+// --- VERSION v1.2 --- Corrected Uniswap V3 price calculation logic (calculates T1/T0 scaled).
 
 const logger = require('../../utils/logger'); // Assuming logger is accessible via relative path
 const { handleError, ArbitrageError } = require('../../utils/errorHandler'); // Adjust path as needed
@@ -14,16 +14,16 @@ const Q96 = 2n ** 96n;
 const Q192 = Q96 * Q96; // (2**96)**2 = 2**192
 
 /**
- * Calculates the price for a Uniswap V3 pool state (token0/token1).
+ * Calculates the price for a Uniswap V3 pool state (token1/token0).
  * Returns price scaled by PRICE_SCALE (1e18). Returns null on error.
- * Formula: price = ((sqrtPriceX96 / 2**96)^2) * (10^decimals1 / 10^decimals0)
- * Scaled Price = price * 10^PRICE_SCALE_DECIMALS
- * Scaled Price = (((sqrtPriceX96 * sqrtPriceX96) / Q192) * (10^decimals1 / 10^decimals0)) * PRICE_SCALE
+ * Formula for Price T1/T0 Standard = ((sqrtPriceX96 / 2**96)^2) * (10^decimals0 / 10^decimals1)
+ * Scaled Price T1/T0 (1e18) = Price T1/T0 Standard * PRICE_SCALE
+ * Scaled Price T1/T0 (1e18) = (((sqrtPriceX96 * sqrtPriceX96) / Q192) * ((10n ** decimals0) / (10n ** decimals1))) * PRICE_SCALE
  * Rearranging for integer arithmetic to maintain precision (multiply before dividing):
- * Scaled Price = (sqrtPriceX96 * sqrtPriceX96 * (10n ** decimals1) * PRICE_SCALE) / (Q192 * (10n ** decimals0))
+ * Scaled Price T1/T0 (1e18) = (sqrtPriceX96 * sqrtPriceX96 * (10n ** decimals0) * PRICE_SCALE) / (Q192 * (10n ** decimals1))
  */
-function calculateV3Price(poolState) {
-    const logPrefix = '[priceCalculation calculateV3Price]';
+function calculateV3PriceT1_T0_scaled(poolState) {
+    const logPrefix = '[priceCalculation calculateV3PriceT1_T0_scaled]';
     if (!poolState || poolState.sqrtPriceX96 === undefined || poolState.sqrtPriceX96 === null || BigInt(poolState.sqrtPriceX96) === 0n) {
         // Log at debug if sqrtPriceX96 is 0, warn if it's missing/invalid
         if (poolState?.sqrtPriceX96 === 0n) {
@@ -51,20 +51,21 @@ function calculateV3Price(poolState) {
         const scale1 = 10n ** decimals1;
 
         // Ensure denominator is not zero
-        const denominator = Q192 * scale0;
+        const denominator = Q192 * scale1; // Denominator for T1/T0 calculation
         if (denominator === 0n) {
              logger.error(`${logPrefix} Division by zero avoided: calculated denominator is zero. Pool: ${poolState.address}`);
              return null; // Should not happen with valid decimals
         }
 
-        // Correct calculation: (sqrtPriceX96 * sqrtPriceX96 * scale1 * PRICE_SCALE) / (Q192 * scale0)
+        // Correct calculation for Price T1/T0 scaled by PRICE_SCALE:
+        // (sqrtPriceX96 * sqrtPriceX96 * scale0 * PRICE_SCALE) / (Q192 * scale1)
         const numerator = sqrtPriceX96 * sqrtPriceX96; // Intermediate: price scaled by Q192
-        const numeratorScaled = numerator * scale1 * PRICE_SCALE; // Intermediate: scaled correctly for final division
+        const numeratorScaled = numerator * scale0 * PRICE_SCALE; // Intermediate: scaled correctly for final division
 
-        const adjustedPriceScaled = numeratorScaled / denominator; // Final integer division
+        const adjustedPriceT1_T0_scaled = numeratorScaled / denominator; // Final integer division
 
-        logger.trace(`${logPrefix} V3 Pool ${poolState.address.substring(0,6)} | Adjusted Price (scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceScaled}`);
-        return adjustedPriceScaled;
+        logger.trace(`${logPrefix} V3 Pool ${poolState.address.substring(0,6)} | Price (T1/T0 scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceT1_T0_scaled}`);
+        return adjustedPriceT1_T0_scaled;
     } catch (error) {
         // Catch and log any errors during the BigInt calculations
         logger.error(`${logPrefix} Error calculating V3 price for ${poolState.address}: ${error.message}`, error);
@@ -222,8 +223,7 @@ function calculateDodoPrice(poolState) {
 /**
  * Calculates the effective buy and sell prices for a pair of pools, accounting for fees.
  * This function assumes `poolA` and `poolB` are for the *same* token pair, but potentially different DEX types.
- * It returns effective prices for both directions (A->B and B->A) for both tokens in the pair.
- * The prices returned are scaled by PRICE_SCALE.
+ * It returns effective prices for all 4 potential swap directions (A->B and B->A for both T0 and T1) scaled by PRICE_SCALE.
  *
  * @param {object} poolA - The state object for the first pool.
  * @param {object} poolB - The state object for the second pool.
@@ -331,7 +331,7 @@ function calculateEffectivePrices(poolA, poolB, priceA_0_per_1_scaled, priceB_0_
 
 
 module.exports = {
-    calculateV3Price,
+    calculateV3PriceT1_T0_scaled, // Export the new function name
     calculateSushiPrice,
     calculateDodoPrice, // Added DODO price calculation
     calculateEffectivePrices,
