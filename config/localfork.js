@@ -1,5 +1,5 @@
 // config/localfork.js
-// --- VERSION v1.1 --- Moved MIN_PROFIT_THRESHOLDS inside the export object.
+// --- VERSION v1.2 --- Moved MIN_PROFIT_THRESHOLDS inside the export object and added USDC.e entry.
 // Configuration for the local Hardhat Fork of Arbitrum.
 // Mostly mirrors arbitrum.js, but explicitly sets the FlashSwap contract address.
 
@@ -87,9 +87,26 @@ const LOCAL_FORK_CONFIG = {
 
     // Gas & Profitability Settings (using the copied estimates and defaults)
     GAS_COST_ESTIMATES: GAS_COST_ESTIMATES,
-    // --- MOVED INSIDE THE OBJECT ---
-    MIN_PROFIT_THRESHOLDS: { NATIVE: 0.00005, DEFAULT: 0.00005 }, // Use numbers
+
+    // --- MOVED INSIDE THE OBJECT AND ADDED USDC.e ENTRY ---
+    MIN_PROFIT_THRESHOLDS: {
+        NATIVE: 0.00005, // Threshold in native currency (ETH)
+        DEFAULT: 0.00005, // Default threshold for tokens without specific entry (in Native equivalent)
+        'USDC': 0.00005, // Example: Threshold for USDC (in Native equivalent)
+        'USDC.e': 0.00005, // Added entry for USDC.e
+        'USDT': 0.00005, // Example: Threshold for USDT (in Native equivalent)
+        'DAI': 0.00005, // Example: Threshold for DAI (in Native equivalent)
+        'WETH': 0.00005, // Example: Threshold for WETH (in Native equivalent)
+        'WBTC': 0.00005, // Example: Threshold for WBTC (in Native equivalent)
+        'ARB': 0.00005, // Example: Threshold for ARB (in Native equivalent)
+        'FRAX': 0.00005, // Example: Threshold for FRAX (in Native equivalent)
+        'LINK': 0.00005, // Example: Threshold for LINK (in Native equivalent)
+        'GMX': 0.00005, // Example: Threshold for GMX (in Native equivalent)
+        'MAGIC': 0.00005, // Example: Threshold for MAGIC (in Native equivalent)
+        // Add entries for any other tokens used in your pools/strategies
+    },
     // --- ---
+
     MAX_GAS_GWEI: 1, // Max gas price in Gwei - May need tuning for local fork simulation
     GAS_ESTIMATE_BUFFER_PERCENT: 25, // % buffer added to path-based gas limit
     FALLBACK_GAS_LIMIT: 5000000, // Default gas limit if base estimate missing
