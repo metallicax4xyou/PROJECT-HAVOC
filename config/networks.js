@@ -32,9 +32,9 @@ const NETWORK_METADATA = {
         EXPLORER_URL: 'https://basescan.org/',
         // Note: RPC URLs are handled in config/index.js via env vars
     },
-    // --- NEW: Local Hardhat Fork Metadata ---
-    localFork: {
-        NAME: 'localFork',
+    // --- NEW: Local Hardhat Fork Metadata (KEY IS NOW LOWERCASE) ---
+    localfork: { // <-- Changed key to lowercase 'localfork'
+        NAME: 'localFork', // Keep the internal NAME property as 'localFork' for consistency if needed elsewhere
         // When forking Arbitrum, the local node's chain ID is also Arbitrum's
         CHAIN_ID: PROTOCOL_ADDRESSES.ARBITRUM_CHAIN_ID, // Should be 42161
         NATIVE_SYMBOL: 'ETH', // Arbitrum's native currency
@@ -45,7 +45,7 @@ const NETWORK_METADATA = {
 };
 
 function getNetworkMetadata(networkName) {
-    const metadata = NETWORK_METADATA[networkName?.toLowerCase()];
+    const metadata = NETWORK_METADATA[networkName?.toLowerCase()]; // This lookup is lowercase
     if (!metadata) {
         throw new Error(`Unsupported network specified: ${networkName}. Supported: ${Object.keys(NETWORK_METADATA).join(', ')}`);
     }
