@@ -142,4 +142,6 @@ const LOCAL_FORK_CONFIG = {
     // Note: RPC_URL, CHAIN_ID, NAME, NATIVE_SYMBOL, EXPLORER_URL are defined in networks.js for localFork
 };
 
-module.exports = LOCAL_FORK_CONFIG;
+module.exports = LOCAL_FORK_CONFIG;cat >
+cat >
+cat
