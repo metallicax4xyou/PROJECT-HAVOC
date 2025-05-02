@@ -9,9 +9,10 @@ const { calculateMinAmountOut } = require('../../profitCalcUtils'); // Import fr
 
 /**
  * Builds parameters for the initiateFlashSwap (V3 -> V3 two-hop) function.
+ * Now includes the titheRecipient address.
  */
-function buildTwoHopParams(opportunity, simulationResult, config) {
-    const functionSig = `[Builder TwoHopV3 v1.1]`; // Updated version
+function buildTwoHopParams(opportunity, simulationResult, config, titheRecipient) { // <-- Added titheRecipient here
+    const functionSig = `[Builder TwoHopV3 v1.2]`; // Updated version
     logger.debug(`${functionSig} Building parameters...`);
 
     // Validation (remains unchanged)
@@ -19,6 +20,9 @@ function buildTwoHopParams(opportunity, simulationResult, config) {
     if (opportunity.path[0].dex !== 'uniswapV3' || opportunity.path[1].dex !== 'uniswapV3') { throw new ArbitrageError('Opportunity path is not V3->V3.', 'PARAM_BUILD_ERROR'); }
     if (!simulationResult || typeof simulationResult.initialAmount !== 'bigint' || typeof simulationResult.hop1AmountOut !== 'bigint' || typeof simulationResult.finalAmount !== 'bigint') { throw new ArbitrageError('Invalid simulationResult for V3->V3 param build.', 'PARAM_BUILD_ERROR'); }
     if (!opportunity.tokenIn || !opportunity.tokenIntermediate) { throw new ArbitrageError('Missing tokenIn or tokenIntermediate in V3->V3 opportunity.', 'PARAM_BUILD_ERROR'); }
+    // --- Added Tithe Recipient Validation ---
+    if (!titheRecipient || typeof titheRecipient !== 'string' || !ethers.isAddress(titheRecipient)) { throw new ArbitrageError('Invalid titheRecipient address provided.', 'PARAM_BUILD_ERROR'); }
+
 
     const leg1 = opportunity.path[0];
     const leg2 = opportunity.path[1];
@@ -43,19 +47,23 @@ function buildTwoHopParams(opportunity, simulationResult, config) {
     if (minAmountOut1 <= 0n || minAmountOut2 <= 0n) { throw new ArbitrageError('Calculated zero minimum amount out (V3->V3), aborting.', 'SLIPPAGE_ERROR'); }
 
     // Prepare parameters object matching the Solidity struct `TwoHopParams`
+    // --- Added titheRecipient to the params struct ---
     const params = {
         tokenIntermediate: tokenIntermediate.address,
         feeA: feeA,
         feeB: feeB,
         amountOutMinimum1: minAmountOut1,
-        amountOutMinimum2: minAmountOut2
+        amountOutMinimum2: minAmountOut2,
+        titheRecipient: titheRecipient // <-- Added titheRecipient here
     };
 
     // Define the struct type string for encoding
-    const typeString = "tuple(address tokenIntermediate, uint24 feeA, uint24 feeB, uint256 amountOutMinimum1, uint256 amountOutMinimum2)";
+    // --- Updated typeString to include titheRecipient ---
+    const typeString = "tuple(address tokenIntermediate, uint24 feeA, uint24 feeB, uint256 amountOutMinimum1, uint256 amountOutMinimum2, address titheRecipient)";
     const contractFunctionName = 'initiateFlashSwap'; // Function for V3->V3
 
     logger.debug(`${functionSig} Parameters built successfully.`);
+    // The return value structure remains the same, but 'params' and 'typeString' are updated
     return { params, borrowTokenAddress: tokenBorrowed.address, borrowAmount, typeString, contractFunctionName };
 }
 
