@@ -10,20 +10,21 @@ const NETWORK = process.env.NETWORK || "arbitrum";
 const PRIVATE_KEY = process.env.PRIVATE_KEY?.replace(/^0x/, ""); // Strip 0x prefix if present
 const ARBISCAN_API_KEY = process.env.ARBISCAN_API_KEY || "";
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || "";
-const COINMARKETCAP_API_KEY = process.env.COINMARKAP_API_KEY || ""; // Corrected typo Coinmarketcap
+const COINMARKETCAP_API_KEY = process.env.COINMARKETCAP_API_KEY || ""; // Corrected typo Coinmarketcap
 
 // --- RPC URLs (with fallbacks) ---
 const RPC_URLS = {
   arbitrum: process.env.ARBITRUM_RPC_URLS?.split(',')[0] || "https://arb1.arbitrum.io/rpc",
-  goerli: process.env.GOERLI_RPC_URL || "https://eth-goerli.g.alchemy.com/v2/demo",
-  arbitrumGoerli: process.env.ARBITRUM_GOERLI_RPC_URL || "https://goerli-rollup.arbitrum.io/rpc"
+  goerli: process.env.GOERLI_RPC_URL || "https://eth-goerli.g.alchemy.com/v2/demo", // Note: Goerli is deprecated
+  arbitrumGoerli: process.env.ARBITRUM_GOERLI_RPC_URL || "https://goerli-rollup.arbitrum.io/rpc" // Note: Arbitrum Goerli is deprecated
 };
 
 // --- Account Setup ---
+// This 'accounts' array will contain your PRIVATE_KEY if set, otherwise it's empty.
 const accounts = PRIVATE_KEY ? [`0x${PRIVATE_KEY}`] : [];
 
 // --- Network Validation ---
-if (!PRIVATE_KEY) console.warn("⚠️ PRIVATE_KEY missing - transactions will fail (unless using Hardhat accounts)");
+if (!PRIVATE_KEY) console.warn("⚠️ PRIVATE_KEY missing - transactions will fail on live networks (unless using Hardhat default accounts)");
 if (!ARBISCAN_API_KEY) console.warn("⚠️ ARBISCAN_API_KEY missing - contract verification disabled for Arbitrum");
 if (!ETHERSCAN_API_KEY) console.warn("⚠️ ETHERSCAN_API_KEY missing - contract verification disabled for Goerli");
 
@@ -45,7 +46,7 @@ module.exports = {
     // Mainnets
     arbitrum: {
       url: RPC_URLS.arbitrum,
-      accounts,
+      accounts, // Uses the accounts derived from PRIVATE_KEY
       chainId: 42161,
       // Gas price settings might need adjustment based on live network conditions
       gasPrice: parseInt(process.env.MAX_GAS_GWEI || "1") * 1e9, // Using MAX_GAS_GWEI from env
@@ -55,18 +56,19 @@ module.exports = {
     // Testnets
     goerli: { // Note: Goerli is deprecated, consider Sepolia
       url: RPC_URLS.goerli,
-      accounts,
+      accounts, // Uses the accounts derived from PRIVATE_KEY
       chainId: 5,
       gasPrice: parseInt(process.env.MAX_GAS_GWEI || "1") * 1e9
     },
     arbitrumGoerli: { // Note: Arbitrum Goerli is also deprecated, consider Arbitrum Sepolia
       url: RPC_URLS.arbitrumGoerli,
-      accounts,
+      accounts, // Uses the accounts derived from PRIVATE_KEY
       chainId: 421613,
       gasPrice: parseInt(process.env.MAX_GAS_GWEI || "1") * 1e9
     },
 
     // Local Hardhat Network (used for 'npx hardhat test' by default, can be forked)
+    // When running `npx hardhat node`, this configuration starts the node.
     hardhat: {
       chainId: 31337, // Default Hardhat chain ID
       forking: {
@@ -74,15 +76,20 @@ module.exports = {
         enabled: process.env.FORKING === "true", // Only enable if FORKING=true in .env
         // blockNumber: 1234567 // Optional: Fork from a specific block number for stable testing
       },
-       // Use Hardhat's default accounts by default unless PRIVATE_KEY is set
-      accounts: accounts.length > 0 ? accounts : undefined, // Use provided PK if available, else default
+       // Use provided PK if available, else use default Hardhat accounts (empty array)
+       // This accounts setting primarily affects `npx hardhat test` or `npx hardhat run` targeting `--network hardhat` directly.
+       // When `npx hardhat node` is run, it generates its own accounts regardless,
+       // but this config needs to be valid.
+       accounts: accounts.length > 0 ? accounts : [], // Corrected this line
     },
 
-    // --- NEW: Local Forked Network (explicitly connects to the running 'hardhat node --fork' instance) ---
+    // --- Local Forked Network (explicitly connects to the running 'hardhat node --fork' instance) ---
     // Use this network when running scripts/tests against the node started with `npx hardhat node --fork ...`
     localFork: {
       url: "http://127.0.0.1:8545", // Default RPC address for npx hardhat node
-      accounts: accounts.length > 0 ? accounts : "remote", // Use provided PK if available, else use accounts from the running node ("remote")
+      // Use provided PK if available, otherwise use accounts from the running node ("remote")
+      // "remote" is necessary here when connecting to a node started with PRIVATE_KEY defined in its env.
+      accounts: accounts.length > 0 ? accounts : "remote",
       // chainId will be automatically detected from the running node (should be 42161 when forking Arbitrum)
       // Gas price/limit settings can be inherited or set here if needed,
       // but the running node often handles this well.
