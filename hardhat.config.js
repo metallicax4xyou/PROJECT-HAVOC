@@ -76,11 +76,9 @@ module.exports = {
         enabled: process.env.FORKING === "true", // Only enable if FORKING=true in .env
         // blockNumber: 1234567 // Optional: Fork from a specific block number for stable testing
       },
-       // Use provided PK if available, else use default Hardhat accounts (empty array)
-       // This accounts setting primarily affects `npx hardhat test` or `npx hardhat run` targeting `--network hardhat` directly.
-       // When `npx hardhat node` is run, it generates its own accounts regardless,
-       // but this config needs to be valid.
-       accounts: accounts.length > 0 ? accounts : [], // Corrected this line
+       // When running `npx hardhat node`, Hardhat generates its own accounts.
+       // Setting accounts to [] tells Hardhat to use its default internal account generation.
+       accounts: [], // Corrected this line - use empty array for default generated accounts
     },
 
     // --- Local Forked Network (explicitly connects to the running 'hardhat node --fork' instance) ---
