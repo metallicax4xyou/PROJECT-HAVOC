@@ -39,7 +39,7 @@ class PoolScanner {
          // *** CORRECTED PATH ***
         const DodoFetcher = require('./fetchers/dodoFetcher');
         const key = 'dodo';
-        this.fetchers[key] = new DodoFetcher(config);
+        thisers[key] = new DodoFetcher(config);
         logger.debug(`[PoolScanner] Initialized fetcher: Key='${key}', Constructor=${this.fetchers[key]?.constructor?.name || 'Unknown'}`);
       } catch (e) { logger.error(`[PoolScanner] Failed to initialize DodoFetcher: ${e.message}`, e.stack); }
     } else { logger.info('[PoolScanner] DODO fetcher disabled by config.'); }
@@ -55,7 +55,8 @@ class PoolScanner {
 
   async fetchPoolStates() {
     const configuredPools = this.config.POOL_CONFIGS || [];
-    logger.info(`[PoolScanner] Starting fetchPoolStates for ${configuredPools.length} configured pools.`);
+    // CHANGED from logger.info to logger.debug
+    logger.debug(`[PoolScanner] Starting fetchPoolStates for ${configuredPools.length} configured pools.`);
     const fetchPromises = [];
     this.pairRegistry.clear();
 
@@ -131,24 +132,30 @@ class PoolScanner {
         return { poolStates: [], pairRegistry: this.pairRegistry };
     }
 
-    logger.info(`[PoolScanner] Attempting to fetch data for ${fetchPromises.length} pools concurrently...`);
+    // CHANGED from logger.info to logger.debug
+    logger.debug(`[PoolScanner] Attempting to fetch data for ${fetchPromises.length} pools concurrently...`);
     const fetchStartTime = Date.now();
     const results = await Promise.allSettled(fetchPromises);
     const fetchEndTime = Date.now();
-    logger.info(`[PoolScanner] Raw pool data fetching finished in ${fetchEndTime - fetchStartTime}ms.`);
+    // CHANGED from logger.info to logger.debug
+    logger.debug(`[PoolScanner] Raw pool data fetching finished in ${fetchEndTime - fetchStartTime}ms.`);
 
     const poolStates = [];
     let successfulFetches = 0;
     let failedFetches = 0;
     let poolsSkippedByFetcher = 0;
 
+    // Filter attempted pools based on whether a fetcher existed for their dexType
     const attemptedPools = configuredPools.filter(p => this.fetchers[p.dexType] && typeof this.fetchers[p.dexType].fetchPoolData === 'function');
 
     results.forEach((result, index) => {
+        // Get the corresponding poolInfo based on the index from the *attempted* pools array
         const poolInfo = attemptedPools[index];
         if (!poolInfo) {
+            // This is a critical error, indicates a logic bug in how results are mapped back
             logger.error(`[PoolScanner] CRITICAL: Mismatch between promise results and pool info at index ${index}.`);
-            failedFetches++; return;
+            failedFetches++; // Count as a failure related to processing
+            return; // Skip processing this result further
         }
         const pairStr = `${poolInfo.pair?.[0]?.symbol || '?'}/${poolInfo.pair?.[1]?.symbol || '?'}`;
         const poolDesc = `${pairStr} on ${poolInfo.dexType} (${poolInfo.address})`;
@@ -161,7 +168,8 @@ class PoolScanner {
             } else if (fetcherResult && !fetcherResult.success) {
                 poolsSkippedByFetcher++; logger.warn(`[PoolScanner] Fetcher reported failure for ${poolDesc}. Reason: ${fetcherResult.error || 'Unknown'}`);
             } else {
-                poolsSkippedByFetcher++; logger.warn(`[PoolScanner] Fetch for ${poolDesc} succeeded but returned invalid data.`);
+                // Fetcher returned something, but not in the expected success/poolData format
+                poolsSkippedByFetcher++; logger.warn(`[PoolScanner] Fetch for ${poolDesc} succeeded but returned invalid data format.`);
             }
         } else { // status === 'rejected'
             failedFetches++; const reason = result.reason instanceof Error ? result.reason.message : JSON.stringify(result.reason);
@@ -170,7 +178,8 @@ class PoolScanner {
         }
     });
 
-    logger.info(`[PoolScanner] Pool state fetching complete. Total Configured: ${configuredPools.length}, Attempts: ${fetchPromises.length}, Success: ${successfulFetches}, Failed: ${failedFetches}, Skipped: ${poolsSkippedByFetcher}`);
+    // CHANGED from logger.info to logger.debug
+    logger.debug(`[PoolScanner] Pool state fetching complete. Total Configured: ${configuredPools.length}, Attempts: ${fetchPromises.length}, Success: ${successfulFetches}, Failed: ${failedFetches}, Skipped: ${poolsSkippedByFetcher}`);
     logger.debug(`[PoolScanner] Final Pair Registry Size: ${this.pairRegistry.size}`);
 
     return { poolStates, pairRegistry: this.pairRegistry };
