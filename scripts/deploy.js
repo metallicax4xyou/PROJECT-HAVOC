@@ -1,5 +1,5 @@
 // scripts/deploy.js
-// --- VERSION v3.7 --- Try lowercase before getAddress
+// --- VERSION v3.8 --- Use getNamedSigner('deployer') for robustness
 
 const hre = require("hardhat");
 const ethers = hre.ethers; // Use ethers from Hardhat Runtime Environment
@@ -16,8 +16,22 @@ const CONFIRMATIONS_TO_WAIT = 2; // Number of block confirmations to wait for
 async function main() {
     console.log(`🚀 Deploying FlashSwap contract to ${hre.network.name}...`);
 
-    // --- Get Network and Signer Info ---
-    const [deployer] = await ethers.getSigners();
+    // --- Get Network and Deployer Signer Info ---
+    // Use getNamedSigner for more robust account retrieval in Hardhat environments
+    let deployer;
+    try {
+        // 'deployer' is a convention often used by Hardhat plugins, or defaults to the first signer
+        deployer = await ethers.getNamedSigner('deployer');
+        if (!deployer?.address) {
+             throw new Error("Could not retrieve deployer signer.");
+        }
+    } catch (signerError) {
+         console.error("❌ FATAL: Error getting deployer signer:", signerError.message);
+         // If using 'remote' accounts, ensure the Hardhat node is running with funded accounts.
+         console.log("Hint: If running against a local node, ensure the node is started and configured correctly (e.g., with --fork and funded accounts).");
+         process.exit(1);
+    }
+
     const network = await ethers.provider.getNetwork();
     console.log(`Network: ${network.name} (Chain ID: ${network.chainId})`);
     console.log(`Deployer Account: ${deployer.address}`);
@@ -25,7 +39,7 @@ async function main() {
     try {
         const balance = await ethers.provider.getBalance(deployer.address);
         console.log(`Account Balance (${network.name} ETH): ${ethers.formatEther(balance)}`);
-        if (balance === 0n) {
+        if (balance === 0n && network.chainId !== 31337) { // Only warn for zero balance on non-local chains
             console.warn("⚠️ Warning: Deployer account has zero balance.");
         }
     } catch (error) {
@@ -56,8 +70,8 @@ async function main() {
     console.log(`   Aave Addr Prov:  ${AAVE_ADDRESSES_PROVIDER}`);
 
     try {
-        // Get the contract factory
-        const FlashSwapFactory = await ethers.getContractFactory("FlashSwap");
+        // Get the contract factory, connected to the deployer signer
+        const FlashSwapFactory = await ethers.getContractFactory("FlashSwap", deployer); // <-- Pass deployer here
 
         // Start the deployment transaction - Pass checksummed addresses
         console.log("Deploying with 4 arguments...");
@@ -77,6 +91,7 @@ async function main() {
         console.log(`⏳ Waiting for ${CONFIRMATIONS_TO_WAIT} confirmations...`);
         const deployReceipt = await deployTxResponse.wait(CONFIRMATIONS_TO_WAIT);
         if (!deployReceipt) { throw new Error(`Transaction receipt not found after waiting for ${CONFIRMATIONS_TO_WAIT} confirmations.`); }
+        // Use getAddress() on the contract instance after deployment is confirmed
         const deployedAddress = await flashSwapContract.getAddress();
         // --- ---
 
@@ -89,7 +104,8 @@ async function main() {
         console.log("----------------------------------------------------");
         console.log("➡️ NEXT STEPS:");
         console.log(`   1. Update ARBITRUM_FLASH_SWAP_ADDRESS in your .env file with: ${deployedAddress}`);
-        console.log(`   2. Ensure your .env has ARBITRUM_RPC_URLS, PRIVATE_KEY, etc.`);
+        console.log(`   2. Ensure your .env has ARBITRUM_RPC_URLS, PRIVATE_KEY (if needed for bot), etc.`);
+        console.log(`   3. For testing the Tithe mechanism, configure your bot to use the 'localFork' RPC and this new contract address.`);
         console.log("----------------------------------------------------");
 
 
