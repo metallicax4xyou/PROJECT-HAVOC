@@ -20,7 +20,7 @@ arbitrumGoerli: process.env.ARBITRUM_GOERLI_RPC_URL || "https://goerli-rollup.ar
 };
 
 // --- Account Setup ---
-const accounts = PRIVATE_KEY ? [0x${PRIVATE_KEY}] : [];
+const accounts = PRIVATE_KEY ? [`0x${PRIVATE_KEY}`] : [];
 
 // --- Network Validation ---
 if (!PRIVATE_KEY) console.warn("⚠️ PRIVATE_KEY missing - transactions will fail");
