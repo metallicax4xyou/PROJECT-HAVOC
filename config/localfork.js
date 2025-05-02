@@ -1,5 +1,5 @@
-// config/localFork.js
-// --- VERSION v1.0 ---
+// config/localfork.js
+// --- VERSION v1.1 --- Moved MIN_PROFIT_THRESHOLDS inside the export object.
 // Configuration for the local Hardhat Fork of Arbitrum.
 // Mostly mirrors arbitrum.js, but explicitly sets the FlashSwap contract address.
 
@@ -87,7 +87,9 @@ const LOCAL_FORK_CONFIG = {
 
     // Gas & Profitability Settings (using the copied estimates and defaults)
     GAS_COST_ESTIMATES: GAS_COST_ESTIMATES,
+    // --- MOVED INSIDE THE OBJECT ---
     MIN_PROFIT_THRESHOLDS: { NATIVE: 0.00005, DEFAULT: 0.00005 }, // Use numbers
+    // --- ---
     MAX_GAS_GWEI: 1, // Max gas price in Gwei - May need tuning for local fork simulation
     GAS_ESTIMATE_BUFFER_PERCENT: 25, // % buffer added to path-based gas limit
     FALLBACK_GAS_LIMIT: 5000000, // Default gas limit if base estimate missing
