@@ -1,6 +1,6 @@
 // core/calculation/priceCalculation.js
 // Utility functions for calculating raw and effective prices for arbitrage finders.
-// --- VERSION v1.4 --- Corrected Uniswap V3, SushiSwap, and Dodo price calculation logic to use 1e18 scaling, and replaced logger.trace with logger.debug.
+// --- VERSION v1.5 --- Corrected Uniswap V3 price calculation formula for T0/T1 scaled.
 
 const logger = require('../../utils/logger'); // Assuming logger is accessible via relative path
 const { handleError, ArbitrageError } = require('../../utils/errorHandler'); // Adjust path as needed
@@ -28,9 +28,19 @@ const Q192 = Q96 * Q96; // (2**96)**2 = 2**192
  * = (sqrtPriceX96 * sqrtPriceX96 * 10^decimals1 * PRICE_SCALE) / (Q192 * 10^decimals0)  <- This matches the numerator/denominator from the *previous* code for T1/T0, but with scale0 and scale1 swapped in the numerator/denominator.
 
  Let's implement the formula `(sqrtPriceX96 * sqrtPriceX96 * scale1 * PRICE_SCALE) / (Q192 * scale0)`
+ *
+ * Re-evaluating based on ethers.js/Uniswap SDK: Price(token1 / token0) = (sqrtPriceX96 / Q96)^2.
+ * This price is in terms of smallest units.
+ * Price(token1 standard / token0 standard) = Price(token1 / token0 smallest) * (10^decimals1 / 10^decimals0)
+ * Price(token0 standard / token1 standard) = 1 / Price(token1 standard / token0 standard)
+ * = 1 / [ ((sqrtPriceX96 / Q96)^2) * (10^decimals1 / 10^decimals0) ]
+ * = (Q96 / sqrtPriceX96)^2 * (10^decimals0 / 10^decimals1)
+ * Scaled Price(token0 standard / token1 standard) * PRICE_SCALE (1e18)
+ * = [ (Q96 * Q96) * (10n ** decimals0) * PRICE_SCALE ] / [ (sqrtPriceX96 * sqrtPriceX96) * (10n ** decimals1) ]
+ * = (Q192 * scale0 * PRICE_SCALE) / (sqrtPriceX96 * sqrtPriceX96 * scale1)
  */
-function calculateV3PriceT0_T1_scaled(poolState) { // Renamed function
-    const logPrefix = '[priceCalculation calculateV3PriceT0_T1_scaled]'; // Updated log prefix
+function calculateV3PriceT0_T1_scaled(poolState) {
+    const logPrefix = '[priceCalculation calculateV3PriceT0_T1_scaled]';
     if (!poolState || poolState.sqrtPriceX96 === undefined || poolState.sqrtPriceX96 === null || BigInt(poolState.sqrtPriceX96) === 0n) {
         // Log at debug if sqrtPriceX96 is 0, warn if it's missing/invalid
         if (poolState?.sqrtPriceX96 === 0n) {
@@ -57,19 +67,18 @@ function calculateV3PriceT0_T1_scaled(poolState) { // Renamed function
         const scale0 = 10n ** decimals0;
         const scale1 = 10n ** decimals1;
 
-        // Ensure denominator is not zero
-        const denominator = Q192 * scale0; // Denominator for T0/T1 calculation
+        // Denominator: sqrtPriceX96^2 * scale1
+        const denominator = sqrtPriceX96 * sqrtPriceX96 * scale1;
         if (denominator === 0n) {
              logger.error(`${logPrefix} Division by zero avoided: calculated denominator is zero. Pool: ${poolState.address}`);
-             return null; // Should not happen with valid decimals
+             return null; // Should not happen if sqrtPriceX96 > 0 and decimals1 >= 0
         }
 
-        // Correct calculation for Price T0/T1 scaled by PRICE_SCALE:
-        // (sqrtPriceX96 * sqrtPriceX96 * scale1 * PRICE_SCALE) / (Q192 * scale0)
-        const numerator = sqrtPriceX96 * sqrtPriceX96; // Intermediate: price scaled by Q192
-        const numeratorScaled = numerator * scale1 * PRICE_SCALE; // Intermediate: scaled correctly for final division
+        // Numerator: Q192 * scale0 * PRICE_SCALE
+        const numeratorScaled = Q192 * scale0 * PRICE_SCALE;
 
-        const adjustedPriceT0_T1_scaled = numeratorScaled / denominator; // Final integer division
+        // Final integer division for Price T0/T1 scaled by PRICE_SCALE
+        const adjustedPriceT0_T1_scaled = numeratorScaled / denominator;
 
         // --- CHANGED FROM logger.trace TO logger.debug ---
         logger.debug(`${logPrefix} V3 Pool ${poolState.address.substring(0,6)} | Price (T0/T1 scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceT0_T1_scaled}`);
@@ -92,9 +101,12 @@ function calculateV3PriceT0_T1_scaled(poolState) { // Renamed function
  * Scaled Price = price * 10^PRICE_SCALE_DECIMALS
  * Rearranging for integer arithmetic:
  * Scaled Price = (reserve1 * (10n ** decimals0) * PRICE_SCALE) / (reserve0 * (10n ** decimals1))
+ *
+ * Note: This calculates Price(T1/T0) scaled by PRICE_SCALE. We need Price(T0/T1) scaled by PRICE_SCALE.
+ * This function should calculate Price(T1/T0) scaled, and the caller (_calculatePrice in SpatialFinder) will invert it.
  */
-function calculateSushiPrice(poolState) {
-    const logPrefix = '[priceCalculation calculateSushiPrice]';
+function calculateSushiPriceT1_T0_scaled(poolState) { // Renamed function
+    const logPrefix = '[priceCalculation calculateSushiPriceT1_T0_scaled]'; // Updated log prefix
      // Check for null/undefined reserves and also check if reserve0 is zero before accessing value
     if (!poolState || poolState.reserve0 === undefined || poolState.reserve0 === null || BigInt(poolState.reserve0) === 0n ||
         poolState.reserve1 === undefined || poolState.reserve1 === null) {
@@ -120,22 +132,23 @@ function calculateSushiPrice(poolState) {
         const scale1 = 10n ** decimals1;
 
          // Ensure denominator is not zero (reserve0 checked already, scale1 could be if decimals1 < 0, which we checked)
-        const denominator = reserve0 * scale1;
+        const denominator = reserve1 * scale0; // Denominator for T1/T0 calculation (reserve1 * scale0)
          if (denominator === 0n) {
              logger.error(`${logPrefix} Division by zero avoided: calculated denominator is zero. Pool: ${poolState.address}`);
              return null; // Should not happen with valid decimals and non-zero reserve0
          }
 
-        // Correct calculation: (reserve1 * scale0 * PRICE_SCALE) / denominator
-         const numeratorScaled = reserve1 * scale0 * PRICE_SCALE;
+        // Correct calculation for Price T1/T0 scaled by PRICE_SCALE:
+        // (reserve0 * scale1 * PRICE_SCALE) / (reserve1 * scale0)
+         const numeratorScaled = reserve0 * scale1 * PRICE_SCALE;
 
-        const adjustedPriceScaled = numeratorScaled / denominator;
+        const adjustedPriceT1_T0_scaled = numeratorScaled / denominator;
 
         // --- CHANGED FROM logger.trace TO logger.debug ---
-        logger.debug(`${logPrefix} Sushi Pool ${poolState.address.substring(0,6)} | Adjusted Price (scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceScaled}`);
+        logger.debug(`${logPrefix} Sushi Pool ${poolState.address.substring(0,6)} | Adjusted Price (T1/T0 scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceT1_T0_scaled}`);
         // --- END CHANGED LOG ---
 
-        return adjustedPriceScaled;
+        return adjustedPriceT1_T0_scaled; // Return the calculated price T1/T0 scaled by 1e18
     } catch (error) {
         // Catch and log any errors during the BigInt calculations
         logger.error(`${logPrefix} Error calculating Sushi price for ${poolState.address}: ${error.message}`);
@@ -149,15 +162,15 @@ function calculateSushiPrice(poolState) {
  * Returns price scaled by PRICE_SCALE (1e18). Returns null on error.
  * Assumes queryAmountOutWei is the amount of quote token (in smallest units) received when selling a standard amount (1 * 10^decimalsBase) of base token (in smallest units).
  *
- * Price (Base/Quote in standard units) = (queryAmountOutWei / 10^decimalsQuote) for 1 standard unit of Base.
+ * Price (Base/Quote in standard units) = queryAmountOutWei / (10n ** decimalsQuote)
  *
  * Scaled Price (Base/Quote) = Price (Base/Quote in standard units) * PRICE_SCALE
  * Integer arithmetic: (queryAmountOutWei * PRICE_SCALE) / (10n ** decimalsQuote)
  *
  * Need to determine if T0 is Base and T1 is Quote (Price T0/T1 = Price Base/Quote) or vice versa (Price T0/T1 = Price Quote/Base = 1 / Price Base/Quote)
  */
-function calculateDodoPrice(poolState) {
-     const logPrefix = '[priceCalculation calculateDodoPrice]';
+function calculateDodoPriceT0_T1_scaled(poolState) { // Renamed function
+     const logPrefix = '[priceCalculation calculateDodoPriceT0_T1_scaled]'; // Updated log prefix
     // Check for essential data from the fetcher's query
     if (!poolState || poolState.queryAmountOutWei === undefined || poolState.queryAmountOutWei === null ||
          !poolState.queryBaseToken?.address || !poolState.queryQuoteToken?.address ||
@@ -222,7 +235,7 @@ function calculateDodoPrice(poolState) {
         logger.debug(`${logPrefix} DODO Pool ${poolState.address.substring(0,6)} | Adjusted Price (scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceScaled}`);
         // --- END CHANGED LOG ---
 
-        return adjustedPriceScaled;
+        return adjustedPriceScaled; // Return the calculated price T0/T1 scaled by 1e18
 
     } catch (error) {
         // Catch and log any errors during the BigInt calculations
@@ -265,11 +278,6 @@ function calculateEffectivePrices(poolA, poolB, priceA_0_per_1_scaled, priceB_0_
 
     // The raw prices (priceA_0_per_1_scaled, priceB_0_per_1_scaled) are now scaled by PRICE_SCALE (1e18).
     // We need the inverse price (T1/T0) also scaled by PRICE_SCALE.
-    // Price(T1/T0 standard) = 1 / Price(T0/T1 standard)
-    // Scaled Price(T1/T0) = (1 / (Price(T0/T1 standard))) * PRICE_SCALE
-    // Scaled Price(T0/T1) = Price(T0/T1 standard) * PRICE_SCALE
-    // Price(T0/T1 standard) = Scaled Price(T0/T1) / PRICE_SCALE
-    // Scaled Price(T1/T0) = 1 / (Scaled Price(T0/T1) / PRICE_SCALE) * PRICE_SCALE
     // Scaled Price(T1/T0) = (PRICE_SCALE * PRICE_SCALE) / Scaled Price(T0/T1)
 
     let priceA_1_per_0_scaled = (priceA_0_per_1_scaled > 0n) ? (PRICE_SCALE * PRICE_SCALE) / priceA_0_per_1_scaled : 0n;
@@ -346,8 +354,8 @@ function calculateEffectivePrices(poolA, poolB, priceA_0_per_1_scaled, priceB_0_
 
 module.exports = {
     calculateV3PriceT0_T1_scaled, // Export the new function name
-    calculateSushiPrice,
-    calculateDodoPrice, // Added DODO price calculation
+    calculateSushiPriceT1_T0_scaled, // Export the new function name
+    calculateDodoPriceT0_T1_scaled, // Export the new function name
     calculateEffectivePrices,
     // Expose constants if needed by callers, or keep them internal
      PRICE_SCALE,
