@@ -1,6 +1,6 @@
 // core/calculation/priceCalculation.js
 // Utility functions for calculating raw and effective prices for arbitrage finders.
-// --- VERSION v1.2 --- Corrected Uniswap V3 price calculation logic (calculates T1/T0 scaled).
+// --- VERSION v1.3 --- Replaced logger.trace with logger.debug.
 
 const logger = require('../../utils/logger'); // Assuming logger is accessible via relative path
 const { handleError, ArbitrageError } = require('../../utils/errorHandler'); // Adjust path as needed
@@ -64,7 +64,10 @@ function calculateV3PriceT1_T0_scaled(poolState) {
 
         const adjustedPriceT1_T0_scaled = numeratorScaled / denominator; // Final integer division
 
-        logger.trace(`${logPrefix} V3 Pool ${poolState.address.substring(0,6)} | Price (T1/T0 scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceT1_T0_scaled}`);
+        // --- CHANGED FROM logger.trace TO logger.debug ---
+        logger.debug(`${logPrefix} V3 Pool ${poolState.address.substring(0,6)} | Price (T1/T0 scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceT1_T0_scaled}`);
+        // --- END CHANGED LOG ---
+
         return adjustedPriceT1_T0_scaled;
     } catch (error) {
         // Catch and log any errors during the BigInt calculations
@@ -121,7 +124,10 @@ function calculateSushiPrice(poolState) {
 
         const adjustedPriceScaled = numeratorScaled / denominator;
 
-        logger.trace(`${logPrefix} Sushi Pool ${poolState.address.substring(0,6)} | Adjusted Price (scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceScaled}`);
+        // --- CHANGED FROM logger.trace TO logger.debug ---
+        logger.debug(`${logPrefix} Sushi Pool ${poolState.address.substring(0,6)} | Adjusted Price (scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceScaled}`);
+        // --- END CHANGED LOG ---
+
         return adjustedPriceScaled;
     } catch (error) {
         // Catch and log any errors during the BigInt calculations
@@ -136,10 +142,7 @@ function calculateSushiPrice(poolState) {
  * Returns price scaled by PRICE_SCALE (1e18). Returns null on error.
  * Assumes queryAmountOutWei is the amount of quote token (in smallest units) received when selling a standard amount (1 * 10^decimalsBase) of base token (in smallest units).
  *
- * Price (Base/Quote in standard units) = (queryAmountOutWei / 10^decimalsQuote) / ( (1 * 10^decimalsBase) / 10^decimalsBase)
- * This simplifies to (queryAmountOutWei / 10^decimalsQuote) for 1 standard unit of Base.
- *
- * Price (Base/Quote in standard units) = queryAmountOutWei / (10n ** decimalsQuote)
+ * Price (Base/Quote in standard units) = (queryAmountOutWei / 10^decimalsQuote) for 1 standard unit of Base.
  *
  * Scaled Price (Base/Quote) = Price (Base/Quote in standard units) * PRICE_SCALE
  * Integer arithmetic: (queryAmountOutWei * PRICE_SCALE) / (10n ** decimalsQuote)
@@ -208,7 +211,10 @@ function calculateDodoPrice(poolState) {
               return null;
          }
 
-        logger.trace(`${logPrefix} DODO Pool ${poolState.address.substring(0,6)} | Adjusted Price (scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceScaled}`);
+        // --- CHANGED FROM logger.trace TO logger.debug ---
+        logger.debug(`${logPrefix} DODO Pool ${poolState.address.substring(0,6)} | Adjusted Price (scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceScaled}`);
+        // --- END CHANGED LOG ---
+
         return adjustedPriceScaled;
 
     } catch (error) {
@@ -325,7 +331,10 @@ function calculateEffectivePrices(poolA, poolB, priceA_0_per_1_scaled, priceB_0_
     }
 
 
-    logger.trace(`${logPrefix} Effective prices calculated successfully.`);
+    // --- CHANGED FROM logger.trace TO logger.debug ---
+    logger.debug(`${logPrefix} Effective prices calculated successfully.`);
+    // --- END CHANGED LOG ---
+
     return effectivePrices;
 }
 
