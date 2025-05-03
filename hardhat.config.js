@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.8 --- Reverting localFork network accounts format to standard "0x..." prefixed string array based on persistent HH8 error.
+// --- VERSION v1.9 --- Removed accounts array from localFork network definition to potentially resolve HH8 during compile.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -17,7 +17,6 @@ const ALCHEMY_API_KEY_ARBITRUM = process.env.ARBITRUM_RPC_URLS?.split(',')[0]?.r
 const PRIVATE_KEY_RAW_ENV = process.env.PRIVATE_KEY?.replace(/^0x/, "") || "";
 
 // Hardhat's standard default test account private key (raw, 64 hex chars) used by `hardhat node` default account #0
-// We will use this directly below.
 const HARDHAT_DEFAULT_PRIVATE_KEY_RAW = "ac0974de85431e2a29a1bcedf3cfb9226611458f";
 
 
@@ -107,9 +106,9 @@ module.exports = {
     // Configured to fork Arbitrum Mainnet at a specific block.
     localFork: {
       url: "http://127.0.0.1:8545", // Hardhat node RPC endpoint
-      // Use the standard Hardhat default private key directly with 0x prefix in the array.
-      // This is the standard and expected format for RPC network accounts according to Hardhat docs.
-      accounts: ["0xac0974de85431e2a29a1bcedf3cfb9226611458f"], // <--- Reverted to standard 0x prefix
+      // REMOVED accounts array from here, as it seems to cause HH8 during compile.
+      // Hardhat node will provide default accounts, and the bot uses the PRIVATE_KEY from .env.
+      // accounts: ["0xac0974de85431e2a29a1bcedf3cfb9226611458f"], // <--- REMOVED THIS LINE
       // Forking Configuration (Enabled when using this network)
       forking: {
         url: ARBITRUM_RPC_URL, // Use the Arbitrum Mainnet RPC URL from .env
