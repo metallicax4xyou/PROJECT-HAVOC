@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.5 --- Corrected hardhat network accounts format based on HH8 error.
+// --- VERSION v1.6 --- Added multiple compiler versions to fix HH606.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -16,17 +16,19 @@ const ALCHEMY_API_KEY_ARBITRUM = process.env.ARBITRUM_RPC_URLS?.split(',')[0]?.r
 // Let's derive that from the environment variable, stripping any '0x'.
 const PRIVATE_KEY_RAW_ENV = process.env.PRIVATE_KEY?.replace(/^0x/, "") || "";
 
-// Hardhat's standard default test account private key (raw, 64 hex chars)
-const HARDHAT_DEFAULT_PRIVATE_KEY_RAW = "59c6995e998f97a5a004497e5a3aa4c7d19d54ecb09ca7ff2927e6d3c6d2d1a3";
+// Hardhat's standard default test account private key (raw, 64 hex chars) used by `hardhat node` default account #0
+// This is used for the `localFork` network accounts directly.
+const HARDHAT_DEFAULT_PRIVATE_KEY_RAW = "ac0974de85431e2a29a1bcedf3cfb9226611458f";
 
 
 // Determine the account object for the Hardhat network if a valid private key is provided.
-// The Hardhat network expects an object { privateKey: "0x...", balance: "..." }
-const hardhatAccount = (PRIVATE_KEY_RAW_ENV.length === 64) ?
+// The Hardhat network (`--network hardhat`, the in-memory test network) expects an array of objects { privateKey: "0x...", balance: "..." }
+const hardhatAccountsConfig = (PRIVATE_KEY_RAW_ENV.length === 64) ?
   [{
     privateKey: `0x${PRIVATE_KEY_RAW_ENV}`, // Hardhat network expects 0x prefix here
     balance: "10000000000000000000000" // Optional: Set a large default balance (10000 ETH)
-  }] : undefined; // undefined means Hardhat will generate default accounts
+  }] : []; // Default to empty array; Hardhat will generate default accounts if 'accounts' is empty or undefined
+
 
 // Determine the accounts array for JSON-RPC based networks (arbitrum, goerli, etc.).
 // These typically expect an array of 0x-prefixed private key strings.
@@ -41,31 +43,73 @@ const ARBITRUM_GOERLI_RPC_URL = process.env.ARBITRUM_GOERLI_RPC_URL || "https://
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
+  // --- ADDED MULTIPLE COMPILER VERSIONS ---
   solidity: {
-    version: "0.8.24", // Use a recent Solidity version
-    settings: {
-      optimizer: {
-        enabled: true,
-        runs: 200,
+    compilers: [
+      {
+        version: "0.8.24", // Keep the latest version for new contracts if needed
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+          // Use a recent EVM version compatible with Arbitrum
+          evmVersion: "paris" // Or "london", "berlin", etc.
+        }
       },
-      evmVersion: "paris" // Or appropriate version for Arbitrum
+      {
+        version: "0.7.6", // Required by FlashSwap.sol and some imported libraries (like UniV3)
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+           // Use an appropriate EVM version for contracts compiled with 0.7.x
+           evmVersion: "istanbul" // Common for this version
+        }
+      },
+       {
+         version: "0.6.8", // Required by some OpenZeppelin contracts (covers >=0.6.0 <0.8.0 range)
+         settings: {
+           optimizer: {
+             enabled: true,
+             runs: 200,
+           },
+            evmVersion: "istanbul" // Common for this version
+         }
+       }
+      // Add other compiler versions here if needed for other contracts
+    ],
+    overrides: {
+      // Use overrides if specific contracts need different settings than the defaults for their version
+      // Example: if FlashSwap needed a specific optimizer run count
+      // "contracts/FlashSwap.sol": {
+      //   version: "0.7.6",
+      //   settings: {
+      //     optimizer: {
+      //       enabled: true,
+      //       runs: 1000
+      //     }
+      //   }
+      // }
     }
-  },
+  }, // --- END MULTIPLE COMPILER VERSIONS ---
   networks: {
     // Hardhat Network (Used by default if no --network specified)
-    // This will NOT fork Arbitrum Mainnet by default unless configured below.
+    // This is the in-memory network, typically does not fork unless configured explicitly here.
     hardhat: {
        // Use the environment variable private key if valid, in the correct object format.
-       // If not valid, hardhatAccount is undefined, letting Hardhat generate defaults.
-       accounts: hardhatAccount,
-       // chainId: 31337 // Default Hardhat chainId
+       // If not valid, hardhatAccountsConfig is empty array, Hardhat will generate defaults.
+       accounts: hardhatAccountsConfig,
+       // chainId: 31337 // Default Hardhat chainId - leave commented unless needed
     },
     // Local Fork Network (Used with --network localFork)
     // Configured to fork Arbitrum Mainnet at a specific block.
     localFork: {
       url: "http://127.0.0.1:8545", // Hardhat node RPC endpoint
-      // Use the standard Hardhat default private key, format it with 0x prefix
-      // This should bypass any environment variable issues for this specific network.
+      // Use the standard Hardhat default private key for this local fork network,
+      // formatted with 0x prefix, as it's the account Hardhat node funds by default.
+      // This provides a reliable funded account for local deployments and tests.
       accounts: [`0x${HARDHAT_DEFAULT_PRIVATE_KEY_RAW}`],
       // Forking Configuration (Enabled when using this network)
       forking: {
@@ -107,6 +151,7 @@ module.exports = {
 };
 
 // Optional: Add a check to warn if PRIVATE_KEY in .env is not the expected raw length for live networks
+// This warning is specifically for the PRIVATE_KEY variable used for non-localFork networks
 if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.replace(/^0x/, "").length !== 64 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
      console.warn(`[Hardhat Config] WARNING: PRIVATE_KEY environment variable has unexpected length (${process.env.PRIVATE_KEY.replace(/^0x/, "").length} after stripping 0x). Expected 64 for live networks.`);
-    }
+}
