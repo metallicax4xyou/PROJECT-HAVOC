@@ -1,6 +1,6 @@
 // core/calculation/priceCalculation.js
 // Utility functions for calculating raw and effective prices for arbitrage finders.
-// --- VERSION v1.7 --- Corrected Uniswap V3 price calculation formula again.
+// --- VERSION v1.7 --- Corrected price calculation logic to consistently return T0/T1 scaled by 1e18.
 
 const logger = require('../../utils/logger'); // Assuming logger is accessible via relative path
 const { handleError, ArbitrageError } = require('../../utils/errorHandler'); // Adjust path as needed
@@ -17,14 +17,19 @@ const Q192 = Q96 * Q96; // (2**96)**2 = 2**192
  * Calculates the price for a Uniswap V3 pool state (token0/token1).
  * Returns price of token0 in terms of token1 (T0/T1) scaled by PRICE_SCALE (1e18).
  * Returns null on error.
- * Formula: Price T0/T1 Standard = (Q192 / sqrtPriceX96^2) * 10^(decimals1 - decimals0)
- * Scaled Price T0/T1 (1e18) = Price T0/T1 Standard * 10^18
- * Integer: (Q192 * (10n ** (decimals1 - decimals0 + BigInt(PRICE_SCALE_DECIMALS)))) / (sqrtPriceX96 * sqrtPriceX96)
+ * Formula: Scaled Price T0/T1 (1e18) = (Q192 * (10n ** decimals1) * PRICE_SCALE) / (sqrtPriceX96 * sqrtPriceX96 * (10n ** decimals0))
+ * Note: This is derived from inverting the T1/T0 price formula scaled by 1e18, which is the common UniV3 practice.
+ * Price T1/T0 standard = (sqrtPriceX96 / Q96)^2 * (10^decimals0 / 10^decimals1)
+ * Scaled Price T1/T0 (1e18) = Price T1/T0 standard * 1e18 = (sqrtPriceX96 * sqrtPriceX96 * 10^decimals0 * 1e18) / (Q192 * 10^decimals1)
+ * Price T0/T1 Standard = 1 / Price T1/T0 Standard
+ * Scaled Price T0/T1 (1e18) = Price T0/T1 Standard * 1e18 = (1 / Price T1/T0 Standard) * 1e18
+ * = (Q192 * 10^decimals1 / (sqrtPriceX96 * sqrtPriceX96 * 10^decimals0)) * 1e18
+ * Integer: (Q192 * (10n ** decimals1) * PRICE_SCALE) / (sqrtPriceX96 * sqrtPriceX96 * (10n ** decimals0))
  */
 function calculateV3PriceT0_T1_scaled(poolState) {
     const logPrefix = '[priceCalculation calculateV3PriceT0_T1_scaled]';
     if (!poolState || poolState.sqrtPriceX96 === undefined || poolState.sqrtPriceX96 === null || BigInt(poolState.sqrtPriceX96) === 0n) {
-        if (BigInt(poolState?.sqrtPriceX96 || 0n) === 0n) { // Check if it's explicitly 0n
+        if (poolState?.sqrtPriceX96 === 0n) {
              logger.debug(`${logPrefix} Invalid V3 state for price calc: Zero sqrtPriceX96. Pool: ${poolState?.address}`);
         } else {
              logger.warn(`${logPrefix} Invalid V3 state for price calc: Missing sqrtPriceX96. Pool: ${poolState?.address}`);
@@ -34,56 +39,48 @@ function calculateV3PriceT0_T1_scaled(poolState) {
     // Ensure token decimals are valid numbers before converting to BigInt
     if (poolState.token0?.decimals === undefined || poolState.token0?.decimals === null ||
         poolState.token1?.decimals === undefined || poolState.token1?.decimals === null ||
-        typeof poolState.token0.decimals !== 'number' || typeof poolState.token1.decimals !== 'number') {
+        typeof poolState.token0.decimals !== 'number' || typeof poolState.token1.decimals !== 'number' ||
+        BigInt(poolState.token0.decimals) < 0n || BigInt(poolState.token1.decimals) < 0n) { // Check decimals are non-negative
         logger.error(`${logPrefix} Invalid V3 state for price calc: Missing or invalid token decimals (${poolState.token0?.decimals}, ${poolState.token1?.decimals}). Pool: ${poolState?.address}`);
         return null;
     }
-    const decimals0 = BigInt(poolState.token0.decimals);
-    const decimals1 = BigInt(poolState.token1.decimals);
-    const decimalsDifference = decimals1 - decimals0;
-    const totalScaleExponent = decimalsDifference + BigInt(PRICE_SCALE_DECIMALS);
-
     try {
         const sqrtPriceX96 = BigInt(poolState.sqrtPriceX96);
-        const sqrtPriceX96Squared = sqrtPriceX96 * sqrtPriceX96;
+        const decimals0 = BigInt(poolState.token0.decimals);
+        const decimals1 = BigInt(poolState.token1.decimals);
 
-        // Ensure denominator is not zero
-        if (sqrtPriceX96Squared === 0n) {
-            logger.error(`${logPrefix} Division by zero avoided: sqrtPriceX96Squared is zero. Pool: ${poolState.address}`);
-            return null;
+        const scale0 = 10n ** decimals0;
+        const scale1 = 10n ** decimals1;
+
+        // Denominator: (sqrtPriceX96)^2 * 10^decimals0
+        const denominator = sqrtPriceX96 * sqrtPriceX96 * scale0;
+
+        if (denominator === 0n) {
+             logger.error(`${logPrefix} Division by zero avoided: calculated denominator is zero. Pool: ${poolState.address}`);
+             return null; // Should not happen with valid decimals and non-zero sqrtPriceX96
         }
 
-        // Calculate 10^(decimals1 - decimals0 + 18) as BigInt
-        const decimalScaleFactor = 10n ** totalScaleExponent;
+        // Numerator: Q192 * 10^decimals1 * PRICE_SCALE
+        const numerator = Q192 * scale1 * PRICE_SCALE;
 
-        // Correct calculation for Price T0/T1 scaled by PRICE_SCALE:
-        // (Q192 * decimalScaleFactor) / sqrtPriceX96Squared
-        const adjustedPriceT0_T1_scaled = (Q192 * decimalScaleFactor) / sqrtPriceX96Squared;
+        const adjustedPriceT0_T1_scaled = numerator / denominator;
 
-        // --- CHANGED FROM logger.trace TO logger.debug ---
         logger.debug(`${logPrefix} V3 Pool ${poolState.address.substring(0,6)} | Price (T0/T1 scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceT0_T1_scaled}`);
-        // --- END CHANGED LOG ---
 
         return adjustedPriceT0_T1_scaled; // Return the calculated price T0/T1 scaled by 1e18
     } catch (error) {
-        // Catch and log any errors during the BigInt calculations
         logger.error(`${logPrefix} Error calculating V3 price for ${poolState.address}: ${error.message}`, error);
         handleError(error, `V3PriceCalc ${poolState.address}`);
         return null; // Return null on calculation error
     }
 }
 
-// ... (calculateSushiPrice, calculateDodoPrice, calculateEffectivePrices functions remain the same as v1.5/v1.6)
-// Paste the rest of the code from the previous block (v1.5/v1.6) starting from calculateSushiPrice
-
 
 /**
  * Calculates the price for a SushiSwap pool state (token0/token1).
  * Returns price of token0 in terms of token1 (T0/T1) scaled by PRICE_SCALE (1e18).
  * Returns null on error.
- * Formula: Price T0/T1 Standard = (reserve1 / 10^decimals1) / (reserve0 / 10^decimals0)
- * Scaled Price T0/T1 (1e18) = Price T0/T1 Standard * PRICE_SCALE
- * Integer arithmetic: (reserve1 * (10n ** decimals0) * PRICE_SCALE) / (reserve0 * (10n ** decimals1))
+ * Formula: Scaled Price T0/T1 (1e18) = (reserve1 * (10n ** decimals0) * PRICE_SCALE) / (reserve0 * (10n ** decimals1))
  */
 function calculateSushiPrice(poolState) {
     const logPrefix = '[priceCalculation calculateSushiPrice]';
@@ -118,18 +115,16 @@ function calculateSushiPrice(poolState) {
              return null; // Should not happen with valid decimals and non-zero reserve0
          }
 
-        // Correct calculation: (reserve1 * scale0 * PRICE_SCALE) / denominator
+        // Correct calculation for Price T0/T1 scaled by PRICE_SCALE (1e18):
+        // (reserve1 * scale0 * PRICE_SCALE) / denominator
          const numeratorScaled = reserve1 * scale0 * PRICE_SCALE;
 
         const adjustedPriceScaled = numeratorScaled / denominator;
 
-        // --- CHANGED FROM logger.trace TO logger.debug ---
         logger.debug(`${logPrefix} Sushi Pool ${poolState.address.substring(0,6)} | Adjusted Price (T0/T1 scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceScaled}`);
-        // --- END CHANGED LOG ---
 
         return adjustedPriceScaled;
     } catch (error) {
-        // Catch and log any errors during the BigInt calculations
         logger.error(`${logPrefix} Error calculating Sushi price for ${poolState.address}: ${error.message}`);
         handleError(error, `SushiPriceCalc ${poolState.address}`);
         return null; // Return null on calculation error
@@ -143,7 +138,7 @@ function calculateSushiPrice(poolState) {
  *
  * DODO fetcher provides queryAmountOutWei: amount of quote token (in smallest units) received when selling a standard amount (1 * 10^decimalsBase) of base token (in smallest units).
  *
- * Price (Base/Quote in standard units) = (queryAmountOutWei / 10^decimalsQuote) for 1 standard unit of Base.
+ * Price (Base/Quote in standard units) = queryAmountOutWei / (10n ** decimalsQuote) for 1 standard unit of Base.
  *
  * Scaled Price (Base/Quote, 1e18) = Price (Base/Quote in standard units) * PRICE_SCALE
  * Integer arithmetic: (queryAmountOutWei * PRICE_SCALE) / (10n ** decimalsQuote)
@@ -210,14 +205,11 @@ function calculateDodoPrice(poolState) {
               return null;
          }
 
-        // --- CHANGED FROM logger.trace TO logger.debug ---
         logger.debug(`${logPrefix} DODO Pool ${poolState.address.substring(0,6)} | Adjusted Price (T0/T1 scaled, 1e${PRICE_SCALE_DECIMALS}): ${adjustedPriceScaled}`);
-        // --- END CHANGED LOG ---
 
         return adjustedPriceScaled; // Return the calculated price T0/T1 scaled by 1e18
 
     } catch (error) {
-        // Catch and log any errors during the BigInt calculations
         logger.error(`${logPrefix} Error calculating DODO price for ${poolState.address}: ${error.message}`, error);
         handleError(error, `DodoPriceCalc ${poolState.address}`);
         return null; // Return null on calculation error
