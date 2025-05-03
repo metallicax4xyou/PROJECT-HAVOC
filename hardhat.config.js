@@ -154,3 +154,4 @@ module.exports = {
 // This warning is specifically for the PRIVATE_KEY variable used for non-localFork networks
 if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.replace(/^0x/, "").length !== 64 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
      console.warn(`[Hardhat Config] WARNING: PRIVATE_KEY environment variable has unexpected length (${process.env.PRIVATE_KEY.replace(/^0x/, "").length} after stripping 0x). Expected 64 for live networks.`);
+}
