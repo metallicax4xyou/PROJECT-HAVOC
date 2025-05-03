@@ -17,7 +17,7 @@ const ALCHEMY_API_KEY_ARBITRUM = process.env.ARBITRUM_RPC_URLS?.split(',')[0]?.r
 const PRIVATE_KEY_RAW_ENV = process.env.PRIVATE_KEY?.replace(/^0x/, "") || "";
 
 // Hardhat's standard default test account private key (raw, 64 hex chars)
-const HARDHAT_DEFAULT_PRIVATE_KEY_RAW = "ac0974de85431e2a29a1bcedf3cfb9226611458f";
+const HARDHAT_DEFAULT_PRIVATE_KEY_RAW = "59c6995e998f97a5a004497e5a3aa4c7d19d54ecb09ca7ff2927e6d3c6d2d1a3";
 
 // Determine the accounts array for networks other than localFork.
 // If a valid raw PK is in the environment variable (length 64), use it in the expected Hardhat format (raw string).
