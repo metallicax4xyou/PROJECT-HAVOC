@@ -1,5 +1,5 @@
 // core/swapSimulator.js
-// --- VERSION v1.8 --- Fixed UniV3 simulation passing incorrect fee argument to QuoterV2.
+// --- VERSION v1.9 --- Corrected UniV3 simulation staticCall argument structure for QuoterV2 struct.
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger'); // Adjust path if needed
@@ -15,7 +15,7 @@ const MAX_UINT128 = (1n << 128n) - 1n; // Maybe not needed in this file, keep fo
 class SwapSimulator {
     constructor(config, provider) {
         // Add version log here to confirm the correct file is loaded
-        logger.debug('[SwapSimulator v1.8] Initializing...');
+        logger.debug('[SwapSimulator v1.9] Initializing...');
         if (!config?.QUOTER_ADDRESS || !ethers.isAddress(config.QUOTER_ADDRESS)) throw new ArbitrageError('SwapSimulatorInit', 'Valid QUOTER_ADDRESS missing.');
         if (!provider) throw new ArbitrageError('SwapSimulatorInit', 'Provider instance required.');
         // Check for required ABIs. Log errors/warnings if missing.
@@ -40,9 +40,9 @@ class SwapSimulator {
         this.dodoPoolContractCache = {};
 
         // Updated info log to include version
-        logger.info(`[SwapSimulator v1.8] Initialized with Quoter V2 at ${config.QUOTER_ADDRESS || 'N/A'}`);
+        logger.info(`[SwapSimulator v1.9] Initialized with Quoter V2 at ${config.QUOTER_ADDRESS || 'N/A'}`);
         if (ABIS?.DODOV1V2Pool) {
-             logger.info(`[SwapSimulator v1.8] DODO V1/V2 Pool ABI loaded.`);
+             logger.info(`[SwapSimulator v1.9] DODO V1/V2 Pool ABI loaded.`);
         }
     }
 
@@ -121,7 +121,7 @@ class SwapSimulator {
         }
      }
 
-    // Uniswap V3 Simulation (Fixed argument passing for QuoterV2)
+    // Uniswap V3 Simulation (Corrected staticCall argument structure)
     async simulateV3Swap(poolState, tokenIn, amountIn) {
         // Destructure required properties from poolState. Assume these are populated by the fetcher and passed correctly by the finder.
         // NOTE: The Quoter call itself doesn't strictly *need* sqrtPriceX96, liquidity, tick from the poolState.
@@ -136,22 +136,21 @@ class SwapSimulator {
              return { success: false, amountOut: null, error: 'Cannot determine tokenOut' };
         }
 
-        // Define the parameters for quoteExactInputSingle as an object, then convert to a tuple (array)
-        // The Quoter V2 ABI expects a struct/tuple: QuoteExactInputSingleParams
-        const params = {
-             tokenIn: tokenIn.address,
-             tokenOut: tokenOut.address,
-             fee: Number(fee), // uint24 fee - Needs to be a number for the ABI encoding
-             amountIn: amountIn, // uint256 amountIn (already in smallest units BigInt)
-             // Use 0n for sqrtPriceLimitX96 to indicate no limit, or a calculated limit based on desired slippage
-             // For simulation purposes, often no limit is needed to see max possible output
-             sqrtPriceLimitX96: 0n // uint160 (BigInt)
-        };
+        // Define the parameters for quoteExactInputSingle
+        // The Quoter V2 ABI's quoteExactInputSingle takes a struct/tuple: QuoteExactInputSingleParams
+        const tokenInAddress = tokenIn.address;
+        const tokenOutAddress = tokenOut.address;
+        const feeTier = Number(fee); // uint24 fee - Needs to be a number for the ABI encoding
+        const amountInBigInt = amountIn; // uint256 amountIn (already in smallest units BigInt)
+        // Use 0n for sqrtPriceLimitX96 to indicate no limit, or a calculated limit based on desired slippage
+        // For simulation purposes, often no limit is needed to see max possible output
+        const sqrtPriceLimitX96 = 0n; // uint160 (BigInt)
+
 
         // Basic validation for fee value range
-         if (typeof params.fee !== 'number' || !Number.isInteger(params.fee) || params.fee < 0 || params.fee > 10000) { // Check fee is reasonable BPS (0-10000)
-             logger.warn(`${logPrefix} Invalid fee value for Quoter: ${params.fee}. Expected integer BPS 0-10000.`);
-             return { success: false, amountOut: null, error: `Invalid fee value for Quoter: ${params.fee}` };
+         if (typeof feeTier !== 'number' || !Number.isInteger(feeTier) || feeTier < 0 || feeTier > 10000) { // Check fee is reasonable BPS (0-10000)
+             logger.warn(`${logPrefix} Invalid fee value for Quoter: ${feeTier}. Expected integer BPS 0-10000.`);
+             return { success: false, amountOut: null, error: `Invalid fee value for Quoter: ${feeTier}` };
          }
 
          // Optional: Log V3 state if present (for debugging the state flow)
@@ -165,16 +164,16 @@ class SwapSimulator {
 
         try {
             // Use the Quoter V2 contract instance from the constructor (already checked for null)
-            logger.debug(`${logPrefix} Quoting ${tokenIn.symbol}->${tokenOut.symbol} Fee ${params.fee} In ${amountIn.toString()} (raw)`);
-            // Call the quoter contract using the correct function and parameters AS A TUPLE (array)
+            logger.debug(`${logPrefix} Quoting ${tokenIn.symbol}->${tokenOut.symbol} Fee ${feeTier} In ${amountInBigInt.toString()} (raw)`);
+            // Call the quoter contract using the correct function and parameters AS SEPARATE ARGUMENTS
             // quoteExactInputSingle returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)
-            const quoteResult = await this.quoterContract.quoteExactInputSingle.staticCall([
-                 params.tokenIn,
-                 params.tokenOut,
-                 params.fee,
-                 params.amountIn,
-                 params.sqrtPriceLimitX96 // Pass the tuple/array as the single argument
-            ]);
+            const quoteResult = await this.quoterContract.quoteExactInputSingle.staticCall(
+                 tokenInAddress,
+                 tokenOutAddress,
+                 feeTier,
+                 amountInBigInt,
+                 sqrtPriceLimitX96
+            );
 
             // The result is an array, where the first element is the amountOut (uint256)
             const amountOut = BigInt(quoteResult[0]); // Amount out in smallest units of tokenOut
@@ -338,7 +337,7 @@ class SwapSimulator {
                 try {
                      // querySellBase(address trader, uint256 payBaseAmount)
                      // Use ethers.ZeroAddress as the trader for simulation
-                     // Based on previous docs, it seems to expect arguments as separate inputs.
+                     // Pass arguments as separate arguments to staticCall
                      queryResult = await poolContract.querySellBase.staticCall(ethers.ZeroAddress, amountIn);
                      amountOut = BigInt(queryResult[0]); // The first element is receiveQuoteAmount
                      // Note: queryResult[1] is mtFee, might need later for detailed analysis, but standard simulation doesn't use it directly.
@@ -347,7 +346,7 @@ class SwapSimulator {
                 } catch (queryError) {
                     // Attempt to decode revert reason
                     let reason = queryError.reason || queryError.message;
-                    // Use error.data here
+                    // Use queryError.data here
                     if (queryError.data && typeof queryError.data === 'string' && queryError.data !== '0x') {
                         try { reason = ethers.toUtf8String(queryError.data); } catch {}
                     }
@@ -380,7 +379,7 @@ class SwapSimulator {
                 try {
                     // querySellQuote(address trader, uint256 payQuoteAmount)
                     // Use ethers.ZeroAddress as the trader for simulation
-                    // For now, keeping as separate arguments:
+                    // Pass arguments as separate arguments to staticCall
                     queryResult = await poolContract.querySellQuote.staticCall(ethers.ZeroAddress, amountIn);
                     amountOut = BigInt(queryResult[0]); // The first element is receiveBaseAmount
                     // Note: queryResult[1] is mtFee
@@ -389,7 +388,7 @@ class SwapSimulator {
                 } catch (queryError) {
                     // Attempt to decode revert reason
                     let reason = queryError.reason || queryError.message;
-                     // Use error.data here
+                     // Use queryError.data here
                      if (queryError.data && typeof queryError.data === 'string' && queryError.data !== '0x') {
                          try { reason = ethers.toUtf8String(queryError.data); } catch {}
                      }
