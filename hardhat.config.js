@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.9 --- Removed accounts array from localFork network definition to potentially resolve HH8 during compile.
+// --- VERSION v1.10 --- Added overrides for Uniswap V3 periphery libraries to fix HH600 compile error.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -42,7 +42,6 @@ const ARBITRUM_GOERLI_RPC_URL = process.env.ARBITRUM_GOERLI_RPC_URL || "https://
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
-  // --- ADDED MULTIPLE COMPILER VERSIONS ---
   solidity: {
     compilers: [
       {
@@ -79,20 +78,85 @@ module.exports = {
        }
       // Add other compiler versions here if needed for other contracts
     ],
+    // --- ADDED OVERRIDES SECTION ---
     overrides: {
-      // Use overrides if specific contracts need different settings than the defaults for their version
-      // Example: if FlashSwap needed a specific optimizer run count
-      // "contracts/FlashSwap.sol": {
-      //   version: "0.7.6",
-      //   settings: {
-      //     optimizer: {
-      //       enabled: true,
-      //       runs: 1000
-      //     }
-      //   }
-      // }
-    }
-  }, // --- END MULTIPLE COMPILER VERSIONS ---
+      // Explicitly tell Hardhat to use the 0.7.6 compiler for Uniswap V3 periphery libraries
+      // that have pragmas compatible with this version (e.g., >=0.7.0 <0.8.0 or exactly 0.7.6).
+      // This should resolve compatibility issues like the uint256 to address conversion error.
+      "@uniswap/v3-periphery/contracts/libraries/*": {
+         version: "0.7.6",
+         settings: {
+            optimizer: {
+              enabled: true,
+              runs: 200,
+            },
+             evmVersion: "istanbul"
+         }
+      },
+       "@uniswap/v3-core/contracts/libraries/*": {
+         version: "0.7.6", // Core libraries might also need this
+         settings: {
+            optimizer: {
+              enabled: true,
+              runs: 200,
+            },
+             evmVersion: "istanbul"
+         }
+      },
+       "@openzeppelin/contracts/token/ERC20/SafeERC20.sol": {
+           version: "0.6.8", // Pin to 0.6.8 as it falls within the >=0.6.0 <0.8.0 pragma
+           settings: {
+              optimizer: {
+                enabled: true,
+                runs: 200,
+              },
+               evmVersion: "istanbul"
+           }
+       },
+       "@openzeppelin/contracts/utils/Address.sol": {
+           version: "0.6.8", // Pin to 0.6.8
+           settings: {
+              optimizer: {
+                enabled: true,
+                runs: 200,
+              },
+               evmVersion: "istanbul"
+           }
+       },
+        "@openzeppelin/contracts/token/ERC20/IERC20.sol": {
+           version: "0.6.8", // Pin to 0.6.8
+           settings: {
+              optimizer: {
+                enabled: true,
+                runs: 200,
+              },
+               evmVersion: "istanbul"
+           }
+       },
+        "@openzeppelin/contracts/math/SafeMath.sol": {
+           version: "0.6.8", // Pin to 0.6.8
+           settings: {
+              optimizer: {
+                enabled: true,
+                runs: 200,
+              },
+               evmVersion: "istanbul"
+           }
+       },
+        "@openzeppelin/contracts/utils/ReentrancyGuard.sol": {
+           version: "0.6.8", // Pin to 0.6.8
+           settings: {
+              optimizer: {
+                enabled: true,
+                runs: 200,
+              },
+               evmVersion: "istanbul"
+           }
+       },
+         // If FlashSwap.sol needs specific overrides despite its pragma, add it here
+         // "contracts/FlashSwap.sol": { version: "0.7.6", settings: { ... } }
+    } // --- END OVERRIDES SECTION ---
+  },
   networks: {
     // Hardhat Network (Used by default if no --network specified)
     // This is the in-memory network, typically does not fork unless configured explicitly here.
@@ -106,15 +170,17 @@ module.exports = {
     // Configured to fork Arbitrum Mainnet at a specific block.
     localFork: {
       url: "http://127.0.0.1:8545", // Hardhat node RPC endpoint
-      // REMOVED accounts array from here, as it seems to cause HH8 during compile.
-      // Hardhat node will provide default accounts, and the bot uses the PRIVATE_KEY from .env.
-      // accounts: ["0xac0974de85431e2a29a1bcedf3cfb9226611458f"], // <--- REMOVED THIS LINE
-      // Forking Configuration (Enabled when using this network)
-      forking: {
+      // NO accounts array defined here. Hardhat node provides accounts, bot uses PRIVATE_KEY from .env.
+      // This also prevents the HH8 compile error associated with this network config.
+      // forking configuration is handled below
+      chainId: 42161, // Match Arbitrum Mainnet chain ID
+    },
+    // Forking configuration - applies to the Hardhat network *if* chainId matches OR if explicitly linked
+    // When using `--network localFork`, this forking config associated with chainId 42161 is picked up.
+    forking: {
         url: ARBITRUM_RPC_URL, // Use the Arbitrum Mainnet RPC URL from .env
         // blockNumber: 123456789 // Optional: Specify a block number for consistent fork state
-      },
-      chainId: 42161, // Match Arbitrum Mainnet chain ID
+        enabled: process.env.FORKING === 'true' // Only enable forking if FORKING=true in .env
     },
     // Arbitrum Mainnet (Used with --network arbitrum)
     arbitrum: {
@@ -152,4 +218,4 @@ module.exports = {
 // This warning is specifically for the PRIVATE_KEY variable used for non-localFork networks
 if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.replace(/^0x/, "").length !== 64 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
      console.warn(`[Hardhat Config] WARNING: PRIVATE_KEY environment variable has unexpected length (${process.env.PRIVATE_KEY.replace(/^0x/, "").length} after stripping 0x). Expected 64 for live networks.`);
-}
+    }
