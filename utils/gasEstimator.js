@@ -1,5 +1,5 @@
 // utils/gasEstimator.js
-// --- VERSION v1.9 --- Added debug log for received signerAddress in estimateTxGasCost.
+// --- VERSION v1.10 --- Renamed signerAddress parameter in estimateTxGasCost to walletSignerAddress for debug.
 
 const { ethers } = require('ethers');
 const logger = require('./logger');
@@ -25,7 +25,7 @@ if (!ABIS.FlashSwap) {
 
 class GasEstimator {
     constructor(config, provider) {
-        logger.debug('[GasEstimator v1.9] Initializing...'); // Version bump
+        logger.debug('[GasEstimator v1.10] Initializing...'); // Version bump
         if (!config || !provider) throw new ArbitrageError('GasEstimatorInit', 'Config/Provider required.');
         if (!config.GAS_COST_ESTIMATES?.FLASH_SWAP_BASE) logger.warn('[GasEstInit] GAS_COST_ESTIMATES incomplete.');
         if (!flashSwapInterface) logger.error('[GasEstInit] FlashSwap Interface could not be initialized. estimateGas check will fail.');
@@ -36,7 +36,7 @@ class GasEstimator {
         this.maxGasPriceGwei = ethers.parseUnits(String(config.MAX_GAS_GWEI || 1), 'gwei');
         this.fallbackGasLimit = BigInt(config.FALLBACK_GAS_LIMIT || 3000000);
 
-        logger.info(`[GasEstimator v1.9] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`);
+        logger.info(`[GasEstimator v1.10] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`);
     }
 
     async getFeeData() {
@@ -77,7 +77,7 @@ class GasEstimator {
      * @private Internal helper method
      */
     async _encodeMinimalCalldataForEstimate(opportunity, providerType) {
-        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.9]`; // Version bump
+        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.10]`; // Version bump
         if (!flashSwapInterface) {
              logger.error(`${logPrefix} FlashSwap Interface not available. Cannot encode.`);
              return null;
@@ -180,19 +180,20 @@ class GasEstimator {
      * Estimates gas cost using path-based heuristics & performs an estimateGas check
      * using provider-specific calldata (UniV3 or Aave).
      * @param {object} opportunity The opportunity object.
-     * @param {string} signerAddress The address of the bot's signer wallet.
+     * @param {string} walletSignerAddress The address of the bot's signer wallet (RENAMED PARAMETER).
      * @returns {Promise<{ pathGasLimit: bigint, effectiveGasPrice: bigint, totalCostWei: bigint, estimateGasSuccess: boolean } | null>}
      */
-    async estimateTxGasCost(opportunity, signerAddress) {
+    async estimateTxGasCost(opportunity, walletSignerAddress) { // RENAMED PARAMETER HERE
         const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey}]`;
 
         // --- ADDED DEBUG LOG FOR RECEIVED SIGNER ADDRESS ---
-        logger.debug(`${logPrefix} Received signerAddress for gas estimation: ${signerAddress}`);
+        logger.debug(`${logPrefix} Received walletSignerAddress for gas estimation: ${walletSignerAddress}`);
 
-        if (!signerAddress || !ethers.isAddress(signerAddress)) {
-             const errorMsg = 'Invalid signerAddress.';
+        // --- CHECK THE RENAMED PARAMETER ---
+        if (!walletSignerAddress || !ethers.isAddress(walletSignerAddress)) {
+             const errorMsg = 'Invalid walletSignerAddress.';
              logger.error(`${logPrefix} ${errorMsg}`);
-             return null; // Return null if signerAddress is invalid
+             return null; // Return null if walletSignerAddress is invalid
         }
         if (!opportunity?.path || opportunity.path.length === 0) { logger.error(`${logPrefix} Invalid opportunity path.`); return null; }
         if (!flashSwapInterface) { logger.error(`${logPrefix} FlashSwap Interface not available. Aborting estimate.`); return null; }
@@ -238,11 +239,11 @@ class GasEstimator {
         let estimateGasSuccess = false;
         try {
             logger.debug(`${logPrefix} Performing estimateGas validity check for ${contractFunctionName}...`);
-            // Pass the actual signerAddress received by the function as the 'from' address
+            // Pass the *RENAMED* parameter walletSignerAddress as the 'from' address
             await this.provider.estimateGas({
                 to: this.config.FLASH_SWAP_CONTRACT_ADDRESS,
                 data: encodedData,
-                from: signerAddress // <-- Use the received signerAddress here
+                from: walletSignerAddress // <-- Use the renamed parameter here
             });
             estimateGasSuccess = true;
             logger.debug(`${logPrefix} estimateGas check PASSED.`); // <<< WE WANT TO SEE THIS!
