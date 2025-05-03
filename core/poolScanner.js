@@ -1,7 +1,9 @@
 // core/poolScanner.js
+// Scans configured pools and fetches their latest state.
+// --- VERSION v1.3 --- Temporarily commented out DODO fetcher initialization for debugging.
+
 const logger = require('../utils/logger');
 const { getProvider } = require('../utils/provider');
-// *** CORRECTED PATH ***
 const { getCanonicalPairKey } = require('../utils/pairUtils'); // Use '../' not '../../'
 const { safeFetchWrapper } = require('../utils/networkUtils'); // Use '../'
 
@@ -11,82 +13,98 @@ class PoolScanner {
     this.fetchers = {};
     this.pairRegistry = new Map();
 
-    logger.info('[PoolScanner] Initializing PoolScanner fetchers...');
+    logger.info('[PoolScanner v1.3] Initializing PoolScanner fetchers...');
 
     // --- Fetcher Initialization ---
     if (config.UNISWAP_V3_ENABLED) {
       try {
-        // *** CORRECTED PATH ***
         const UniswapV3Fetcher = require('./fetchers/uniswapV3Fetcher');
         const key = 'uniswapV3';
         this.fetchers[key] = new UniswapV3Fetcher(config);
-        logger.debug(`[PoolScanner] Initialized fetcher: Key='${key}', Constructor=${this.fetchers[key]?.constructor?.name || 'Unknown'}`);
-      } catch (e) { logger.error(`[PoolScanner] Failed to initialize UniswapV3Fetcher: ${e.message}`, e.stack); }
-    } else { logger.info('[PoolScanner] Uniswap V3 fetcher disabled by config.'); }
+        logger.debug(`[PoolScanner v1.3] Initialized fetcher: Key='${key}', Constructor=${this.fetchers[key]?.constructor?.name || 'Unknown'}`);
+      } catch (e) {
+          logger.error(`[PoolScanner v1.3] Failed to initialize UniswapV3Fetcher: ${e.message}`, e.stack);
+          this.config.UNISWAP_V3_ENABLED = false; // Disable if init fails
+          logger.warn(`[PoolScanner v1.3] Uniswap V3 fetching disabled due to initialization failure.`);
+      }
+    } else { logger.info('[PoolScanner v1.3] Uniswap V3 fetcher disabled by config.'); }
 
     if (config.SUSHISWAP_ENABLED) {
       try {
-         // *** CORRECTED PATH ***
         const SushiSwapFetcher = require('./fetchers/sushiSwapFetcher');
         const key = 'sushiswap';
         this.fetchers[key] = new SushiSwapFetcher(config);
-        logger.debug(`[PoolScanner] Initialized fetcher: Key='${key}', Constructor=${this.fetchers[key]?.constructor?.name || 'Unknown'}`);
-      } catch (e) { logger.error(`[PoolScanner] Failed to initialize SushiSwapFetcher: ${e.message}`, e.stack); }
-    } else { logger.info('[PoolScanner] SushiSwap fetcher disabled by config.'); }
+        logger.debug(`[PoolScanner v1.3] Initialized fetcher: Key='${key}', Constructor=${this.fetchers[key]?.constructor?.name || 'Unknown'}`);
+      } catch (e) {
+         logger.error(`[PoolScanner v1.3] Failed to initialize SushiSwapFetcher: ${e.message}`, e.stack);
+         this.config.SUSHISWAP_ENABLED = false; // Disable if init fails
+         logger.warn(`[PoolScanner v1.3] SushiSwap fetching disabled due to initialization failure.`);
+      }
+    } else { logger.info('[PoolScanner v1.3] SushiSwap fetcher disabled by config.'); }
 
+    // --- DODO Fetcher Initialization (TEMPORARILY COMMENTED OUT) ---
+    // To work on DODO, you'll need to uncomment this and find the correct ABI
+    // that exposes the PMM state variables (_I_, _K_, etc.) and fee getters.
+    /*
     if (config.DODO_ENABLED) {
       try {
-         // *** CORRECTED PATH ***
         const DodoFetcher = require('./fetchers/dodoFetcher');
         const key = 'dodo';
-        // FIX TYPO HERE: Changed 'thisers[key]' to 'this.fetchers[key]'
         this.fetchers[key] = new DodoFetcher(config);
-        logger.debug(`[PoolScanner] Initialized fetcher: Key='${key}', Constructor=${this.fetchers[key]?.constructor?.name || 'Unknown'}`);
-      } catch (e) { logger.error(`[PoolScanner] Failed to initialize DodoFetcher: ${e.message}`, e.stack); }
-    } else { logger.info('[PoolScanner] DODO fetcher disabled by config.'); }
+        logger.debug(`[PoolScanner v1.3] Initialized fetcher: Key='${key}', Constructor=${this.fetchers[key]?.constructor?.name || 'Unknown'}. DODO ABI status:`, config.ABIS?.DODOV1V2Pool ? 'Loaded' : 'Missing');
+      } catch (e) {
+         logger.error(`[PoolScanner v1.3] Failed to initialize DodoFetcher: ${e.message}`, e.stack);
+         this.config.DODO_ENABLED = false; // Disable if init fails
+         logger.warn(`[PoolScanner v1.3] DODO fetching disabled due to initialization failure.`);
+      }
+    } else { logger.info('[PoolScanner v1.3] DODO fetcher disabled by config.'); }
+    */
+     // Log a reminder if DODO is enabled in config but the fetcher init is commented out
+     if (config.DODO_ENABLED && !this.fetchers.dodo) {
+          logger.warn("[PoolScanner v1.3] DODO is enabled in config, but its fetcher initialization block is commented out or failed.");
+     }
+
 
     // --- Final DEBUG Check ---
     const fetcherKeys = Object.keys(this.fetchers);
-    logger.debug(`[PoolScanner] Available fetcher keys: [${fetcherKeys.map(k => `'${k}'`).join(', ')}]`);
-    logger.debug(`[PoolScanner] Total fetchers initialized: ${fetcherKeys.length}`);
-    if (fetcherKeys.length === 0) { logger.warn('[PoolScanner] WARNING: No fetchers were initialized!'); }
+    logger.debug(`[PoolScanner v1.3] Available fetcher keys: [${fetcherKeys.map(k => `'${k}'`).join(', ')}]`);
+    logger.debug(`[PoolScanner v1.3] Total fetchers initialized: ${fetcherKeys.length}`);
+    if (fetcherKeys.length === 0) { logger.error('[PoolScanner v1.3] CRITICAL: No fetchers were initialized!'); }
 
-    logger.info('[PoolScanner] PoolScanner fetcher initialization complete.');
+    logger.info('[PoolScanner v1.3] PoolScanner fetcher initialization complete.');
   }
 
   async fetchPoolStates() {
     const configuredPools = this.config.POOL_CONFIGS || [];
-    // CHANGED from logger.info to logger.debug
-    logger.debug(`[PoolScanner] Starting fetchPoolStates for ${configuredPools.length} configured pools.`);
+    logger.debug(`[PoolScanner v1.3] Starting fetchPoolStates for ${configuredPools.length} configured pools.`);
+    const startTime = process.hrtime.bigint();
+
     const fetchPromises = [];
-    this.pairRegistry.clear();
+    this.pairRegistry.clear(); // Clear registry at the start of each scan cycle
 
-    const poolProcessingStartTime = Date.now();
+    const poolConfigProcessingStartTime = Date.now(); // Use consistent naming
+    let poolsToAttemptFetch = 0; // Counter for pools we will actually try to fetch
 
-    if (Object.keys(this.fetchers).length === 0) {
-        logger.error("[PoolScanner] No fetchers available.");
-        return { poolStates: [], pairRegistry: this.pairRegistry };
-    }
-
-    let poolsToFetchCount = 0;
     for (const poolInfo of configuredPools) {
         const tokenASymbol = poolInfo.pair?.[0]?.symbol || 'TokenA?';
         const tokenBSymbol = poolInfo.pair?.[1]?.symbol || 'TokenB?';
         const pairStr = `${tokenASymbol}/${tokenBSymbol}`;
 
       if (!poolInfo?.address || !poolInfo.pair || !Array.isArray(poolInfo.pair) || poolInfo.pair.length !== 2 || !poolInfo.dexType) {
-          logger.warn(`[PoolScanner] Skipping malformed pool config: ${JSON.stringify(poolInfo)}`);
+          logger.warn(`[PoolScanner v1.3] Skipping malformed pool config: ${JSON.stringify(poolInfo)}`);
           continue;
       }
 
       const { address, pair, dexType } = poolInfo;
-      const fetcherInstance = this.fetchers[dexType];
+      const fetcherInstance = this.fetchers[dexType]; // Get the fetcher instance
 
+      // Always attempt to build pair registry entry for configured pools, even if fetcher is missing/disabled
+      // This ensures the finder knows the pool exists, even if its state isn't fetched
       try {
-        // Pass actual token objects from poolInfo.pair
         const canonicalKey = getCanonicalPairKey(pair[0], pair[1]);
         if (!canonicalKey) {
-            logger.warn(`[PoolScanner] Failed to get canonical key for ${pairStr} (${address}), skipping registry add.`);
+            logger.warn(`[PoolScanner v1.3] Failed to get canonical key for ${pairStr} (${address}), skipping pair registry add.`);
+            // Decide if we should skip the entire pool if canonical key fails - probably yes.
             continue;
         }
         if (!this.pairRegistry.has(canonicalKey)) {
@@ -94,19 +112,17 @@ class PoolScanner {
         }
         this.pairRegistry.get(canonicalKey).add(address);
       } catch (error) {
-          logger.error(`[PoolScanner] Error building pair registry for ${pairStr} (${address}): ${error.message}`);
+          logger.error(`[PoolScanner v1.3] Error building pair registry entry for ${pairStr} (${address}): ${error.message}`, error);
+          // Decide if we should skip the entire pool if pair registry fails - probably yes.
           continue;
       }
 
-      if (fetcherInstance) {
-        if (typeof fetcherInstance.fetchPoolData !== 'function') {
-             logger.error(`[PoolScanner] Fetcher '${dexType}' missing 'fetchPoolData'. Skipping pool ${pairStr} (${address}).`);
-             continue;
-        }
 
-        logger.debug(`[PoolScanner] Queueing fetch for ${pairStr} on ${dexType} (${address}). Fetcher: ${fetcherInstance.constructor.name}`);
-        poolsToFetchCount++;
+      if (fetcherInstance && typeof fetcherInstance.fetchPoolData === 'function') {
+        logger.debug(`[PoolScanner v1.3] Queueing fetch for ${pairStr} on ${dexType} (${address}). Fetcher: ${fetcherInstance.constructor.name}`);
+        poolsToAttemptFetch++; // Increment counter only if we attempt to fetch
 
+        // Use safeFetchWrapper for robustness against temporary RPC issues
         const fetchIdentifier = `Pool ${pairStr} (${dexType}, ${address})`;
         fetchPromises.push(
           safeFetchWrapper(
@@ -115,74 +131,75 @@ class PoolScanner {
             this.config.RPC_RETRIES || 3,
             this.config.RPC_RETRY_DELAY_MS || 1000
           ).catch(err => {
-             logger.error(`[PoolScanner] safeFetchWrapper failed for ${fetchIdentifier} after retries: ${err.message}`);
-             return { status: 'rejected', reason: err };
+             logger.error(`[PoolScanner v1.3] safeFetchWrapper failed for ${fetchIdentifier} after retries: ${err.message}`);
+             // Return a structured failure object so Promise.allSettled doesn't lose track
+             // Include the address and dexType from poolInfo so we can identify the failed pool later
+             return { status: 'rejected', reason: err, poolInfo: poolInfo };
           })
         );
       } else {
-        logger.warn(`[PoolScanner] No fetcher instance for dexType '${dexType}' for pool ${pairStr} (${address}). Skipping fetch.`);
+        logger.debug(`[PoolScanner v1.3] No active fetcher instance for dexType '${dexType}' or fetchPoolData missing for pool ${pairStr} (${address}). Skipping fetch.`);
+        // Do NOT increment poolsToAttemptFetch here, as we didn't queue a fetch
+        // Do NOT add to processedPoolStates - it wasn't fetched
       }
-    } // End loop
+    } // End loop over configuredPools
 
-    const poolProcessingEndTime = Date.now();
-    logger.debug(`[PoolScanner] Pool config processing took ${poolProcessingEndTime - poolProcessingStartTime}ms.`);
+    const poolConfigProcessingEndTime = Date.now();
+    logger.debug(`[PoolScanner v1.3] Pool config processing took ${poolConfigProcessingEndTime - poolConfigProcessingStartTime}ms. ${poolsToAttemptFetch} pools queued for fetch.`);
+
 
     if (fetchPromises.length === 0) {
-        if (configuredPools.length > 0) { logger.warn("[PoolScanner] No fetch promises created."); }
-        else { logger.warn("[PoolScanner] No pools configured."); }
+        if (configuredPools.length > 0) { logger.warn("[PoolScanner v1.3] No fetch promises created for configured pools."); }
+        else { logger.warn("[PoolScanner v1.3] No pools configured."); }
+        // Return empty array and the potentially populated pairRegistry
         return { poolStates: [], pairRegistry: this.pairRegistry };
     }
 
-    // CHANGED from logger.info to logger.debug
-    logger.debug(`[PoolScanner] Attempting to fetch data for ${fetchPromises.length} pools concurrently...`);
+    logger.debug(`[PoolScanner v1.3] Attempting to fetch data for ${fetchPromises.length} pools concurrently...`);
     const fetchStartTime = Date.now();
-    const results = await Promise.allSettled(fetchPromises);
+    const results = await Promise.allSettled(fetchPromises); // Use Promise.allSettled to process all promises
     const fetchEndTime = Date.now();
-    // CHANGED from logger.info to logger.debug
-    logger.debug(`[PoolScanner] Raw pool data fetching finished in ${fetchEndTime - fetchStartTime}ms.`);
+    logger.debug(`[PoolScanner v1.3] Raw pool data fetching finished in ${fetchEndTime - fetchStartTime}ms.`);
 
-    const poolStates = [];
+
+    const poolStates = []; // Array to hold successfully fetched and processed pool state data
     let successfulFetches = 0;
     let failedFetches = 0;
-    let poolsSkippedByFetcher = 0;
+    let skippedByFetcher = 0; // Fetches that returned { success: false }
 
-    // Filter attempted pools based on whether a fetcher existed for their dexType
-    const attemptedPools = configuredPools.filter(p => this.fetchers[p.dexType] && typeof this.fetchers[p.dexType].fetchPoolData === 'function');
 
-    results.forEach((result, index) => {
-        // Get the corresponding poolInfo based on the index from the *attempted* pools array
-        const poolInfo = attemptedPools[index];
-        if (!poolInfo) {
-            // This is a critical error, indicates a logic bug in how results are mapped back
-            logger.error(`[PoolScanner] CRITICAL: Mismatch between promise results and pool info at index ${index}.`);
-            failedFetches++; // Count as a failure related to processing
-            return; // Skip processing this result further
-        }
-        const pairStr = `${poolInfo.pair?.[0]?.symbol || '?'}/${poolInfo.pair?.[1]?.symbol || '?'}`;
-        const poolDesc = `${pairStr} on ${poolInfo.dexType} (${poolInfo.address})`;
-
+    results.forEach(result => {
         if (result.status === 'fulfilled') {
             const fetcherResult = result.value;
             if (fetcherResult && fetcherResult.success && fetcherResult.poolData) {
-                poolStates.push(fetcherResult.poolData); successfulFetches++;
-                logger.debug(`[PoolScanner] Successfully processed fetched state for ${poolDesc}`);
+                // Success path: add the processed poolData
+                poolStates.push(fetcherResult.poolData);
+                successfulFetches++;
+                // The poolData is already added to pairRegistry during the initial loop pass
+                 // logger.debug(`[PoolScanner v1.3] Successfully processed fetched state for ${fetcherResult.poolData?.groupName || fetcherResult.poolData?.address}`); // Refined logging
             } else if (fetcherResult && !fetcherResult.success) {
-                poolsSkippedByFetcher++; logger.warn(`[PoolScanner] Fetcher reported failure for ${poolDesc}. Reason: ${fetcherResult.error || 'Unknown'}`);
+                // Fetcher returned success: false (e.g., zero reserves, specific fetcher error)
+                skippedByFetcher++; // Count as skipped by fetcher logic
+                 // We can log a warning here, but the fetcher already logged it inside safeFetchWrapper
             } else {
-                // Fetcher returned something, but not in the expected success/poolData format
-                poolsSkippedByFetcher++; logger.warn(`[PoolScanner] Fetch for ${poolDesc} succeeded but returned invalid data format.`);
+                // Fetcher returned something unexpected that wasn't a success/fail object
+                failedFetches++;
+                logger.error(`[PoolScanner v1.3] Fetcher returned invalid data format for pool: ${fetcherResult?.address || 'Unknown'}. Result: ${JSON.stringify(fetcherResult)}`);
             }
-        } else { // status === 'rejected'
-            failedFetches++; const reason = result.reason instanceof Error ? result.reason.message : JSON.stringify(result.reason);
-            logger.error(`[PoolScanner] Failed to fetch state for ${poolDesc} after retries. Reason: ${reason}`);
-            if (result.reason instanceof Error && result.reason.stack) { logger.debug(`[PoolScanner] Stack trace for ${poolDesc} failure: ${result.reason.stack}`); }
+        } else { // status === 'rejected' (Error from safeFetchWrapper after retries, or unexpected promise error)
+            failedFetches++;
+            // The error reason is already logged by safeFetchWrapper's catch handler
+            // Log the pool info for context if available
+            const poolInfo = result.reason?.poolInfo; // Check if poolInfo was attached in the catch
+            const poolDesc = poolInfo ? `${poolInfo.pair?.[0]?.symbol}/${poolInfo.pair?.[1]?.symbol} on ${poolInfo.dexType} (${poolInfo.address})` : 'Unknown Pool';
+            logger.error(`[PoolScanner v1.3] Fetch promise rejected for ${poolDesc}. Reason already logged.`);
         }
     });
 
-    // CHANGED from logger.info to logger.debug
-    logger.debug(`[PoolScanner] Pool state fetching complete. Total Configured: ${configuredPools.length}, Attempts: ${fetchPromises.length}, Success: ${successfulFetches}, Failed: ${failedFetches}, Skipped: ${poolsSkippedByFetcher}`);
-    logger.debug(`[PoolScanner] Final Pair Registry Size: ${this.pairRegistry.size}`);
+    logger.debug(`[PoolScanner v1.3] Pool state fetching cycle complete. Configured: ${configuredPools.length}, Attempted Fetches: ${poolsToAttemptFetch}, Successful: ${successfulFetches}, Failed Promises: ${failedFetches}, Skipped by Fetcher: ${skippedByFetcher}`);
+    logger.debug(`[PoolScanner v1.3] Final Pair Registry Size: ${this.pairRegistry.size}`);
 
+    // Return the array of successfully fetched pool states and the complete pair registry
     return { poolStates, pairRegistry: this.pairRegistry };
   }
 }
