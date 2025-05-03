@@ -1,5 +1,5 @@
 // core/arbitrageEngine.js
-// --- VERSION v1.8 --- Updated constructor to receive TradeHandler class and instantiate it.
+// --- VERSION v1.9 --- Moved duration declaration outside try/finally.
 
 const { EventEmitter } = require('events');
 const { ethers } = require('ethers');
@@ -23,7 +23,7 @@ class ArbitrageEngine extends EventEmitter {
      */
     constructor(config, provider, swapSimulator, gasEstimator, flashSwapManager, TradeHandlerClass) { // <-- ADDED THIS PARAMETER
         super();
-        logger.info('[AE v1.8] Initializing ArbitrageEngine components...'); // Version bump
+        logger.info('[AE v1.9] Initializing ArbitrageEngine components...'); // Version bump
         // Validation...
         if (!config) throw new ArbitrageError('InitializationError', 'AE: Missing config.');
         if (!provider) throw new ArbitrageError('InitializationError', 'AE: Missing provider.');
@@ -31,7 +31,7 @@ class ArbitrageEngine extends EventEmitter {
         if (!gasEstimator?.estimateTxGasCost) throw new ArbitrageError('InitializationError', 'AE: Invalid GasEstimator.');
         if (!flashSwapManager || typeof flashSwapManager.initiateAaveFlashLoan !== 'function') { throw new ArbitrageError('InitializationError', 'AE: Invalid FlashSwapManager instance required.'); }
         // Validate the TradeHandler Class constructor
-        if (!TradeHandlerClass || typeof TradeHandlerClass !== 'function' || !TradeHandlerClass.prototype || typeof TradeHandlerClass.prototype.handleTrades !== 'function') {
+        if (!TradeHandlerClass || typeof TradeHandlerClass !== 'function' || !TradeHandlerClass.prototype || typeof TradeHandlerClassClass.prototype.handleTrades !== 'function') { // <-- Corrected typo here
              throw new ArbitrageError('InitializationError', 'AE: Invalid TradeHandler Class constructor provided.');
         }
 
@@ -81,7 +81,7 @@ class ArbitrageEngine extends EventEmitter {
         this.nativeSymbol = this.config.NATIVE_CURRENCY_SYMBOL || 'ETH';
 
 
-        logger.info('[AE v1.8] ArbitrageEngine components initialized successfully.'); // Version bump
+        logger.info('[AE v1.9] ArbitrageEngine components initialized successfully.'); // Version bump
     }
 
     /**
@@ -148,7 +148,7 @@ class ArbitrageEngine extends EventEmitter {
             this.cycleInterval = null;
             logger.debug('[AE.stop] Cycle interval cleared.');
         }
-        this.isCycleRunning = false; // Ensure cycle running flag is reset immediately
+        this.isCycleRunning = false; // Ensure flag is reset immediately
         logger.info('[AE.stop] Arbitrage Engine stopped.');
 
          // Add explicit BOT STOPPED message here
@@ -158,6 +158,10 @@ class ArbitrageEngine extends EventEmitter {
 
     async runCycle() {
         const cycleStartTime = Date.now();
+        // Declare duration here to ensure it's in scope for finally block
+        let duration = 0; // Initialize with a default value
+
+
         // Use debug level for frequent cycle start/end logs
         logger.debug('[AE.runCycle] ===== Starting New Cycle =====');
 
@@ -214,7 +218,6 @@ class ArbitrageEngine extends EventEmitter {
 
 
         } catch (error) {
-            // Catch unexpected errors in the main cycle flow
             logger.error('[AE.runCycle] !!!!!!!! UNEXPECTED ERROR during cycle !!!!!!!!!!');
             logger.error(`[AE.runCycle] Error Type: ${error.constructor.name}, Msg: ${error.message}`);
              // Log stack trace only for non-ArbitrageErrors or if LOG_LEVEL is debug/verbose
@@ -224,7 +227,9 @@ class ArbitrageEngine extends EventEmitter {
             cycleStatus = `FAILED (${error.type || error.constructor.name})`; // Update status on failure
              // Do NOT re-throw here. The interval timer should continue unless startup failed.
         } finally {
-            const cycleDuration = Date.now() - cycleStartTime;
+            const cycleEndTime = Date.now();
+            // Calculate duration here
+            duration = cycleEndTime - cycleStartTime; // Assign to the outer scoped variable
             // Use debug level for frequent cycle start/end logs
             logger.debug(`[AE.runCycle] ===== Cycle ${cycleStatus}. Duration: ${duration}ms =====`);
             this.isCycleRunning = false; // Ensure flag is reset regardless of outcome
@@ -288,7 +293,8 @@ class ArbitrageEngine extends EventEmitter {
             // Use debug level for starting a specific finder
             logger.debug('[AE._findOpportunities] Running SpatialFinder...');
             // Pass pairRegistry to findArbitrage (assuming signature update in SpatialFinder v1.26)
-            const spatialOpportunities = this.spatialFinder.findArbitrage(poolStates, pairRegistry);
+            // REMOVED pairRegistry argument from SpatialFinder call as per SpatialFinder v1.25 code
+            const spatialOpportunities = this.spatialFinder.findArbitrage(poolStates);
             // Use debug level for finder results summary
             logger.debug(`[AE._findOpportunities] SpatialFinder found ${spatialOpportunities.length} potentials.`);
             allOpportunities = allOpportunities.concat(spatialOpportunities);
@@ -356,7 +362,7 @@ class ArbitrageEngine extends EventEmitter {
         this.tradeHandler.handleTrades(profitableTrades).catch(handlerError => {
              // Catch errors specifically from the handler's async execution
              logger.error("[AE._handleProfitableTrades] Uncaught error from trade handler:", handlerError);
-             handleError(handlerError, 'TradeHandlerMethodTopLevelCatch'); // Centralized error handling
+             handleError(handlerError, 'TradeHandlerMethodTopLevelCatch');
         });
 
         logger.info(`[AE._handleProfitableTrades] --- Dispatched trades for handling ---`);
