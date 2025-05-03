@@ -146,10 +146,14 @@ class SwapSimulator {
         // The Quoter call itself will validate the addresses/fee/amounts.
         // Checking for undefined/null here helps confirm the data made it this far.
          // Check fee type and value range
-         if (typeof params.fee !== 'number' || !Number.isInteger(params.fee) || params.fee < 0 || params.fee > 10000) { // uint24 covers up to ~16M, BPS are 0-10000
-             logger.warn(`${logPrefix} DEBUG: Unexpected fee type or value for Quoter (fee: ${params.fee}). Expected integer BPS 0-10000.`);
+         if (typeof params.fee !== 'number' || !Number.isInteger(params.fee) || params.fee < 0 || params.fee > 10000000) { // uint24 max value is > 10M, covering BPS up to 10000 and more
+             // Adjusted check based on uint24 range, but BPS fees should be much lower
+             logger.warn(`${logPrefix} DEBUG: Unexpected fee type or value for Quoter (fee: ${params.fee}). Expected integer BPS like 100, 500, 3000.`);
              // Decide if this should fail simulation. Likely safer to fail if fee is bad.
-             return { success: false, amountOut: null, error: `Invalid fee value for Quoter: ${params.fee}` };
+             // Keep the validation as it was, expecting standard BPS
+             if (params.fee < 0 || params.fee > 10000) {
+                  return { success: false, amountOut: null, error: `Invalid fee value for Quoter: ${params.fee}` };
+             }
          }
         if (sqrtPriceX96 === undefined || sqrtPriceX96 === null || liquidity === undefined || liquidity === null || tick === undefined || tick === null) {
              // Log only a debug message here, as we are now CONFIDENT the data is fetched and passed to the finder.
@@ -335,10 +339,7 @@ class SwapSimulator {
                      // querySellBase(address trader, uint256 payBaseAmount)
                      // Use ethers.ZeroAddress as the trader for simulation
                      // --- TODO: Verify if THIS DODO ABI EXPECTS ARGUMENTS AS A TUPLE OR SEPARATE ---
-                     // You must verify this based on the actual ABI you obtained.
-                     // If it expects a tuple, the call should look like:
-                     // queryResult = await poolContract.querySellBase.staticCall([ethers.ZeroAddress, amountIn]);
-                     // Otherwise, keeping as separate arguments:
+                     // Based on previous docs, it seems to expect arguments as separate inputs.
                      queryResult = await poolContract.querySellBase.staticCall(ethers.ZeroAddress, amountIn);
                      amountOut = BigInt(queryResult[0]); // The first element is receiveQuoteAmount
                      // Note: queryResult[1] is mtFee, might need later for detailed analysis, but standard simulation doesn't use it directly.
@@ -347,8 +348,9 @@ class SwapSimulator {
                 } catch (queryError) {
                     // Attempt to decode revert reason
                     let reason = queryError.reason || queryError.message;
-                    if (queryError.data && typeof error.data === 'string' && error.data !== '0x') { // Use error.data here
-                        try { reason = ethers.toUtf8String(error.data); } catch {}
+                    // Use error.data here
+                    if (queryError.data && typeof queryError.data === 'string' && queryError.data !== '0x') {
+                        try { reason = ethers.toUtf8String(queryError.data); } catch {}
                     }
                     // Log common reverts at debug/info level, others at warn/error
                     if (reason.includes("BALANCE_NOT_ENOUGH") || reason.includes("TARGET_IS_ZERO") || reason.includes("SELL_BASE_RESULT_IS_ZERO") || reason.includes("DODO_SELL_AMOUNT_TOO_SMALL")) {
@@ -380,7 +382,6 @@ class SwapSimulator {
                     // querySellQuote(address trader, uint256 payQuoteAmount)
                     // Use ethers.ZeroAddress as the trader for simulation
                     // --- TODO: Verify if THIS DODO ABI EXPECTS ARGUMENTS AS A TUPLE OR SEPARATE ---
-                    // You must verify this based on the actual ABI you obtained.
                     // For now, keeping as separate arguments:
                     queryResult = await poolContract.querySellQuote.staticCall(ethers.ZeroAddress, amountIn);
                     amountOut = BigInt(queryResult[0]); // The first element is receiveBaseAmount
@@ -390,8 +391,9 @@ class SwapSimulator {
                 } catch (queryError) {
                     // Attempt to decode revert reason
                     let reason = queryError.reason || queryError.message;
-                     if (queryError.data && typeof error.data === 'string' && error.data !== '0x') { // Use error.data here
-                         try { reason = ethers.toUtf8String(error.data); } catch {}
+                     // Use error.data here
+                     if (queryError.data && typeof queryError.data === 'string' && queryError.data !== '0x') {
+                         try { reason = ethers.toUtf8String(queryError.data); } catch {}
                      }
                      // Log common reverts at debug/info level, others at warn/error
                     if (reason.includes("BALANCE_NOT_ENOUGH") || reason.includes("TARGET_IS_ZERO") || reason.includes("SELL_QUOTE_RESULT_IS_ZERO") || reason.includes("DODO_SELL_AMOUNT_TOO_SMALL")) {
@@ -420,7 +422,7 @@ class SwapSimulator {
              // treat it as a simulation failure for opportunity calculation.
             if (amountOut === 0n) {
                  logger.debug(`${logPrefix} Simulation resulted in 0 amountOut.`);
-                 // If we reached here, it means the query call itself didn't throw, but returned 0.
+                 // If we reached here, it means the query executed without unexpected error, but the result was 0.
                  // This could happen if liquidity is effectively zero for that amount, or the price is infinite.
                  // We return success: true because the query executed without unexpected error, but the result was 0.
                  // The profit calculation logic will then correctly determine zero profit.
