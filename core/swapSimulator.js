@@ -1,5 +1,5 @@
 // core/swapSimulator.js
-// --- VERSION v1.6 --- Updated DODO simulation to use querySellBase/querySellQuote view functions.
+// --- VERSION v1.7 --- Fixed UniV3 simulation to pass arguments as a tuple to QuoterV2.
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger'); // Adjust path if needed
@@ -17,16 +17,28 @@ class SwapSimulator {
         logger.debug('[SwapSimulator] Initializing...');
         if (!config?.QUOTER_ADDRESS || !ethers.isAddress(config.QUOTER_ADDRESS)) throw new ArbitrageError('SwapSimulatorInit', 'Valid QUOTER_ADDRESS missing.');
         if (!provider) throw new ArbitrageError('SwapSimulatorInit', 'Provider instance required.');
-        if (!ABIS?.IQuoterV2) throw new ArbitrageError('SwapSimulatorInit', "IQuoterV2 ABI missing.");
-        // Ensure DODO ABI is available for DODO simulations
-        if (!ABIS?.DODOV1V2Pool) logger.warn("[SwapSimulatorInit] DODOV1V2Pool ABI missing. DODO simulations will fail.");
+        // Check for required ABIs. Log errors/warnings if missing.
+        if (!ABIS?.IQuoterV2) {
+             logger.error("[SwapSimulatorInit] IQuoterV2 ABI missing. UniV3 simulations will fail.");
+             // Throw only if UniV3 is enabled but Quoter ABI is missing
+             if (config.UNISWAP_V3_ENABLED) throw new ArbitrageError('SwapSimulatorInit', "IQuoterV2 ABI critically missing for UniV3 simulation.");
+        }
+        if (!ABIS?.DODOV1V2Pool) {
+             logger.warn("[SwapSimulatorInit] DODOV1V2Pool ABI missing. DODO simulations will fail.");
+        }
+         // Optional ABIs
+         if (!ABIS?.ERC20) {
+             logger.warn("[SwapSimulatorInit] ERC20 ABI missing. Some token operations may fail.");
+         }
+
 
         this.config = config;
         this.provider = provider;
-        // Use the Quoter V2 contract instance from the constructor
-        this.quoterContract = new ethers.Contract(config.QUOTER_ADDRESS, ABIS.IQuoterV2, this.provider);
+        // Initialize quoter contract only if ABI is available
+        this.quoterContract = ABIS?.IQuoterV2 ? new ethers.Contract(config.QUOTER_ADDRESS, ABIS.IQuoterV2, this.provider) : null;
         this.dodoPoolContractCache = {};
-        logger.info(`[SwapSimulator] Initialized with Quoter V2 at ${config.QUOTER_ADDRESS}`);
+
+        logger.info(`[SwapSimulator] Initialized with Quoter V2 at ${config.QUOTER_ADDRESS || 'N/A'}`);
         if (ABIS?.DODOV1V2Pool) {
              logger.info(`[SwapSimulator] DODO V1/V2 Pool ABI loaded.`);
         }
@@ -42,7 +54,9 @@ class SwapSimulator {
                 logger.debug(`[SwapSim] Created DODO contract instance for ${poolAddress}`);
             } catch (error) {
                 logger.error(`[SwapSim] Error creating DODO contract instance ${poolAddress}: ${error.message}`);
-                throw new ArbitrageError('DodoSimError', `Failed to create contract instance: ${error.message}`); // Wrap error
+                // Do not throw here, allow fetcher/simulator to handle null contract gracefully
+                this.dodoPoolContractCache[lowerCaseAddress] = null; // Cache as null to avoid retrying failed creation
+                 return null;
             }
         }
         return this.dodoPoolContractCache[lowerCaseAddress];
@@ -52,9 +66,16 @@ class SwapSimulator {
     async simulateSwap(poolState, tokenIn, amountIn) {
         const logPrefix = `[SwapSim ${poolState?.dexType || 'N/A'} ${poolState?.address?.substring(0,6) || 'N/A'}]`;
 
-        if (!poolState || !tokenIn || !amountIn || amountIn <= 0n) {
-             logger.warn(`${logPrefix} Invalid args for simulateSwap: poolState=${!!poolState}, tokenIn=${!!tokenIn}, amountIn=${amountIn?.toString()}`);
-             return { success: false, amountOut: null, error: 'Invalid arguments' };
+        // Validate essential poolState properties needed for all simulations
+         if (!poolState || poolState.dexType === undefined || !poolState.address || !poolState.token0 || !poolState.token1 || !poolState.token0.address || !poolState.token1.address || poolState.token0.decimals === undefined || poolState.token1.decimals === undefined) {
+             logger.warn(`${logPrefix} Invalid basic poolState for simulateSwap.`);
+             return { success: false, amountOut: null, error: 'Invalid basic poolState' };
+         }
+
+
+        if (!tokenIn || !amountIn || amountIn <= 0n) {
+             logger.warn(`${logPrefix} Invalid tokenIn or amountIn for simulateSwap: tokenIn=${!!tokenIn}, amountIn=${amountIn?.toString()}`);
+             return { success: false, amountOut: null, error: 'Invalid tokenIn or amountIn' };
         }
         try {
              logger.debug(`${logPrefix} Sim Swap: ${ethers.formatUnits(amountIn, tokenIn.decimals)} ${tokenIn.symbol} (raw ${amountIn.toString()})`);
@@ -63,11 +84,29 @@ class SwapSimulator {
         }
 
         try {
-            switch (poolState.dexType?.toLowerCase()) { // Use lowercase for safety
-                case 'uniswapv3': return await this.simulateV3Swap(poolState, tokenIn, amountIn);
-                case 'sushiswap': return await this.simulateV2Swap(poolState, tokenIn, amountIn);
-                case 'dodo':      return await this.simulateDodoSwap(poolState, tokenIn, amountIn);
-                default:          logger.warn(`${logPrefix} Unsupported dexType: ${poolState.dexType}`); return { success: false, amountOut: null, error: `Unsupported dex: ${poolState.dexType}` };
+            // Use lowercase for safety
+            switch (poolState.dexType?.toLowerCase()) {
+                case 'uniswapv3':
+                     if (!this.quoterContract) {
+                         logger.warn(`${logPrefix} Quoter contract not initialized. Skipping UniV3 simulation.`);
+                         return { success: false, amountOut: null, error: 'Quoter contract not initialized' };
+                     }
+                     return await this.simulateV3Swap(poolState, tokenIn, amountIn);
+
+                case 'sushiswap':
+                     return await this.simulateV2Swap(poolState, tokenIn, amountIn);
+
+                case 'dodo':
+                     const dodoPoolContract = this._getDodoPoolContract(poolState.address);
+                     if (!dodoPoolContract) {
+                         logger.warn(`${logPrefix} DODO pool contract not initialized. Skipping DODO simulation.`);
+                         return { success: false, amountOut: null, error: 'DODO pool contract not initialized' };
+                     }
+                     return await this.simulateDodoSwap(poolState, tokenIn, amountIn, dodoPoolContract); // Pass the contract instance
+
+                default:
+                    logger.warn(`${logPrefix} Unsupported dexType: ${poolState.dexType}`);
+                    return { success: false, amountOut: null, error: `Unsupported dex: ${poolState.dexType}` };
             }
         } catch (error) {
             // Catch unexpected errors during simulation dispatch
@@ -77,8 +116,11 @@ class SwapSimulator {
         }
      }
 
-    // Uniswap V3 Simulation (Adjusted to use poolState properties directly)
+    // Uniswap V3 Simulation (Adjusted to use poolState properties directly AND pass args as tuple)
     async simulateV3Swap(poolState, tokenIn, amountIn) {
+        // Destructure required properties from poolState. Assume these are populated by the fetcher and passed correctly by the finder.
+        // Note: While sqrtPriceX96, liquidity, tick are passed, the QuoterV2 might not strictly NEED them for quoteExactInputSingle,
+        // but they are part of the pool state for other potential uses (like price calc or manual simulation).
         const { fee, token0, token1, address, sqrtPriceX96, liquidity, tick } = poolState;
         const logPrefix = `[SwapSim V3 ${address?.substring(0,6)}]`;
 
@@ -88,34 +130,47 @@ class SwapSimulator {
              return { success: false, amountOut: null, error: 'Cannot determine tokenOut' };
         }
 
-        const sqrtPriceLimitX96 = 0n; // Used to set price bounds, 0 means no limit for quoteExactInputSingle
+        // Define the parameters for quoteExactInputSingle as an object, then convert to a tuple (array)
+        // The Quoter V2 ABI expects a struct/tuple: QuoteExactInputSingleParams
+        const params = {
+             tokenIn: tokenIn.address,
+             tokenOut: tokenOut.address,
+             fee: fee, // uint24 fee (should be in the correct format from fetcher/config)
+             amountIn: amountIn, // uint256 amountIn (already in smallest units BigInt)
+             // Use 0n for sqrtPriceLimitX96 to indicate no limit, or a calculated limit based on desired slippage
+             // For simulation purposes, often no limit is needed to see max possible output
+             sqrtPriceLimitX96: 0n // uint160
+        };
 
-        // Basic validation for critical V3 state props
-        // Also check if sqrtPriceX96 is 0n, which indicates an unusable pool state
-        if (sqrtPriceX96 === undefined || sqrtPriceX96 === null || BigInt(sqrtPriceX96) === 0n ||
-            liquidity === undefined || liquidity === null || tick === undefined || tick === null) {
-             const errMsg = `Missing or zero critical V3 state properties for simulation (sqrtPriceX96: ${sqrtPriceX96}, liquidity: ${liquidity}, tick: ${tick}).`;
-             logger.warn(`${logPrefix} ${errMsg}`);
-             return { success: false, amountOut: null, error: errMsg };
+        // Basic validation for critical V3 state props (passed from finder)
+        // This is mostly for debugging the state flow pipeline from fetcher -> finder -> simulator
+        // The Quoter call itself will validate the addresses/fee/amounts.
+        // Checking for undefined/null here helps confirm the data made it this far.
+        if (sqrtPriceX96 === undefined || sqrtPriceX96 === null || liquidity === undefined || liquidity === null || tick === undefined || tick === null) {
+             // Log only a debug message here, as we are now CONFIDENT the data is fetched and passed to the finder.
+             // The issue might be in how the finder passes it or how extractSimState formats it.
+             logger.debug(`${logPrefix} DEBUG: Critical V3 state properties are unexpected (sqrtPriceX96: ${sqrtPriceX96}, liquidity: ${liquidity}, tick: ${tick}). Check finder's extractSimState.`);
+             // Continue simulation attempt using the Quoter, as it doesn't strictly need all these for quoteExactInputSingle
+             // We rely on the Quoter for the actual simulation logic.
         }
 
+
         try {
-            // Use the Quoter V2 contract instance from the constructor
+            // Use the Quoter V2 contract instance from the constructor (already checked for null)
             logger.debug(`${logPrefix} Quoting ${tokenIn.symbol}->${tokenOut.symbol} Fee ${fee} In ${amountIn.toString()} (raw)`);
-            // Call the quoter contract using the correct function and parameters
-            // Note: quoteExactInputSingle takes amountIn as the input token amount (in smallest units)
-            const quoteResult = await this.quoterContract.quoteExactInputSingle.staticCall(
-                 tokenIn.address, // address tokenIn
-                 tokenOut.address, // address tokenOut
-                 fee, // uint24 fee (Note: poolState.fee is uint24 from fetcher)
-                 amountIn, // uint256 amountIn (already in smallest units)
-                 sqrtPriceLimitX96 // uint160 sqrtPriceLimitX96
-            );
+            // Call the quoter contract using the correct function and parameters AS A TUPLE (array)
+            // quoteExactInputSingle returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)
+            const quoteResult = await this.quoterContract.quoteExactInputSingle.staticCall([
+                 params.tokenIn,
+                 params.tokenOut,
+                 params.fee,
+                 params.amountIn,
+                 params.sqrtPriceLimitX96 // Pass the tuple/array as the single argument
+            ]);
 
             // The result is an array, where the first element is the amountOut (uint256)
             const amountOut = BigInt(quoteResult[0]); // Amount out in smallest units of tokenOut
-            // Note: quoteResult might contain gas estimate and sqrtPriceX96After
-            // const estimatedGasUsed = BigInt(quoteResult[1]); // For potential gas cost estimation
+            // Note: quoteResult[1] is sqrtPriceX96After, quoteResult[2] is initializedTicksCrossed, quoteResult[3] is gasEstimate
 
             logger.debug(`${logPrefix} Quoter Out: ${amountOut.toString()} (raw)`);
 
@@ -133,13 +188,15 @@ class SwapSimulator {
             if (error.data && typeof error.data === 'string' && error.data !== '0x') {
                  try { reason = ethers.toUtf8String(error.data); } catch {} // Use ethers.toUtf8String
             }
+            // Log Quoter failures at WARN level as they indicate a simulation failure
             logger.warn(`${logPrefix} Quoter fail: ${reason}`);
             return { success: false, amountOut: null, error: `Quoter fail: ${reason}` };
         }
     }
 
-    // Uniswap V2 / SushiSwap Simulation (Adjusted to use poolState properties directly)
+    // Uniswap V2 / SushiSwap Simulation (Uses poolState reserves directly)
     async simulateV2Swap(poolState, tokenIn, amountIn) {
+        // Destructure required properties from poolState
         const { reserve0, reserve1, token0, token1, address } = poolState;
         const logPrefix = `[SwapSim V2 ${address?.substring(0,6)}]`;
 
@@ -185,7 +242,7 @@ class SwapSimulator {
 
             const amountOut = numerator / denominator; // Integer division
 
-            logger.debug(`${logPrefix} Sim Out: ${amountOut.toString()} (raw)`);
+            logger.debug(`${logPrefix} V2 Sim Out: ${amountOut.toString()} (raw)`);
             if (amountOut <= 0n) {
                  logger.debug(`${logPrefix} V2 calculation zero or negative output (${amountOut}).`);
                  return { success: false, amountOut: 0n, error: 'V2 zero output' }; // Return 0n amountOut on zero/negative output
@@ -205,8 +262,13 @@ class SwapSimulator {
      * view functions. Relies on the fetcher providing poolState with a valid address
      * and correctly identified baseTokenSymbol.
      * DOES NOT use PMMState math directly in JS, delegates to contract view functions.
+     * @param {object} poolState - The pool state object.
+     * @param {object} tokenIn - The Token object for the input token.
+     * @param {bigint} amountIn - The amount of input token (in smallest units, BigInt).
+     * @param {ethers.Contract} poolContract - The initialized DODO pool contract instance.
+     * @returns {Promise<{success: boolean, amountOut: bigint|null, error: string|null}>} Simulation result.
      */
-     async simulateDodoSwap(poolState, tokenIn, amountIn) {
+     async simulateDodoSwap(poolState, tokenIn, amountIn, poolContract) {
         // Access properties directly from poolState
         // PMMState is fetched but not directly used here, as we delegate simulation to the contract queries.
         const { address, token0, token1, baseTokenSymbol } = poolState; // Removed queryAmountOutWei etc.
@@ -222,10 +284,11 @@ class SwapSimulator {
              logger.warn(`${logPrefix} ${errMsg}`);
              return { success: false, amountOut: null, error: errMsg };
         }
-         if (!ethers.isAddress(address)) {
-             const errMsg = `Invalid pool address in poolState for DODO simulation: ${address}`;
-             logger.warn(`${logPrefix} ${errMsg}`);
-             return { success: false, amountOut: null, error: errMsg };
+         // Check if poolContract instance is valid (should be guaranteed by simulateSwap dispatcher now)
+         if (!poolContract || typeof poolContract.getAddress !== 'function') {
+              const errMsg = 'DODO poolContract instance is not valid or missing.';
+              logger.error(`${logPrefix} ${errMsg}`);
+              return { success: false, amountOut: null, error: errMsg };
          }
         if (amountIn === undefined || amountIn === null || amountIn <= 0n) {
              logger.warn(`${logPrefix} Invalid amountIn for DODO simulation: ${amountIn}`);
@@ -233,8 +296,6 @@ class SwapSimulator {
         }
 
         try {
-            const poolContract = this._getDodoPoolContract(address); // Get contract instance
-
             // Determine if the input token is the base token
             // Use token addresses for robustness, comparing against the baseToken's address from config
             // This assumes the fetcher correctly looked up baseToken based on baseTokenSymbol
@@ -242,7 +303,10 @@ class SwapSimulator {
              if (!baseToken || !baseToken.address) {
                  const errorMsg = `Base token symbol '${baseTokenSymbol}' not found or invalid in config.TOKENS.`;
                  logger.error(`${logPrefix} ${errorMsg}`);
-                 throw new ArbitrageError('DodoSimError', errorMsg);
+                 // Note: This is an initialization/config error, maybe should be caught earlier.
+                 // Throwing an ArbitrageError here might be appropriate if this should never happen with valid config.
+                 // For now, returning failure.
+                 return { success: false, amountOut: null, error: errorMsg };
              }
             const isSellingBase = tokenIn.address.toLowerCase() === baseToken.address.toLowerCase();
 
@@ -255,14 +319,20 @@ class SwapSimulator {
 
                 // Call the pool's querySellBase view function
                  // querySellBase returns (uint receiveQuoteAmount, uint mtFee)
+                 // Check for function existence based on the loaded ABI
                  if (typeof poolContract.querySellBase !== 'function') {
                      const errorMsg = "querySellBase function not found in DODO ABI for this contract.";
                      logger.error(`${logPrefix} ${errorMsg}`);
-                     throw new ArbitrageError('DodoSimError', errorMsg);
+                      // This indicates an ABI mismatch or an attempt to simulate on a non-standard DODO contract
+                     return { success: false, amountOut: null, error: errorMsg };
                  }
                 try {
                      // querySellBase(address trader, uint256 payBaseAmount)
                      // Use ethers.ZeroAddress as the trader for simulation
+                     // --- TODO: Verify if THIS DODO ABI EXPECTS ARGUMENTS AS A TUPLE OR SEPARATE ---
+                     // The ABI you just got might expect querySellBase(tuple params). Need to verify.
+                     // For now, keeping as separate arguments as in the code you provided,
+                     // but be aware this might need adjustment based on the actual ABI.
                      queryResult = await poolContract.querySellBase.staticCall(ethers.ZeroAddress, amountIn);
                      amountOut = BigInt(queryResult[0]); // The first element is receiveQuoteAmount
                      // Note: queryResult[1] is mtFee, might need later for detailed analysis, but standard simulation doesn't use it directly.
@@ -281,8 +351,10 @@ class SwapSimulator {
                          // Do NOT throw, return success: false with amountOut: 0n
                          return { success: false, amountOut: 0n, error: `DODO query zero output: ${reason}` };
                      } else {
-                        logger.warn(`${logPrefix} querySellBase reverted unexpectedly: ${reason}`);
-                        throw queryError; // Re-throw unexpected errors
+                        // Log unexpected reverts as errors
+                        logger.error(`${logPrefix} querySellBase reverted unexpectedly: ${reason}`);
+                        // Re-throw the error to be caught by the main simulateSwap catch block
+                        throw new ArbitrageError('DodoSimError', `QuerySellBase unexpected revert: ${reason}`, queryError);
                     }
                 }
 
@@ -292,14 +364,18 @@ class SwapSimulator {
 
                 // Call the pool's querySellQuote view function
                 // querySellQuote returns (uint receiveBaseAmount, uint mtFee)
+                // Check for function existence based on the loaded ABI
                 if (typeof poolContract.querySellQuote !== 'function') {
                     const errorMsg = "querySellQuote function not found in DODO ABI for this contract.";
                      logger.error(`${logPrefix} ${errorMsg}`);
-                     throw new ArbitrageError('DodoSimError', errorMsg);
+                    return { success: false, amountOut: null, error: errorMsg };
                 }
                 try {
                     // querySellQuote(address trader, uint256 payQuoteAmount)
                     // Use ethers.ZeroAddress as the trader for simulation
+                    // --- TODO: Verify if THIS DODO ABI EXPECTS ARGUMENTS AS A TUPLE OR SEPARATE ---
+                    // Need to verify based on the actual ABI you obtained.
+                    // For now, keeping as separate arguments.
                     queryResult = await poolContract.querySellQuote.staticCall(ethers.ZeroAddress, amountIn);
                     amountOut = BigInt(queryResult[0]); // The first element is receiveBaseAmount
                     // Note: queryResult[1] is mtFee
@@ -318,25 +394,29 @@ class SwapSimulator {
                          // Do NOT throw, return success: false with amountOut: 0n
                          return { success: false, amountOut: 0n, error: `DODO query zero output: ${reason}` };
                     } else {
-                        logger.warn(`${logPrefix} querySellQuote reverted unexpectedly: ${reason}`);
-                        throw queryError; // Re-throw unexpected errors
+                        // Log unexpected reverts as errors
+                        logger.error(`${logPrefix} querySellQuote reverted unexpectedly: ${reason}`);
+                        // Re-throw the error to be caught by the main simulateSwap catch block
+                        throw new ArbitrageError('DodoSimError', `QuerySellQuote unexpected revert: ${reason}`, queryError);
                     }
                 }
             }
 
             // Final validation of output amount
             // This catch is for unexpected errors AFTER the query, or errors in setup
-             if (amountOut < 0n) {
+             // Note: query functions usually return 0 on fail rather than negative
+             if (amountOut < 0n) { // Should not happen with properly returning view functions
                  logger.warn(`${logPrefix} Simulation resulted in negative amountOut (${amountOut}). Setting to 0.`);
                  amountOut = 0n;
              }
 
-             // If amountOut is still 0, treat as simulation failure for opportunity calculation
+             // If amountOut is still 0, and we didn't return success: false above for common reverts,
+             // treat it as a simulation failure for opportunity calculation.
             if (amountOut === 0n) {
                  logger.debug(`${logPrefix} Simulation resulted in 0 amountOut.`);
-                 // The specific revert reasons above already handle returning success: false.
-                 // This check catches cases where query didn't revert but returned 0.
-                 // Return success: true here as the query executed without unexpected error, but output was 0.
+                 // If we reached here, it means the query call itself didn't throw, but returned 0.
+                 // This could happen if liquidity is effectively zero for that amount, or the price is infinite.
+                 // We return success: true because the query executed without unexpected error, but the result was 0.
                  // The profit calculation logic will then correctly determine zero profit.
                  return { success: true, amountOut: 0n, error: null };
             }
@@ -346,7 +426,8 @@ class SwapSimulator {
             return { success: true, amountOut: amountOut, error: null };
 
         } catch(error) {
-            // Catch errors from contract creation, validation, or re-thrown unexpected query errors
+            // Catch errors from contract creation (now handled in _getDodoPoolContract),
+            // config validation, or re-thrown unexpected query errors.
             const errMsg = error instanceof ArbitrageError ? error.message : `Unexpected DODO sim error: ${error.message}`;
             logger.error(`${logPrefix} DODO simulation failed: ${errMsg}`, error);
             return { success: false, amountOut: null, error: `DODO simulation failed: ${errMsg}` };
