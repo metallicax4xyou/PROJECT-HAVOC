@@ -94,6 +94,99 @@ class SpatialFinder {
     }
 
     /**
+     * Calculates the price of token0 in terms of token1 (token0/token1) for a given pool state.
+     * Returns the price scaled by PRICE_SCALE (1e18) for consistent BigInt arithmetic.
+     * This scaled price is used for comparing prices across different pools and DEX types.
+     * @param {object} poolState - The state object for a specific pool, including token info and DEX-specific data (e.g., sqrtPriceX96, reserves).
+     * @returns {bigint | null} The price of token0 in token1 scaled by PRICE_SCALE, or null if calculation fails or data is insufficient.
+     */
+    _calculatePrice(poolState) {
+        // Extract necessary properties from the pool state
+        const { dexType, token0, token1 } = poolState;
+        let price0_1_scaled = null; // Initialize price
+
+        // Essential checks for token data needed for price calculation
+        if (!token0 || !token1 || !token0.address || !token1.address || token0.decimals === undefined || token1.decimals === undefined) {
+            logger.warn(`[SF._CalcPrice] Missing required token info (address/decimals) for pool ${poolState.address}`);
+             logger.debug(`[SF._CalcPrice] Pool ${poolState.address?.substring(0,6)} (${poolState.dexType}) - Missing token info. Returning null.`);
+            return null; // Cannot calculate price without complete token data
+        }
+
+        try {
+            // Delegate price calculation to priceCalculation functions based on the DEX type
+            switch (dexType?.toLowerCase()) {
+                case 'uniswapv3':
+                    // Call the function that calculates T0/T1 scaled by PRICE_SCALE
+                    price0_1_scaled = calculateV3PriceT0_T1_scaled(poolState);
+                    break;
+
+                case 'sushiswap': // Assuming SushiSwap uses Uniswap V2 logic
+                    // calculateSushiPrice already returns T0/T1 scaled by PRICE_SCALE
+                    price0_1_scaled = calculateSushiPrice(poolState);
+                    break;
+
+                case 'dodo':
+                    // calculateDodoPrice already returns T0/T1 scaled by PRICE_SCALE (assuming T0 is Base, T1 is Quote or handles inverse)
+                    price0_1_scaled = calculateDodoPrice(poolState);
+                    break;
+
+                // Add cases for other DEX types if needed (e.g., camelot)
+                // case 'camelot': ... break;
+
+                default:
+                    // Log a warning if the DEX type is unknown or not supported for price calculation
+                    logger.warn(`[SF._CalcPrice] Unknown or unsupported dexType for price calculation: ${dexType} for pool ${poolState.address}`);
+                    price0_1_scaled = null; // Unknown type, cannot calculate price
+            }
+        } catch (error) {
+            // Catch and log any errors during price calculation
+            logger.error(`[SF._CalcPrice] Error calculating price for ${poolState.address}: ${error.message}`, error);
+            price0_1_scaled = null; // Calculation failed
+        }
+
+        // --- ADD DEBUG LOG FOR FINAL CALCULATED PRICE ---
+        // Only log if price calculation was attempted (not null/undefined)
+        if (price0_1_scaled !== null && price0_1_scaled !== undefined) {
+             // Only log if the price is positive, otherwise it's likely still an issue or zero liquidity
+             if (price0_1_scaled > 0n) {
+                 try {
+                     // Attempt to format the price for human readability in the log
+                     // Price is T0/T1 scaled by PRICE_SCALE (1e18)
+                      // Use formatUnits with 18 decimals for the scaled price
+                      const priceFormatted_T0_T1 = ethers.formatUnits(price0_1_scaled, 18);
+
+                      // Calculate inverse price (T1/T0) scaled by 1e18 for logging clarity
+                      let priceInverseScaled = 0n;
+                      let priceInverseFormatted_T1_T0 = 'N/A';
+                      if (price0_1_scaled > 0n) {
+                          priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / price0_1_scaled;
+                               // Handle potential division by zero if price0_1_scaled is unexpectedly large after filter? Unlikely but safe.
+                          if (priceInverseScaled > 0n) {
+                              priceInverseFormatted_T1_T0 = ethers.formatUnits(priceInverseScaled, 18);
+                          } else {
+                              priceInverseFormatted_T1_T0 = 'Calculated 0';
+                          }
+                      }
+
+                      logger.debug(`[SF._CalcPrice] Pool ${poolState.address?.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted_T0_T1} | T1/T0 (Approx): ${priceInverseFormatted_T1_T0}. Returning price.`);
+                 } catch (formatError) {
+                      logger.error(`[SF._CalcPrice] Error formatting price for log for pool ${poolState.address}: ${formatError.message}`);
+                      logger.debug(`[SF._CalcPrice] Pool ${poolState.address?.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()}`);
+                 }
+             } else {
+                  // Log if price is 0 after calculation (should be caught by filter but for debug)
+                  logger.debug(`[SF._CalcPrice] Pool ${poolState.address?.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}). Calculated price is 0. Returning null.`);
+             }
+        } else {
+             logger.debug(`[SF._CalcPrice] Pool ${poolState.address?.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}). Price calculation failed or resulted in null/undefined. Returning null.`);
+        }
+        // --- END DEBUG LOG ---
+
+        // Ensure the returned price is null if it's 0 or invalid, so the filter works
+        return (price0_1_scaled !== null && price0_1_scaled !== undefined && price0_1_scaled > 0n) ? price0_1_scaled : null;
+    }
+
+    /**
      * Finds potential spatial arbitrage opportunities among the provided pool states.
      * Spatial arbitrage involves discrepancies between the price of the same token pair
      * on different DEX pools.
@@ -162,7 +255,7 @@ class SpatialFinder {
 
             // Calculate the price (T0/T1 scaled) for each relevant pool state and filter out failures
             const poolsWithPrices = relevantPoolStates
-                .map(pool => ({ ...pool, price0_1_scaled: this._calculatePrice(pool) }))
+                .map(pool => ({ ...pool, price0_1_scaled: this._calculatePrice(pool) })) // <-- Calling _calculatePrice here
                 .filter(p => p.price0_1_scaled !== null && p.price0_1_scaled !== undefined && p.price0_1_scaled > 0n); // Ensure price is valid, defined, and positive
 
 
@@ -206,12 +299,7 @@ class SpatialFinder {
             // The strategy is: Borrow T1 -> Swap T1->T0 on Pool X -> Swap T0->T1 on Pool Y -> Repay T1.
             // Profit occurs if you get back more T1 than you borrowed.
             // To maximize T0 received for T1 spent: Swap T1->T0 on the pool where T0/T1 price is HIGH (you get more T0 per T1). NO, T1/T0 is high, meaning T0/T1 is LOW.
-            // To maximize T1 received for T0 spent: Swap T0->T1 on the pool where T1/T0 price is HIGH, which means T0/T1 price is LOW. NO, T0/T1 is high.
-
-            // Strategy: Borrow T1 -> Swap T1 to T0 on Pool A -> Swap T0 back to T1 on Pool B -> Repay T1
-            // Price A (T0/T1) - Price B (T0/T1) > Fees => Opportunity
-            // Swap T1 to T0: Need to get *most* T0 for T1 spent. This happens where T0/T1 price is *Low*. Buy T0 on the cheap pool.
-            // Swap T0 to T1: Need to get *most* T1 for T0 spent. This happens where T0/T1 price is *High*. Sell T0 on the expensive pool.
+            // To maximize T1 received for T0 spent: Swap T0->T1 on the pool where T0/T1 price is *High*. Sell T0 on the expensive pool.
             // So, for Borrow T1 -> T1->T0 (Pool A) -> T0->T1 (Pool B) -> Repay T1:
             // Pool A: Where price T0/T1 is LOW. (Buy T0 here)
             // Pool B: Where price T0/T1 is HIGH. (Sell T0 here)
@@ -304,7 +392,7 @@ class SpatialFinder {
                              canonicalKey, // Canonical key of the pair
                              tokenBorrowedOrRepaid, // The token assumed to be borrowed/repaid (T1)
                              tokenIntermediate, // The intermediate token (T0)
-                             rawDiffBips // Pass the raw difference for potential logging/scoring later
+                             rawDiffBips // Pass the raw difference for potential logging/debugging later
                          );
 
                          // Add the created opportunity to the list if it was successfully created (_createOpportunity didn't return null)
@@ -359,10 +447,14 @@ class SpatialFinder {
         const pool1InputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 :
                                 (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 : null;
         const pool1OutputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 :
+                                 (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedOrIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 : null; // Typo fix here, should be tokenIntermediate
+
+        const pool1OutputTokenCorrected = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 :
                                  (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 : null;
 
-        if (!pool1InputToken || !pool1OutputToken || pool1InputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase() || pool1OutputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
-            logger.error(`${logPrefix} Critical: First pool token mismatch with expected swap direction (${tokenBorrowedOrRepaid.symbol}->${tokenIntermediate.symbol}). Pool ${poolSwapBorrowedToIntermediate.address?.substring(0,6)} has tokens ${poolSwapBorrowedToIntermediate.token0?.symbol}/${poolSwapBorrowedToIntermediate.token1?.symbol}.`);
+
+        if (!pool1InputToken || !pool1OutputTokenCorrected || pool1InputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase() || pool1OutputTokenCorrected.address.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
+            logger.error(`${logPrefix} Critical: First pool token mismatch with expected swap direction (${tokenBorrowedOrRepaid.symbol}->${tokenIntermediate.symbol}). Pool ${poolSwapBorrowedToIntermediate.address?.substring(0,6)} has tokens ${poolSwapBorrowedToIntermediate.token0?.symbol}/${poolSwapBorrowedToIntermediate.token1?.symbol}. Determined Input: ${pool1InputToken?.symbol}, Output: ${pool1OutputTokenCorrected?.symbol}.`);
             return null;
         }
 
@@ -373,7 +465,7 @@ class SpatialFinder {
                                  (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token0 : null;
 
          if (!pool2InputToken || !pool2OutputToken || pool2InputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase() || pool2OutputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase()) {
-             logger.error(`${logPrefix} Critical: Second pool token mismatch with expected swap direction (${tokenIntermediate.symbol}->${tokenBorrowedOrRepaid.symbol}). Pool ${poolSwapIntermediateToBorrowed.address?.substring(0,6)} has tokens ${poolSwapIntermediateToBorrowed.token0?.symbol}/${poolSwapIntermediateToBorrowed.token1?.symbol}.`);
+             logger.error(`${logPrefix} Critical: Second pool token mismatch with expected swap direction (${tokenIntermediate.symbol}->${tokenBorrowedOrRepaid.symbol}). Pool ${poolSwapIntermediateToBorrowed.address?.substring(0,6)} has tokens ${poolSwapIntermediateToBorrowed.token0?.symbol}/${poolSwapIntermediateToBorrowed.token1?.symbol}. Determined Input: ${pool2InputToken?.symbol}, Output: ${pool2OutputToken?.symbol}.`);
              return null;
          }
         // --- END CORRECTED VALIDATION ---
@@ -518,7 +610,7 @@ class SpatialFinder {
             amountIn: simulationAmountIn, // Borrowed amount for simulation (BigInt)
 
             // Placeholders for values calculated by ProfitCalculator and GasEstimator
-            amountOut: 0n, // Final output after simulation (BigInt)
+            amountOut: 0n, // Amount of tokenOut received after simulation (BigInt)
             intermediateAmountOut: 0n, // Amount after first swap (BigInt)
             gasEstimate: 0n, // Total estimated gas cost (Native Wei)
             estimatedProfit: 0n, // Estimated net profit (Native Wei, after gas, before tithe)
