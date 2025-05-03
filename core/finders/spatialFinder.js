@@ -1,5 +1,5 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.26 --- Modified findArbitrage to accept and use pairRegistry from PoolScanner.
+// --- VERSION v1.27 --- Corrected typo (tokenBorrowedOrIntermediate -> tokenIntermediate) in _createOpportunity validation.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
@@ -15,7 +15,7 @@ class SpatialFinder {
      * @param {object} config - The application configuration object.
      */
     constructor(config) {
-        logger.debug('[SpatialFinder v1.26] Initializing...'); // Version bump
+        logger.debug('[SpatialFinder v1.27] Initializing...'); // Version bump
 
         // --- CORRECTED CONSTRUCTOR VALIDATION ---
         const finderSettings = config?.FINDER_SETTINGS;
@@ -90,7 +90,7 @@ class SpatialFinder {
 
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.26] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
+        logger.info(`[SpatialFinder v1.27] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
     }
 
     /**
@@ -156,17 +156,16 @@ class SpatialFinder {
                       const priceFormatted_T0_T1 = ethers.formatUnits(price0_1_scaled, 18);
 
                       // Calculate inverse price (T1/T0) scaled by 1e18 for logging clarity
-                      let priceInverseScaled = 0n;
                       let priceInverseFormatted_T1_T0 = 'N/A';
                       if (price0_1_scaled > 0n) {
-                          priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / price0_1_scaled;
+                          const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / price0_1_scaled;
                                // Handle potential division by zero if price0_1_scaled is unexpectedly large after filter? Unlikely but safe.
-                          if (priceInverseScaled > 0n) {
-                              priceInverseFormatted_T1_T0 = ethers.formatUnits(priceInverseScaled, 18);
-                          } else {
-                              priceInverseFormatted_T1_T0 = 'Calculated 0';
+                              if (priceInverseScaled > 0n) {
+                                  priceInverseFormatted_T1_T0 = ethers.formatUnits(priceInverseScaled, 18);
+                              } else {
+                                  priceInverseFormatted_T1_T0 = 'Calculated 0';
+                              }
                           }
-                      }
 
                       logger.debug(`[SF._CalcPrice] Pool ${poolState.address?.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted_T0_T1} | T1/T0 (Approx): ${priceInverseFormatted_T1_T0}. Returning price.`);
                  } catch (formatError) {
@@ -272,6 +271,7 @@ class SpatialFinder {
                           let priceInverseFormatted_T1_T0 = 'N/A';
                           if (p.price0_1_scaled > 0n) {
                               const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / p.price0_1_scaled;
+                               // Handle potential division by zero if price0_1_scaled is unexpectedly large after filter? Unlikely but safe.
                               if (priceInverseScaled > 0n) {
                                   priceInverseFormatted_T1_T0 = ethers.formatUnits(priceInverseScaled, 18);
                               } else {
@@ -372,7 +372,7 @@ class SpatialFinder {
                          // A more flexible approach would involve checking which token can be borrowed (e.g., from Aave)
                          // and constructing paths starting with that token.
                          const tokenBorrowedOrRepaid = tokenT1; // Assuming T1 is the borrow token for this strategy
-                         const tokenIntermediate = tokenT0; // Assuming T0 is the intermediate token
+                         const tokenIntermediate = tokenT0; // The intermediate token is the OTHER token in the pair
 
 
                          // Ensure tokens are loaded (safety check, should be done earlier in config/tokenUtils)
@@ -412,7 +412,7 @@ class SpatialFinder {
     /**
      * Creates a structured opportunity object for a spatial arbitrage trade.
      * Assumes the flow is: Borrow tokenBorrowedOrRepaid -> Swap tokenBorrowedOrRepaid to tokenIntermediate
-     * on poolSwapT1toT0 -> Swap tokenIntermediate to tokenBorrowedOrRepaid on poolSwapT0toT1 -> Repay tokenBorrowedOrRepaid.
+     * on poolSwapBorrowedToIntermediate -> Swap tokenIntermediate to tokenBorrowedOrRepaid on poolSwapIntermediateToBorrowed -> Repay tokenBorrowedOrRepaid.
      * This object is passed to the ProfitCalculator and TxParamBuilders.
      * @param {object} poolSwapBorrowedToIntermediate - The pool state for the first swap (Borrow Token -> Intermediate Token). This pool should have a LOW Price(Intermediate/Borrowed).
      * @param {object} poolSwapIntermediateToBorrowed - The pool state for the second swap (Intermediate Token -> Borrow Token). This pool should have a HIGH Price(Borrowed/Intermediate).
@@ -424,7 +424,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapBorrowedToIntermediate, poolSwapIntermediateToBorrowed, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate, rawDiffBips) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.26]`; // Updated version log
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.27]`; // Updated version log
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
@@ -446,15 +446,13 @@ class SpatialFinder {
         // Check poolSwapBorrowedToIntermediate (needs tokenBorrowedOrRepaid -> tokenIntermediate swap)
         const pool1InputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 :
                                 (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 : null;
+        // --- CORRECTED TYPO HERE ---
         const pool1OutputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 :
-                                 (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedOrIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 : null; // Typo fix here, should be tokenIntermediate
-
-        const pool1OutputTokenCorrected = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 :
                                  (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 : null;
 
 
-        if (!pool1InputToken || !pool1OutputTokenCorrected || pool1InputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase() || pool1OutputTokenCorrected.address.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
-            logger.error(`${logPrefix} Critical: First pool token mismatch with expected swap direction (${tokenBorrowedOrRepaid.symbol}->${tokenIntermediate.symbol}). Pool ${poolSwapBorrowedToIntermediate.address?.substring(0,6)} has tokens ${poolSwapBorrowedToIntermediate.token0?.symbol}/${poolSwapBorrowedToIntermediate.token1?.symbol}. Determined Input: ${pool1InputToken?.symbol}, Output: ${pool1OutputTokenCorrected?.symbol}.`);
+        if (!pool1InputToken || !pool1OutputToken || pool1InputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase() || pool1OutputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
+            logger.error(`${logPrefix} Critical: First pool token mismatch with expected swap direction (${tokenBorrowedOrRepaid.symbol}->${tokenIntermediate.symbol}). Pool ${poolSwapBorrowedToIntermediate.address?.substring(0,6)} has tokens ${poolSwapBorrowedToIntermediate.token0?.symbol}/${poolSwapBorrowedToIntermediate.token1?.symbol}. Determined Input: ${pool1InputToken?.symbol}, Output: ${pool1OutputToken?.symbol}.`);
             return null;
         }
 
