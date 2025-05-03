@@ -6,12 +6,18 @@ const { TOKENS } = require('../../constants/tokens'); // Adjust path
 const { getCanonicalPairKey } = require('../../utils/pairUtils'); // Adjust path
 const { ABIS } = require('../../constants/abis'); // Adjust path
 
+// Assuming IDODOV2 interface includes getPMMState based on documentation
+// If Ethers requires a specific interface definition for complex return types,
+// you might need to import or define the PMMState struct type here.
+// For now, Ethers often handles simple struct decoding.
+
 class DodoFetcher {
     constructor(config) {
         if (!config?.PRIMARY_RPC_URL) throw new ArbitrageError('DodoFetcher requires config with PRIMARY_RPC_URL.', 'INIT_ERR');
         this.provider = config.provider || new ethers.JsonRpcProvider(config.PRIMARY_RPC_URL);
         this.config = config;
         this.poolContractCache = {};
+        // The ABIS.DODOV1V2Pool should contain the functions defined in IDODOV2.sol
         if (!ABIS?.DODOV1V2Pool) logger.warn("[DodoFetcherInit] DODOV1V2Pool ABI missing.");
         this.poolAbi = ABIS.DODOV1V2Pool;
         logger.debug(`[DodoFetcher] Initialized.`);
@@ -30,8 +36,9 @@ class DodoFetcher {
     }
 
     /**
-     * Fetches state and simulates selling 1 unit of baseToken.
-     * Includes baseTokenSymbol and query results in the returned poolData.
+     * Fetches state and simulates selling 1 unit of baseToken for basic price check.
+     * NOW ALSO fetches the full PMM state for accurate simulation of arbitrary amounts.
+     * Includes baseTokenSymbol, PMM state, and query results in the returned poolData.
      */
     async fetchPoolData(address, pair) { // pair is [tokenObjectA, tokenObjectB]
         const logPrefix = `[DodoFetcher Pool ${address.substring(0,6)}]`;
@@ -67,44 +74,102 @@ class DodoFetcher {
             logger.debug(`${logPrefix} Configured Base: ${baseToken.symbol}, Quote: ${quoteToken.symbol}. Querying: Sell 1 ${baseToken.symbol}`);
 
             const poolContract = this._getPoolContract(address);
-            const amountIn = ethers.parseUnits('1', baseToken.decimals);
-            let amountOutWei;
 
+            // --- Existing: Query for 1 unit of base token (for basic price check) ---
+            const amountIn_1_Unit = ethers.parseUnits('1', baseToken.decimals);
+            let queryAmountOutWei = 0n; // Initialize to 0n
             try {
-                 if (!poolContract.querySellBaseToken) throw new Error("ABI missing querySellBaseToken.");
-                 amountOutWei = await poolContract.querySellBaseToken.staticCall(amountIn);
-                 logger.debug(`${logPrefix} pool.querySellBaseToken Result: ${amountOutWei.toString()} ${quoteToken.symbol} wei`);
+                 // Using staticCall for a view-like call
+                 if (!poolContract.querySellBaseToken) throw new Error("ABI missing querySellBaseToken."); // Ensure querySellBaseToken is in ABIS.DODOV1V2Pool
+                 // Note: querySellBaseToken is not standard IDODOV2. querySellBase(address trader, uint256 payBaseAmount) is.
+                 // Let's update to use querySellBase as per documentation.
+                 queryAmountOutWei = await poolContract.querySellBase.staticCall(ethers.ZeroAddress, amountIn_1_Unit);
+                 logger.debug(`${logPrefix} pool.querySellBase(1 ${baseToken.symbol}) Result: ${queryAmountOutWei.toString()} ${quoteToken.symbol} wei`);
              } catch (queryError) {
-                 let reason = queryError.reason || queryError.message; if (queryError.data && queryError.data !== '0x') { try { reason = ethers.utils.toUtf8String(queryError.data); } catch {} } logger.warn(`${logPrefix} pool.querySellBaseToken failed: ${reason}`); if (reason.includes("BALANCE_NOT_ENOUGH") || reason.includes("TARGET_IS_ZERO")) { amountOutWei = 0n; logger.debug(`${logPrefix} Query failed due to balance/target, amountOut=0.`); } else { throw new Error(`DODO query failed: ${reason}`); }
+                 let reason = queryError.reason || queryError.message; if (queryError.data && queryError.data !== '0x') { try { reason = ethers.utils.toUtf8String(queryError.data); } catch {} }
+                 logger.warn(`${logPrefix} pool.querySellBase(1 unit) failed: ${reason}`);
+                 // If query fails, amountOutWei remains 0n, which priceCalculation will handle.
              }
-            if (amountOutWei === undefined || amountOutWei === null || amountOutWei < 0n) { throw new Error(`Invalid amountOut: ${amountOutWei}`); }
+            // Note: querySellBase actually returns (uint receiveQuoteAmount, uint mtFee).
+            // The above only captures receiveQuoteAmount. We might need mtFee later.
+            // For now, we only need the base/quote amounts and the full PMM state for simulation.
+
+
+            // --- NEW: Fetch PMM State ---
+            let pmmState = null;
+            try {
+                 // Assuming getPMMState is available on the pool contract ABI (IDODOV2)
+                 if (!poolContract.getPMMState) throw new Error("ABI missing getPMMState."); // Ensure getPMMState is in ABIS.DODOV1V2Pool
+                 pmmState = await poolContract.getPMMState.staticCall(); // Use staticCall for view function
+                 logger.debug(`${logPrefix} Fetched PMM State: ${JSON.stringify(pmmState)}`); // Log state content
+            } catch (stateError) {
+                 let reason = stateError.reason || stateError.message; if (stateError.data && stateError.data !== '0x') { try { reason = ethers.utils.toUtf8String(stateError.data); } catch {} }
+                 logger.warn(`${logPrefix} Failed to fetch PMM State: ${reason}`);
+                 // If PMM state fetch fails, we cannot accurately simulate.
+                 // Return null poolData to indicate unusable state.
+                 return { success: false, poolData: null, error: `Failed to fetch PMM state: ${reason}` };
+            }
+
+            // TODO: Add logic to fetch dynamic fee rates (lpFeeRate, mtFeeRate)
+            // The current 'fee' field in poolData comes from the config, which is static.
+            // Accurate profit calculation for arbitrary amounts requires dynamic fees.
+            // This likely requires checking the ABI for functions like getUserFeeRate or getPairDetail.
+            // Deferring this for now to focus on PMM state simulation.
 
             const pairKey = getCanonicalPairKey(token0, token1);
             if (!pairKey) { throw new Error(`Failed to generate canonical pair key.`); }
-            const priceString = ethers.formatUnits(amountOutWei, quoteToken.decimals);
-            const effectivePrice = parseFloat(priceString);
-            const feeBps = fee !== undefined ? fee : 10;
+
+            // Note: effectivePrice calculated here is still based on the 1-unit query,
+            // which is not suitable for arbitrage simulation of arbitrary amounts.
+            // This field might become less relevant once we rely fully on simulator.
+            const priceString = ethers.formatUnits(queryAmountOutWei, quoteToken.decimals);
+            const effectivePrice = parseFloat(priceString); // This is approximate for 1 unit
+
 
             // *** Ensure all relevant fields are returned ***
             const poolData = {
-                address: address, dexType: 'dodo', fee: feeBps,
-                reserve0: null, reserve1: null, token0: token0, token1: token1,
-                token0Symbol: token0.symbol, token1Symbol: token1.symbol, pairKey: pairKey,
+                address: address,
+                dexType: 'dodo',
+                // WARNING: 'fee' here is from config, NOT dynamic fee rate from contract
+                // This needs refinement for accurate profit calculation
+                fee: fee !== undefined ? fee : 10, // Keep static config fee for now
+
+                reserve0: null, reserve1: null, // DODO doesn't use standard reserves like UniV2
+                token0: token0,
+                token1: token1,
+                token0Symbol: token0.symbol,
+                token1Symbol: token1.symbol,
+                pairKey: pairKey,
+
+                // This effectivePrice is based on the 1-unit query, might be inaccurate for large swaps
                 effectivePrice: effectivePrice,
-                // Store results of the query for selling BASE token
+
+                // Store results of the 1-unit query (might be deprecated later)
                 queryBaseToken: baseToken,          // Base token object used in query
                 queryQuoteToken: quoteToken,        // Quote token object received in query
-                queryAmountOutWei: amountOutWei,    // Amount of QUOTE received for 1 BASE unit (wei)
-                baseTokenSymbol: baseTokenSymbol,   // The symbol of the base token (needed for simulator)
-                // Nullify V3 fields
-                sqrtPriceX96: null, liquidity: null, tick: null, tickSpacing: null,
-                groupName: groupName || 'N/A', timestamp: Date.now()
+                queryAmountOutWei: queryAmountOutWei, // Amount of QUOTE received for 1 BASE unit (wei)
+
+                // *** NEW: Add fetched DODO PMM state ***
+                pmmState: pmmState,
+                 baseTokenSymbol: baseTokenSymbol,   // The symbol of the base token (needed for simulator)
+
+
+                // Nullify irrelevant fields from other DEX types
+                sqrtPriceX96: null,
+                liquidity: null, // UniV3
+                tick: null,
+                tickSpacing: null,
+                groupName: groupName || 'N/A',
+                timestamp: Date.now()
             };
+
+             logger.debug(`${logPrefix} Successfully fetched data for DODO pool ${address}`);
             return { success: true, poolData: poolData, error: null };
 
         } catch (error) {
+            // Catch any errors during the entire fetch process
             logger.warn(`${logPrefix} Failed fetch/process for DODO pool ${address}: ${error.message}`);
-            if (!(error instanceof ArbitrageError)) { logger.error(`Stack trace for DODO fetch failure: ${error.stack}`); }
+            if (!(error instanceof ArbitrageError)) { logger.error(`Stack trace for DODO fetch failure on ${address}: ${error.stack}`); }
             return { success: false, poolData: null, error: error.message };
         }
     }
