@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.10 --- Added overrides for Uniswap V3 periphery libraries to fix HH600 compile error.
+// --- VERSION v1.11 --- Added explicit overrides for specific Uniswap V3 library files (PoolAddress.sol, CallbackValidation.sol) to resolve persistent HH600/TypeError.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -78,12 +78,21 @@ module.exports = {
        }
       // Add other compiler versions here if needed for other contracts
     ],
-    // --- ADDED OVERRIDES SECTION ---
+    // --- ADDED EXPLICIT OVERRIDES FOR SPECIFIC UNISWAP V3 FILES ---
     overrides: {
-      // Explicitly tell Hardhat to use the 0.7.6 compiler for Uniswap V3 periphery libraries
-      // that have pragmas compatible with this version (e.g., >=0.7.0 <0.8.0 or exactly 0.7.6).
-      // This should resolve compatibility issues like the uint256 to address conversion error.
-      "@uniswap/v3-periphery/contracts/libraries/*": {
+      // Explicitly target PoolAddress.sol and CallbackValidation.sol with 0.7.6
+      // This is to ensure these specific files known to cause TypeErrors in 0.8.x compilers are handled.
+      "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol": {
+         version: "0.7.6",
+         settings: {
+            optimizer: {
+              enabled: true,
+              runs: 200,
+            },
+             evmVersion: "istanbul"
+         }
+      },
+      "@uniswap/v3-periphery/contracts/libraries/CallbackValidation.sol": {
          version: "0.7.6",
          settings: {
             optimizer: {
@@ -94,7 +103,7 @@ module.exports = {
          }
       },
        "@uniswap/v3-core/contracts/libraries/*": {
-         version: "0.7.6", // Core libraries might also need this
+         version: "0.7.6", // Keep the broader override for other core libraries
          settings: {
             optimizer: {
               enabled: true,
@@ -155,7 +164,7 @@ module.exports = {
        },
          // If FlashSwap.sol needs specific overrides despite its pragma, add it here
          // "contracts/FlashSwap.sol": { version: "0.7.6", settings: { ... } }
-    } // --- END OVERRIDES SECTION ---
+    } // --- END EXPLICIT OVERRIDES ---
   },
   networks: {
     // Hardhat Network (Used by default if no --network specified)
@@ -171,12 +180,11 @@ module.exports = {
     localFork: {
       url: "http://127.0.0.1:8545", // Hardhat node RPC endpoint
       // NO accounts array defined here. Hardhat node provides accounts, bot uses PRIVATE_KEY from .env.
-      // This also prevents the HH8 compile error associated with this network config.
-      // forking configuration is handled below
       chainId: 42161, // Match Arbitrum Mainnet chain ID
+       // Forking configuration is linked by chainId below
     },
     // Forking configuration - applies to the Hardhat network *if* chainId matches OR if explicitly linked
-    // When using `--network localFork`, this forking config associated with chainId 42161 is picked up.
+    // When using `--network localFork` which has chainId 42161, this forking config is picked up.
     forking: {
         url: ARBITRUM_RPC_URL, // Use the Arbitrum Mainnet RPC URL from .env
         // blockNumber: 123456789 // Optional: Specify a block number for consistent fork state
@@ -218,4 +226,4 @@ module.exports = {
 // This warning is specifically for the PRIVATE_KEY variable used for non-localFork networks
 if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.replace(/^0x/, "").length !== 64 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
      console.warn(`[Hardhat Config] WARNING: PRIVATE_KEY environment variable has unexpected length (${process.env.PRIVATE_KEY.replace(/^0x/, "").length} after stripping 0x). Expected 64 for live networks.`);
-    }
+      }
