@@ -1,5 +1,5 @@
 // utils/gasEstimator.js
-// --- VERSION v1.8 --- Pass minOut=1 to DODO buyBaseToken during estimation
+// --- VERSION v1.9 --- Added debug log for received signerAddress in estimateTxGasCost.
 
 const { ethers } = require('ethers');
 const logger = require('./logger');
@@ -25,7 +25,7 @@ if (!ABIS.FlashSwap) {
 
 class GasEstimator {
     constructor(config, provider) {
-        logger.debug('[GasEstimator v1.8] Initializing...'); // Version bump
+        logger.debug('[GasEstimator v1.9] Initializing...'); // Version bump
         if (!config || !provider) throw new ArbitrageError('GasEstimatorInit', 'Config/Provider required.');
         if (!config.GAS_COST_ESTIMATES?.FLASH_SWAP_BASE) logger.warn('[GasEstInit] GAS_COST_ESTIMATES incomplete.');
         if (!flashSwapInterface) logger.error('[GasEstInit] FlashSwap Interface could not be initialized. estimateGas check will fail.');
@@ -36,7 +36,7 @@ class GasEstimator {
         this.maxGasPriceGwei = ethers.parseUnits(String(config.MAX_GAS_GWEI || 1), 'gwei');
         this.fallbackGasLimit = BigInt(config.FALLBACK_GAS_LIMIT || 3000000);
 
-        logger.info(`[GasEstimator v1.8] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`);
+        logger.info(`[GasEstimator v1.9] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`);
     }
 
     async getFeeData() {
@@ -77,7 +77,7 @@ class GasEstimator {
      * @private Internal helper method
      */
     async _encodeMinimalCalldataForEstimate(opportunity, providerType) {
-        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.8]`; // Version bump
+        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.9]`; // Version bump
         if (!flashSwapInterface) {
              logger.error(`${logPrefix} FlashSwap Interface not available. Cannot encode.`);
              return null;
@@ -185,8 +185,15 @@ class GasEstimator {
      */
     async estimateTxGasCost(opportunity, signerAddress) {
         const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey}]`;
-        logger.debug(`${logPrefix} Starting path-based gas estimation & validity check...`);
-        if (!signerAddress || !ethers.isAddress(signerAddress)) { logger.error(`${logPrefix} Invalid signerAddress.`); return null; }
+
+        // --- ADDED DEBUG LOG FOR RECEIVED SIGNER ADDRESS ---
+        logger.debug(`${logPrefix} Received signerAddress for gas estimation: ${signerAddress}`);
+
+        if (!signerAddress || !ethers.isAddress(signerAddress)) {
+             const errorMsg = 'Invalid signerAddress.';
+             logger.error(`${logPrefix} ${errorMsg}`);
+             return null; // Return null if signerAddress is invalid
+        }
         if (!opportunity?.path || opportunity.path.length === 0) { logger.error(`${logPrefix} Invalid opportunity path.`); return null; }
         if (!flashSwapInterface) { logger.error(`${logPrefix} FlashSwap Interface not available. Aborting estimate.`); return null; }
 
@@ -220,8 +227,9 @@ class GasEstimator {
         const encodedResult = await this._encodeMinimalCalldataForEstimate(opportunity, providerType);
 
         if (!encodedResult || !encodedResult.calldata) {
-             logger.warn(`${logPrefix} Encoding minimal calldata failed. Cannot perform estimateGas check. Assuming path invalid.`);
-             return { pathGasLimit, effectiveGasPrice, totalCostWei: pathGasLimit * effectiveGasPrice, estimateGasSuccess: false };
+             logger.warn(`${logPrefix} Encoding minimal calldata failed. Cannot perform estimateGas check.`);
+             // Returning null here means the *entire* gas estimation failed, which ProfitCalculator should handle.
+             return null;
         }
         const { calldata: encodedData, contractFunctionName } = encodedResult;
         logger.debug(`${logPrefix} Minimal calldata encoded for function: ${contractFunctionName}`);
@@ -230,10 +238,11 @@ class GasEstimator {
         let estimateGasSuccess = false;
         try {
             logger.debug(`${logPrefix} Performing estimateGas validity check for ${contractFunctionName}...`);
+            // Pass the actual signerAddress received by the function as the 'from' address
             await this.provider.estimateGas({
                 to: this.config.FLASH_SWAP_CONTRACT_ADDRESS,
                 data: encodedData,
-                from: signerAddress
+                from: signerAddress // <-- Use the received signerAddress here
             });
             estimateGasSuccess = true;
             logger.debug(`${logPrefix} estimateGas check PASSED.`); // <<< WE WANT TO SEE THIS!
@@ -246,6 +255,8 @@ class GasEstimator {
         }
 
         // --- 5. Calculate Final Cost using Path-Based Estimate ---
+        // Calculate total cost regardless of estimateGasSuccess.
+        // The ProfitCalculator will decide if estimateGasSuccess=false makes the opportunity invalid.
         const totalCostWei = pathGasLimit * effectiveGasPrice;
         logger.info(`${logPrefix} Final Estimated Gas: PathLimit=${pathGasLimit}, Price=${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei, Cost=${ethers.formatEther(totalCostWei)} ETH. estimateGas check: ${estimateGasSuccess ? 'OK' : 'FAIL'}`);
 
