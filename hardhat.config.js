@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.6 --- Added multiple compiler versions to fix HH606.
+// --- VERSION v1.7 --- Adjusted localFork network accounts format (removed 0x prefix in array) based on persistent HH8 error.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -108,9 +108,9 @@ module.exports = {
     localFork: {
       url: "http://127.0.0.1:8545", // Hardhat node RPC endpoint
       // Use the standard Hardhat default private key for this local fork network,
-      // formatted with 0x prefix, as it's the account Hardhat node funds by default.
-      // This provides a reliable funded account for local deployments and tests.
-      accounts: [`0x${HARDHAT_DEFAULT_PRIVATE_KEY_RAW}`],
+      // formatted as the raw 64-char hex string WITHOUT the 0x prefix in the array,
+      // to see if that resolves the HH8 error. This is unusual but worth testing.
+      accounts: [HARDHAT_DEFAULT_PRIVATE_KEY_RAW], // <--- MODIFIED LINE
       // Forking Configuration (Enabled when using this network)
       forking: {
         url: ARBITRUM_RPC_URL, // Use the Arbitrum Mainnet RPC URL from .env
@@ -154,4 +154,3 @@ module.exports = {
 // This warning is specifically for the PRIVATE_KEY variable used for non-localFork networks
 if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.replace(/^0x/, "").length !== 64 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
      console.warn(`[Hardhat Config] WARNING: PRIVATE_KEY environment variable has unexpected length (${process.env.PRIVATE_KEY.replace(/^0x/, "").length} after stripping 0x). Expected 64 for live networks.`);
-}
