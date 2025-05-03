@@ -1,5 +1,5 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.23 --- Added BigInt replacer to JSON.stringify for path log.
+// --- VERSION v1.24 --- Made dexType comparisons case-insensitive in extractSimState.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
@@ -97,7 +97,7 @@ class SpatialFinder {
 
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.23] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
+        logger.info(`[SpatialFinder v1.24] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
     }
 
     /**
@@ -442,7 +442,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapT1toT0, poolSwapT0toT1, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate, rawDiffBips) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.23]`; // Updated version log
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.24]`; // Updated version log
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
@@ -562,7 +562,8 @@ class SpatialFinder {
                  groupName: pool.groupName // Include group name for context/logging
              };
              // Add DEX-specific state properties needed for simulation/encoding if they exist
-             if (pool.dexType === 'uniswapv3') {
+             // --- FIXED: Make dexType comparison case-insensitive ---
+             if (pool.dexType?.toLowerCase() === 'uniswapv3') {
                  // --- START DEBUG LOGGING V3 STATE EXTRACTION ---
                  logger.debug(`${logPrefix} extractSimState (UniV3 ${pool.address?.substring(0,6)}):`);
                  logger.debug(`${logPrefix}  Input Pool Properties: sqrtPriceX96=${pool.sqrtPriceX96}, liquidity=${pool.liquidity}, tick=${pool.tick}, tickSpacing=${pool.tickSpacing}`);
@@ -579,7 +580,7 @@ class SpatialFinder {
                  logger.debug(`${logPrefix}  Output State Properties: sqrtPriceX96=${state.sqrtPriceX96}, liquidity=${state.liquidity}, tick=${state.tick}, tickSpacing=${state.tickSpacing}`);
                  // --- END DEBUG LOGGING V3 STATE EXTRACTION (AFTER COPY) ---
 
-             } else if (pool.dexType === 'sushiswap') {
+             } else if (pool.dexType?.toLowerCase() === 'sushiswap') {
                  // --- START DEBUG LOGGING Sushi State EXTRACTION ---
                  logger.debug(`${logPrefix} extractSimState (Sushi ${pool.address?.substring(0,6)}):`);
                  logger.debug(`${logPrefix}  Input Pool Properties: reserve0=${pool.reserve0}, reserve1=${pool.reserve1}`);
@@ -592,7 +593,7 @@ class SpatialFinder {
                  logger.debug(`${logPrefix}  Output State Properties: reserve0=${state.reserve0}, reserve1=${state.reserve1}`);
                  // --- END DEBUG LOGGING Sushi State EXTRACTION (AFTER COPY) ---
 
-             } else if (pool.dexType === 'dodo') {
+             } else if (pool.dexType?.toLowerCase() === 'dodo') {
                  // DODO-specific state (assuming fetcher adds these based on its queries)
                  // --- START DEBUG LOGGING DODO State EXTRACTION ---
                  logger.debug(`${logPrefix} extractSimState (DODO ${pool.address?.substring(0,6)}):`);
@@ -663,45 +664,6 @@ class SpatialFinder {
                 poolState: step2PoolState,
                  // minOut for the final swap will be calculated by ProfitCalculator based on slippage
                 minOut: 0n // Placeholder - ProfitCalculator will set the real minOut for the last step
-            }
-        ], (k, v) => typeof v === 'bigint' ? v.toString() : v, 2)); // Use replacer for BigInt
-
-        // --- END DEBUG LOG ---
-
-
-        return {
-            type: 'spatial', // Type of arbitrage (spatial, triangular, etc.)
-            pairKey: canonicalKey, // Canonical key of the token pair involved (e.g., "WETH/USDC")
-            tokenIn: tokenBorrowedOrRepaid, // The token that will be borrowed for the flash loan (e.g., T1)
-            tokenIntermediate: tokenIntermediate, // The intermediate token received after the first swap (e.g., T0)
-            tokenOut: tokenBorrowedOrRepaid, // The token expected to be received after the final swap (should be same as tokenIn)
-
-            // Define the sequence of swaps as an array of SwapStep objects
-            path: [
-                // Step 1: Swap from tokenIn (T1) to tokenIntermediate (T0) on the first pool
-                {
-                    dex: poolSwapT1toT0.dexType, // DEX type (e.g., 'uniswapv3', 'sushiswap', 'dodo') - Kept for clarity, but poolState should be source of truth for sim
-                    address: poolSwapT1toT0.address, // Address of the pool for this step
-                    fee: poolSwapT1toT0.fee, // Fee for this pool (relevant for V3) - Use the fee from the *original* pool state
-                    tokenInSymbol: tokenBorrowedOrRepaid.symbol, // Input token symbol for this step
-                    tokenOutSymbol: tokenIntermediate.symbol, // Output token symbol for this step
-                    tokenInAddress: tokenBorrowedOrRepaid.address, // Input token address
-                    tokenOutAddress: tokenIntermediate.address, // Output token address
-                    poolState: step1PoolState, // Include relevant pool state for simulation/encoding
-                    minOut: 0n // Minimum output amount for intermediate swaps is typically 0
-                },
-                // Step 2: Swap from tokenIntermediate (T0) to tokenOut (T1) on the second pool
-                {
-                    dex: poolSwapT0toT1.dexType, // Kept for clarity
-                    address: poolSwapT0toT1.address,
-                    fee: poolSwapT0toT1.fee, // Use the fee from the *original* pool state
-                    tokenInSymbol: tokenIntermediate.symbol,
-                    tokenOutSymbol: tokenBorrowedOrRepaid.symbol,
-                    tokenInAddress: tokenIntermediate.address,
-                    tokenOutAddress: tokenBorrowedOrRepaid.address,
-                    poolState: step2PoolState, // Include relevant pool state for simulation/encoding
-                     // minOut for the final swap will be calculated by ProfitCalculator based on slippage
-                    minOut: 0n // Placeholder - ProfitCalculator will set the real minOut for the last step
                 }
                 // Add more steps here for potentially longer spatial opportunities if needed
             ],
