@@ -1,12 +1,12 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.18 --- Updated price calculation function names and inversion logic.
+// --- VERSION v1.18 --- Updated V3 price calculation call and inversion logic.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
 const { getCanonicalPairKey } = require('../../utils/pairUtils');
 // Import the correct price calculation functions from priceCalculation.js
-// CORRECTED IMPORT NAMES
-const { calculateV3PriceT0_T1_scaled, calculateSushiPriceT1_T0_scaled, calculateDodoPriceT0_T1_scaled, PRICE_SCALE } = require('../calculation/priceCalculation');
+// CORRECTED IMPORT NAME: calculateV3PriceT0_T1_scaled
+const { calculateV3PriceT0_T1_scaled, calculateSushiPrice, calculateDodoPrice, PRICE_SCALE } = require('../calculation/priceCalculation');
 const { TOKENS } = require('../../constants/tokens'); // Ensure TOKENS is imported
 
 const BASIS_POINTS_DENOMINATOR = 10000n; // Constant for basis points calculation
@@ -107,25 +107,19 @@ class SpatialFinder {
             // Delegate price calculation to priceCalculation functions based on the DEX type
             switch (dexType?.toLowerCase()) {
                 case 'uniswapv3':
-                    // calculateV3PriceT0_T1_scaled already returns T0/T1 scaled by PRICE_SCALE
+                    // Call the function that calculates T0/T1 scaled by PRICE_SCALE
+                    // CORRECTED FUNCTION NAME CALL
                     price0_1_scaled = calculateV3PriceT0_T1_scaled(poolState);
                     break;
 
                 case 'sushiswap': // Assuming SushiSwap uses Uniswap V2 logic
-                    // calculateSushiPriceT1_T0_scaled returns T1/T0 scaled by PRICE_SCALE
-                    const priceT1_T0_scaled_sushi = calculateSushiPriceT1_T0_scaled(poolState);
-                    if (priceT1_T0_scaled_sushi !== null && priceT1_T0_scaled_sushi > 0n) {
-                        // Invert to get T0/T1 scaled by PRICE_SCALE
-                         price0_1_scaled = (PRICE_SCALE * PRICE_SCALE) / priceT1_T0_scaled_sushi;
-                    } else {
-                        logger.debug(`[SF._CalcPrice] Sushi pool ${poolState.address} calculateSushiPriceT1_T0_scaled returned null or zero.`);
-                        price0_1_scaled = null; // Calculation failed or resulted in zero
-                    }
+                    // calculateSushiPrice already returns T0/T1 scaled by PRICE_SCALE
+                    price0_1_scaled = calculateSushiPrice(poolState);
                     break;
 
                 case 'dodo':
-                    // calculateDodoPriceT0_T1_scaled already returns T0/T1 scaled by PRICE_SCALE
-                    price0_1_scaled = calculateDodoPriceT0_T1_scaled(poolState);
+                    // calculateDodoPrice already returns T0/T1 scaled by PRICE_SCALE (assuming T0 is Base, T1 is Quote or handles inverse)
+                    price0_1_scaled = calculateDodoPrice(poolState);
                     break;
 
                 // Add cases for other DEX types if needed (e.g., camelot)
@@ -152,10 +146,7 @@ class SpatialFinder {
                      // Price is T0/T1 scaled by PRICE_SCALE (1e18)
                       const priceFormatted = ethers.formatUnits(price0_1_scaled, 18); // Format using 18 decimals for PRICE_SCALE
                       // Recalculate inverse for logging clarity (T1/T0 scaled by 1e18)
-                       let priceInverseScaled = 0n;
-                       if (price0_1_scaled > 0n) {
-                         priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / price0_1_scaled;
-                       }
+                      const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / price0_1_scaled;
                       const priceInverseFormatted = ethers.formatUnits(priceInverseScaled, 18);
 
                       logger.debug(`[SF._CalcPrice] Pool ${poolState.address.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted} | T1/T0 (Approx): ${priceInverseFormatted}. Returning price.`);
@@ -251,10 +242,7 @@ class SpatialFinder {
                           // Use formatEther for price scaled by 1e18
                           const priceFormatted = ethers.formatUnits(p.price0_1_scaled, 18); // Format as if scaled by 1e18
                           // Recalculate inverse for logging clarity (T1/T0 scaled by 1e18)
-                           let priceInverseScaled = 0n;
-                           if (p.price0_1_scaled > 0n) {
-                             priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / p.price0_1_scaled;
-                           }
+                          const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / p.price0_1_scaled;
                           const priceInverseFormatted = ethers.formatUnits(priceInverseScaled, 18);
 
                           logger.debug(`  - Pool ${p.address} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}): Price T0/T1 scaled=${p.price0_1_scaled.toString()} (~${priceFormatted}) | T1/T0 (Approx): ~${priceInverseFormatted}`);
