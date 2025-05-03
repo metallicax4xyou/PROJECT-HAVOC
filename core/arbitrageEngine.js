@@ -1,5 +1,5 @@
 // core/arbitrageEngine.js
-// --- VERSION v1.12 --- Passed pairRegistry to SpatialFinder.findArbitrage.
+// --- VERSION v1.13 --- Passed pairRegistry to SpatialFinder.findArbitrage.
 
 const { EventEmitter } = require('events');
 const { ethers } = require('ethers');
@@ -19,11 +19,11 @@ class ArbitrageEngine extends EventEmitter {
      * @param {SwapSimulator} swapSimulator - Instance of SwapSimulator.
      * @param {GasEstimator} gasEstimator - Instance of GasEstimator.
      * @param {FlashSwapManager} flashSwapManager - Instance of FlashSwapManager.
-     * @param {TradeHandler} TradeHandlerClass - The TradeHandler class constructor.
+     * @param {TradeHandler} TradeHandlerClass - The TradeHandler class constructor. <-- ADDED THIS PARAMETER
      */
-    constructor(config, provider, swapSimulator, gasEstimator, flashSwapManager, TradeHandlerClass) {
+    constructor(config, provider, swapSimulator, gasEstimator, flashSwapManager, TradeHandlerClass) { // <-- ADDED THIS PARAMETER
         super();
-        logger.info('[AE v1.12] Initializing ArbitrageEngine components...'); // Version bump
+        logger.info('[AE v1.13] Initializing ArbitrageEngine components...'); // Version bump
         // Validation...
         if (!config) throw new ArbitrageError('InitializationError', 'AE: Missing config.');
         if (!provider) throw new ArbitrageError('InitializationError', 'AE: Missing provider.');
@@ -64,7 +64,7 @@ class ArbitrageEngine extends EventEmitter {
         this.nativeSymbol = this.config.NATIVE_CURRENCY_SYMBOL || 'ETH';
 
 
-        logger.info('[AE v1.12] ArbitrageEngine components initialized successfully.'); // Version bump
+        logger.info('[AE v1.13] ArbitrageEngine components initialized successfully.'); // Version bump
     }
 
     /**
@@ -211,30 +211,27 @@ class ArbitrageEngine extends EventEmitter {
         return fetchResult;
     }
 
-    _findOpportunities(poolStates, pairRegistry) { // <-- ACCEPT THIS PARAMETER
+    _findOpportunities(poolStates, pairRegistry) {
         logger.debug('[AE._findOpportunities] Finding potential opportunities...');
         let allOpportunities = [];
 
-        // Ensure pairRegistry is valid before passing to finders
-        if (!pairRegistry || !(pairRegistry instanceof Map)) {
-             logger.error('[AE._findOpportunities] CRITICAL: Invalid pairRegistry received. Cannot run finders.');
-             return allOpportunities; // Return empty array
+        if (!this.spatialFinder) {
+            logger.warn("[AE._findOpportunities] SpatialFinder instance missing.");
+             // Can we still proceed with other finders if spatial is missing? Yes.
         }
 
-        // Pass the pairRegistry to SpatialFinder.findArbitrage <-- PASS THE PARAMETER HERE
-        if (this.spatialFinder && poolStates?.length > 0) { // poolStates check is enough here
+        // Pass the pairRegistry received from fetchPoolData to SpatialFinder.findArbitrage
+        // SpatialFinder v1.26+ findArbitrage signature: (poolStates, pairRegistry)
+        if (this.spatialFinder && poolStates?.length > 0 && pairRegistry) {
             logger.debug('[AE._findOpportunities] Running SpatialFinder...');
-            // Call findArbitrage with the poolStates AND the pairRegistry
-            const spatialOpportunities = this.spatialFinder.findArbitrage(poolStates, pairRegistry);
+            const spatialOpportunities = this.spatialFinder.findArbitrage(poolStates, pairRegistry); // Pass the pairRegistry here
             logger.debug(`[AE._findOpportunities] SpatialFinder found ${spatialOpportunities?.length || 0} potentials.`);
             allOpportunities = allOpportunities.concat(spatialOpportunities);
-        } else if (!this.spatialFinder) {
-            logger.warn("[AE._findOpportunities] SpatialFinder instance missing.");
         }
 
 
         // Add other finders here and pass pairRegistry
-        // if (this.triangularFinder && poolStates?.length > 0) {
+        // if (this.triangularFinder && poolStates?.length > 0 && pairRegistry) {
         //      logger.debug('[AE._findOpportunities] Running TriangularV3Finder...');
         //      const triangularOpportunities = this.triangularFinder.findArbitrage(poolStates, pairRegistry);
         //      logger.debug(`[AE._findOpportunities] TriangularV3Finder found ${triangularOpportunities?.length || 0} potentials.`);
