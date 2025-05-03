@@ -14,7 +14,8 @@ const MAX_UINT128 = (1n << 128n) - 1n; // Maybe not needed in this file, keep fo
 
 class SwapSimulator {
     constructor(config, provider) {
-        logger.debug('[SwapSimulator] Initializing...');
+        // Add version log here to confirm the correct file is loaded
+        logger.debug('[SwapSimulator v1.8] Initializing...');
         if (!config?.QUOTER_ADDRESS || !ethers.isAddress(config.QUOTER_ADDRESS)) throw new ArbitrageError('SwapSimulatorInit', 'Valid QUOTER_ADDRESS missing.');
         if (!provider) throw new ArbitrageError('SwapSimulatorInit', 'Provider instance required.');
         // Check for required ABIs. Log errors/warnings if missing.
@@ -38,9 +39,10 @@ class SwapSimulator {
         this.quoterContract = ABIS?.IQuoterV2 ? new ethers.Contract(config.QUOTER_ADDRESS, ABIS.IQuoterV2, this.provider) : null;
         this.dodoPoolContractCache = {};
 
-        logger.info(`[SwapSimulator] Initialized with Quoter V2 at ${config.QUOTER_ADDRESS || 'N/A'}`);
+        // Updated info log to include version
+        logger.info(`[SwapSimulator v1.8] Initialized with Quoter V2 at ${config.QUOTER_ADDRESS || 'N/A'}`);
         if (ABIS?.DODOV1V2Pool) {
-             logger.info(`[SwapSimulator] DODO V1/V2 Pool ABI loaded.`);
+             logger.info(`[SwapSimulator v1.8] DODO V1/V2 Pool ABI loaded.`);
         }
     }
 
@@ -102,6 +104,9 @@ class SwapSimulator {
                          logger.warn(`${logPrefix} DODO pool contract not initialized. Skipping DODO simulation.`);
                          return { success: false, amountOut: null, error: 'DODO pool contract not initialized' };
                      }
+                     // NOTE: simulateDodoSwap currently relies on querySellBase/querySellQuote
+                     // It does NOT use the PMMState fetched by the fetcher yet.
+                     // This needs to be updated to use PMMState math for proper simulation.
                      return await this.simulateDodoSwap(poolState, tokenIn, amountIn, dodoPoolContract); // Pass the contract instance
 
                 default:
@@ -119,7 +124,10 @@ class SwapSimulator {
     // Uniswap V3 Simulation (Fixed argument passing for QuoterV2)
     async simulateV3Swap(poolState, tokenIn, amountIn) {
         // Destructure required properties from poolState. Assume these are populated by the fetcher and passed correctly by the finder.
-        const { fee, token0, token1, address, sqrtPriceX96, liquidity, tick } = poolState;
+        // NOTE: The Quoter call itself doesn't strictly *need* sqrtPriceX96, liquidity, tick from the poolState.
+        // It performs its own state lookup via the RPC it's connected to.
+        // We pass the fee which is from the PoolConfig, confirmed via fetcher.
+        const { fee, token0, token1, address } = poolState; // Removed sqrtPriceX96, liquidity, tick from direct destructure
         const logPrefix = `[SwapSim V3 ${address?.substring(0,6)}]`;
 
         const tokenOut = tokenIn.address.toLowerCase() === token0.address.toLowerCase() ? token1 : token0;
@@ -130,38 +138,29 @@ class SwapSimulator {
 
         // Define the parameters for quoteExactInputSingle as an object, then convert to a tuple (array)
         // The Quoter V2 ABI expects a struct/tuple: QuoteExactInputSingleParams
-        // --- FIXED: Correctly pass the fee from poolState, not amountIn ---
         const params = {
              tokenIn: tokenIn.address,
              tokenOut: tokenOut.address,
-             fee: Number(fee), // uint24 fee - Needs to be a number for the ABI encoding, ensure fee is correct type from fetcher
+             fee: Number(fee), // uint24 fee - Needs to be a number for the ABI encoding
              amountIn: amountIn, // uint256 amountIn (already in smallest units BigInt)
              // Use 0n for sqrtPriceLimitX96 to indicate no limit, or a calculated limit based on desired slippage
              // For simulation purposes, often no limit is needed to see max possible output
              sqrtPriceLimitX96: 0n // uint160 (BigInt)
         };
 
-        // Basic validation for critical V3 state props (passed from finder)
-        // This is mostly for debugging the state flow pipeline from fetcher -> finder -> simulator
-        // The Quoter call itself will validate the addresses/fee/amounts.
-        // Checking for undefined/null here helps confirm the data made it this far.
-         // Check fee type and value range
-         if (typeof params.fee !== 'number' || !Number.isInteger(params.fee) || params.fee < 0 || params.fee > 10000000) { // uint24 max value is > 10M, covering BPS up to 10000 and more
-             // Adjusted check based on uint24 range, but BPS fees should be much lower
-             logger.warn(`${logPrefix} DEBUG: Unexpected fee type or value for Quoter (fee: ${params.fee}). Expected integer BPS like 100, 500, 3000.`);
-             // Decide if this should fail simulation. Likely safer to fail if fee is bad.
-             // Keep the validation as it was, expecting standard BPS
-             if (params.fee < 0 || params.fee > 10000) {
-                  return { success: false, amountOut: null, error: `Invalid fee value for Quoter: ${params.fee}` };
-             }
+        // Basic validation for fee value range
+         if (typeof params.fee !== 'number' || !Number.isInteger(params.fee) || params.fee < 0 || params.fee > 10000) { // Check fee is reasonable BPS (0-10000)
+             logger.warn(`${logPrefix} Invalid fee value for Quoter: ${params.fee}. Expected integer BPS 0-10000.`);
+             return { success: false, amountOut: null, error: `Invalid fee value for Quoter: ${params.fee}` };
          }
-        if (sqrtPriceX96 === undefined || sqrtPriceX96 === null || liquidity === undefined || liquidity === null || tick === undefined || tick === null) {
-             // Log only a debug message here, as we are now CONFIDENT the data is fetched and passed to the finder.
-             // The issue might be in how the finder passes it or how extractSimState formats it.
-             logger.debug(`${logPrefix} DEBUG: Critical V3 state properties are unexpected (sqrtPriceX96: ${sqrtPriceX96}, liquidity: ${liquidity}, tick: ${tick}). Check finder's extractSimState.`);
-             // Continue simulation attempt using the Quoter, as it doesn't strictly need all these for quoteExactInputSingle
-             // We rely on the Quoter for the actual simulation logic.
-        }
+
+         // Optional: Log V3 state if present (for debugging the state flow)
+         // const { sqrtPriceX96, liquidity, tick } = poolState;
+         // if (sqrtPriceX96 !== undefined && sqrtPriceX96 !== null && liquidity !== undefined && liquidity !== null && tick !== undefined && tick !== null) {
+         //      logger.debug(`${logPrefix} DEBUG: V3 state passed (sqrtPriceX96: ${sqrtPriceX96}, liquidity: ${liquidity}, tick: ${tick}).`);
+         // } else {
+         //     logger.debug(`${logPrefix} DEBUG: V3 state seems missing in poolState passed to simulator.`);
+         // }
 
 
         try {
@@ -194,6 +193,7 @@ class SwapSimulator {
         } catch (error) {
              // Attempt to decode revert reason if available
             let reason = error.reason || error.message;
+            // Use error.data here
             if (error.data && typeof error.data === 'string' && error.data !== '0x') {
                  try { reason = ethers.toUtf8String(error.data); } catch {} // Use ethers.toUtf8String
             }
@@ -338,7 +338,6 @@ class SwapSimulator {
                 try {
                      // querySellBase(address trader, uint256 payBaseAmount)
                      // Use ethers.ZeroAddress as the trader for simulation
-                     // --- TODO: Verify if THIS DODO ABI EXPECTS ARGUMENTS AS A TUPLE OR SEPARATE ---
                      // Based on previous docs, it seems to expect arguments as separate inputs.
                      queryResult = await poolContract.querySellBase.staticCall(ethers.ZeroAddress, amountIn);
                      amountOut = BigInt(queryResult[0]); // The first element is receiveQuoteAmount
@@ -381,7 +380,6 @@ class SwapSimulator {
                 try {
                     // querySellQuote(address trader, uint256 payQuoteAmount)
                     // Use ethers.ZeroAddress as the trader for simulation
-                    // --- TODO: Verify if THIS DODO ABI EXPECTS ARGUMENTS AS A TUPLE OR SEPARATE ---
                     // For now, keeping as separate arguments:
                     queryResult = await poolContract.querySellQuote.staticCall(ethers.ZeroAddress, amountIn);
                     amountOut = BigInt(queryResult[0]); // The first element is receiveBaseAmount
