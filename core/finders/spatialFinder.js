@@ -1,5 +1,5 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.21 --- Added debug logs in extractSimState to trace V3 data transfer.
+// --- VERSION v1.22 --- Fixed typo priceB_0_1_scaled -> priceB_0_per_1_scaled. Added debug logs before extractSimState.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
@@ -97,7 +97,7 @@ class SpatialFinder {
 
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.21] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
+        logger.info(`[SpatialFinder v1.22] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
     }
 
     /**
@@ -297,7 +297,7 @@ class SpatialFinder {
                               }
                           }
 
-                          logger.debug(`  - Pool ${p.address?.substring(0,6)} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}): Price T0/T1 scaled=${p.price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted} | T1/T0 (Approx): ${priceInverseFormatted}. Returning price.`);
+                          logger.debug(`  - Pool ${p.address?.substring(0,6)} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}) Price (T0/T1 scaled): ${p.price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted} | T1/T0 (Approx): ${priceInverseFormatted}. Returning price.`);
                      } catch (formatError) {
                           logger.error(`Error logging price for pool ${p.address}: ${formatError.message}`);
                           logger.debug(`  - Pool ${p.address?.substring(0,6)} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}) Price (T0/T1 scaled): ${p.price0_1_scaled.toString()}`);
@@ -345,7 +345,7 @@ class SpatialFinder {
                     if (priceA_0_per_1_scaled < priceB_0_per_1_scaled) { // Pool A has lower T0/T1 price
                         poolLowPrice0_1 = poolA; // Buy T0 here (Sell T1)
                         poolHighPrice0_1 = poolB; // Sell T0 here (Buy T1)
-                    } else if (priceB_0_1_scaled < priceA_0_per_1_scaled) { // Pool B has lower T0/T1 price
+                    } else if (priceB_0_per_1_scaled < priceA_0_per_1_scaled) { // Pool B has lower T0/T1 price
                          poolLowPrice0_1 = poolB; // Buy T0 here (Sell T1)
                          poolHighPrice0_1 = poolA; // Sell T0 here (Buy T1)
                     } else {
@@ -442,13 +442,20 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapT1toT0, poolSwapT0toT1, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate, rawDiffBips) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.21]`; // Updated version log
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.22]`; // Updated version log
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
             logger.error(`${logPrefix} Critical: Missing token address definitions for opportunity pools.`);
             return null; // Cannot create opportunity without valid token addresses
         }
+
+        // --- DEBUG LOGGING INPUT POOL OBJECTS BEFORE EXTRACTION ---
+         // Use a replacer function for JSON.stringify to handle BigInt
+         logger.debug(`${logPrefix} Input Pool 1 (Swap T1->T0) before extractSimState:`, JSON.stringify(poolSwapT1toT0, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+         logger.debug(`${logPrefix} Input Pool 2 (Swap T0->T1) before extractSimState:`, JSON.stringify(poolSwapT0toT1, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+        // --- END DEBUG LOGGING ---
+
 
         // --- CORRECTED VALIDATION: Check pool's token0/token1 match expected swap direction ---
         // We expect poolSwapT1toT0 to handle T1 -> T0 swap.
@@ -564,6 +571,9 @@ class SpatialFinder {
                  state.sqrtPriceX96 = pool.sqrtPriceX96;
                  state.tick = pool.tick;
                  state.tickSpacing = pool.tickSpacing;
+                 // UniV3 state often also needs liquidity for accurate sim, even though it's not strictly part of the price formula
+                 state.liquidity = pool.liquidity;
+
 
                  // --- START DEBUG LOGGING V3 STATE EXTRACTION (AFTER COPY) ---
                  logger.debug(`${logPrefix}  Output State Properties: sqrtPriceX96=${state.sqrtPriceX96}, liquidity=${state.liquidity}, tick=${state.tick}, tickSpacing=${state.tickSpacing}`);
@@ -586,28 +596,35 @@ class SpatialFinder {
                  // DODO-specific state (assuming fetcher adds these based on its queries)
                  // --- START DEBUG LOGGING DODO State EXTRACTION ---
                  logger.debug(`${logPrefix} extractSimState (DODO ${pool.address?.substring(0,6)}):`);
-                 logger.debug(`${logPrefix}  Input Pool Properties: queryAmountOutWei=${pool.queryAmountOutWei}, queryBaseToken=${pool.queryBaseToken?.symbol}, queryQuoteToken=${pool.queryQuoteToken?.symbol}, baseTokenSymbol=${pool.baseTokenSymbol}, pmmState exists? ${!!pool.pmmState}`); // Added check for pmmState
+                 // Added logging for individual PMM state components if present
+                 logger.debug(`${logPrefix}  Input Pool Properties: queryAmountOutWei=${pool.queryAmountOutWei}, queryBaseToken=${pool.queryBaseToken?.symbol}, queryQuoteToken=${pool.queryQuoteToken?.symbol}, baseTokenSymbol=${pool.baseTokenSymbol}, pmmState (B)=${pool.pmmState?.B}, pmmState (Q)=${pool.pmmState?.Q}, pmmState (i)=${pool.pmmState?.i}, pmmState (K)=${pool.pmmState?.K}, pmmState (B0)=${pool.pmmState?.B0}, pmmState (Q0)=${pool.pmmState?.Q0}, pmmState (R)=${pool.pmmState?.R}`);
                  // --- END DEBUG LOGGING DODO State EXTRACTION ---
 
                  state.queryAmountOutWei = pool.queryAmountOutWei; // Result of amount out query (1 unit)
                  state.queryBaseToken = pool.queryBaseToken; // Base token object used in query
                  state.queryQuoteToken = pool.queryQuoteToken; // Quote token object used in query
                  state.baseTokenSymbol = pool.baseTokenSymbol; // Base token symbol from config/pool file
+                 state.fee = pool.fee; // Use the fee calculated by the fetcher (should be BPS)
 
-                 // Include fetched PMM State COMPONENTS
-                 state.pmmState = pool.pmmState; // Should be the object { i, K, B, Q, B0, Q0, R }
+                 // Include fetched PMM State COMPONENTS - pass individual components if fetcher returns them flat, or the object if nested
+                 // Based on the last dodoFetcher update attempt, pmmState was intended to be { i, K, B, Q, B0, Q0, R }
+                 state.pmmState = pool.pmmState;
+
 
                  // --- START DEBUG LOGGING DODO State EXTRACTION (AFTER COPY) ---
-                 logger.debug(`${logPrefix}  Output State Properties: queryAmountOutWei=${state.queryAmountOutWei}, baseTokenSymbol=${state.baseTokenSymbol}, pmmState exists? ${!!state.pmmState}`);
+                 logger.debug(`${logPrefix}  Output State Properties: queryAmountOutWei=${state.queryAmountOutWei}, baseTokenSymbol=${state.baseTokenSymbol}, pmmState exists? ${!!state.pmmState}, fee=${state.fee}`);
+                  if(state.pmmState) { // Log individual PMM state components from output if present
+                     logger.debug(`${logPrefix}  Output PMM State: B=${state.pmmState.B}, Q=${state.pmmState.Q}, i=${state.pmmState.i}, K=${state.pmmState.K}, B0=${state.pmmState.B0}, Q0=${state.pmmState.Q0}, R=${state.pmmState.R}`);
+                  }
                  // --- END DEBUG LOGGING DODO State EXTRACTION (AFTER COPY) ---
 
              }
              // Add Camelot if implemented and needs specific state
              // else if (pool.dexType === 'camelot') { ... }
 
-             // --- ADD DEBUG LOG HERE ---
-             // Moved this log outside the if/else blocks to log for every pool type
-             // logger.debug(`${logPrefix} extractSimState returned for pool ${pool.address?.substring(0,6)}: dexType=${state.dexType}, token0=${state.token0?.symbol}, token1=${state.token1?.symbol}, address=${state.address}, fee=${state.fee}`);
+             // --- ADD DEBUG LOG HERE (Final Extracted State) ---
+             // Log a summary of the extracted state object for every pool type
+              logger.debug(`${logPrefix} extractSimState finished for pool ${pool.address?.substring(0,6)}. Extracted state summary: dexType=${state.dexType}, fee=${state.fee}, tokens=${state.token0?.symbol}/${state.token1?.symbol}. Specific state copied: V3=${!!state.sqrtPriceX96}, Sushi=${!!state.reserve0}, DODO=${!!state.pmmState}`);
              // --- END DEBUG LOG ---
 
              return state; // Return the extracted state object
@@ -626,22 +643,27 @@ class SpatialFinder {
 
 
         // --- ADD DEBUG LOG FOR PATH ARRAY ---
-        logger.debug(`${logPrefix} Constructed path array:`, JSON.stringify([
+        logger.debug(`${logPrefix} Constructed path array (Pool States included):`, JSON.stringify([
             {
                 dex: poolSwapT1toT0.dexType, // Keep for clarity, but poolState.dexType is used by sim
                 address: poolSwapT1toT0.address,
                 tokenInSymbol: tokenBorrowedOrRepaid.symbol,
                 tokenOutSymbol: tokenIntermediate.symbol,
-                poolState_dexType: step1PoolState?.dexType // Log the extracted dexType from the object used in path
+                // *** Include the full extracted poolState object here for debugging what gets passed ***
+                poolState: step1PoolState,
+                minOut: 0n // Minimum output amount for intermediate swaps is typically 0
             },
              {
-                dex: poolSwapT0toT1.dexType, // Keep for clarity
+                dex: poolSwapT0toT1.dexType, // Kept for clarity
                 address: poolSwapT0toT1.address,
                 tokenInSymbol: tokenIntermediate.symbol,
                 tokenOutSymbol: tokenBorrowedOrRepaid.symbol,
-                poolState_dexType: step2PoolState?.dexType // Log the extracted dexType from the object used in path
+                // *** Include the full extracted poolState object here for debugging what gets passed ***
+                poolState: step2PoolState,
+                 // minOut for the final swap will be calculated by ProfitCalculator based on slippage
+                minOut: 0n // Placeholder - ProfitCalculator will set the real minOut for the last step
             }
-        ], null, 2));
+        ], null, 2)); // Use 2-space indentation for readability
         // --- END DEBUG LOG ---
 
 
