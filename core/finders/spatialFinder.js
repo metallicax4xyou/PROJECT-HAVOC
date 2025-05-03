@@ -1,11 +1,10 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.19 --- Added debug logs in _createOpportunity to inspect extracted poolState and path.
+// --- VERSION v1.20 --- Added debug logs before BigInt conversions in constructor. Fixed log typo.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
 const { getCanonicalPairKey } = require('../../utils/pairUtils');
 // Import the correct price calculation functions from priceCalculation.js
-// CORRECTED IMPORT NAME: calculateV3PriceT0_T1_scaled
 const { calculateV3PriceT0_T1_scaled, calculateSushiPrice, calculateDodoPrice, PRICE_SCALE } = require('../calculation/priceCalculation');
 const { TOKENS } = require('../../constants/tokens'); // Ensure TOKENS is imported
 
@@ -24,11 +23,14 @@ class SpatialFinder {
         const finderSettings = config?.FINDER_SETTINGS;
         const simulationAmounts = finderSettings?.SPATIAL_SIMULATION_INPUT_AMOUNTS;
 
+        // Add debug log to see the incoming finderSettings
+        logger.debug('[SpatialFinder Constructor] Received finderSettings:', JSON.stringify(finderSettings, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+
+
         if (
             // Check if FINDER_SETTINGS object itself is null or undefined
             finderSettings === undefined || finderSettings === null ||
             // Check if required specific properties within FINDER_SETTINGS are null or undefined
-            // These properties are expected to be BigInts, so checking for undefined/null is sufficient.
             finderSettings.SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS === undefined || finderSettings.SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS === null ||
             finderSettings.SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS === undefined || finderSettings.SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS === null ||
             // Check if the SPATIAL_SIMULATION_INPUT_AMOUNTS object itself is null or undefined
@@ -57,12 +59,27 @@ class SpatialFinder {
         this.pairRegistry = new Map(); // Initialize an empty registry to store pool addresses per canonical pair
         // Read and store specific config values used frequently as class properties.
         // Ensure they are BigInts by casting, although configLoader should handle this if using safeParseBigInt.
-        this.minNetPriceDiffBips = BigInt(finderSettings.SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS);
-        this.maxReasonablePriceDiffBips = BigInt(finderSettings.SPATIAL_MAX_REASONABLE_PRICE_BIPS); // Assuming a typo here, should be SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS
+
+        // Add debug logs before conversion
+        logger.debug('[SpatialFinder Constructor] Value for SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS:', finderSettings.SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS);
+        logger.debug('[SpatialFinder Constructor] Value for SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS:', finderSettings.SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS);
+
+        try {
+             this.minNetPriceDiffBips = BigInt(finderSettings.SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS);
+             this.maxReasonablePriceDiffBips = BigInt(finderSettings.SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS); // Line 61 where error occurs
+        } catch (bigIntError) {
+             logger.error('[SpatialFinder Constructor] Error converting BIPS settings to BigInt:', bigIntError);
+             const err = new Error(`Invalid BIPS setting format: ${bigIntError.message}`);
+             err.type = 'SpatialFinder: Init Failed';
+             throw err; // Re-throw with context
+        }
+
+
         this.simulationInputAmounts = simulationAmounts; // Store the simulation amounts object
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.19] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
+        // Corrected log message property name
+        logger.info(`[SpatialFinder v1.20] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
     }
 
     /**
@@ -253,7 +270,7 @@ class SpatialFinder {
                           logger.debug(`  - Pool ${p.address} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}): Price T0/T1 scaled=${p.price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted} | T1/T0 (Approx): ${priceInverseFormatted}. Returning price.`);
                      } catch (formatError) {
                           logger.error(`Error logging price for pool ${p.address}: ${formatError.message}`);
-                          logger.debug(`  - Pool ${p.address} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}): Price T0/T1 scaled=${p.price0_1_scaled.toString()}`);
+                          logger.debug(`  - Pool ${p.address} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}) Price (T0/T1 scaled): ${p.price0_1_scaled.toString()}`);
                      }
                  });
             }
@@ -542,18 +559,18 @@ class SpatialFinder {
         // --- ADD DEBUG LOG FOR PATH ARRAY ---
         logger.debug(`${logPrefix} Constructed path array:`, JSON.stringify([
             {
-                dex: poolSwapT1toT0.dexType,
+                dex: poolSwapT1toT0.dexType, // Keep for clarity, but poolState.dexType is used by sim
                 address: poolSwapT1toT0.address,
                 tokenInSymbol: tokenBorrowedOrRepaid.symbol,
                 tokenOutSymbol: tokenIntermediate.symbol,
-                poolState_dexType: step1PoolState?.dexType // Log the extracted dexType
+                poolState_dexType: step1PoolState?.dexType // Log the extracted dexType from the object used in path
             },
              {
-                dex: poolSwapT0toT1.dexType,
+                dex: poolSwapT0toT1.dexType, // Keep for clarity
                 address: poolSwapT0toT1.address,
                 tokenInSymbol: tokenIntermediate.symbol,
                 tokenOutSymbol: tokenBorrowedOrRepaid.symbol,
-                poolState_dexType: step2PoolState?.dexType // Log the extracted dexType
+                poolState_dexType: step2PoolState?.dexType // Log the extracted dexType from the object used in path
             }
         ], null, 2));
         // --- END DEBUG LOG ---
