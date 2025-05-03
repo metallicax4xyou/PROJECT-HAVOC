@@ -1,5 +1,5 @@
 // core/profitCalculator.js
-// --- VERSION v2.9 --- Added robust safeguard for gas estimation failures in calculate method.
+// --- VERSION v2.10 --- Explicitly convert signerAddress to string before passing to GasEstimator.
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
@@ -8,17 +8,23 @@ const { ArbitrageError } = require('../utils/errorHandler');
 const { TOKENS } = require('../constants/tokens'); // Import TOKENS to look up token objects
 
 class ProfitCalculator {
-    constructor(config, provider, swapSimulator, gasEstimator) {
-        logger.info('[ProfitCalculator v2.9] Initializing. Helpers moved to profitCalcUtils. Handles Aave fee (9 BPS).');
+    constructor(config, provider, swapSimulator, gasEstimator, flashSwapManager) { // Added flashSwapManager to constructor args
+        logger.info('[ProfitCalculator v2.10] Initializing. Helpers moved to profitCalcUtils. Handles Aave fee (9 BPS).'); // Version bump
         if (!config) throw new ArbitrageError('ProfitCalculatorInit', 'Missing config.');
         if (!provider) throw new ArbitrageError('ProfitCalculatorInit', 'Missing provider.');
         if (!swapSimulator?.simulateSwap) throw new ArbitrageError('ProfitCalculatorInit', 'Invalid SwapSimulator instance.');
         if (!gasEstimator?.estimateTxGasCost) throw new ArbitrageError('ProfitCalculatorInit', 'Invalid GasEstimator instance.');
+        // Added validation for flashSwapManager
+         if (!flashSwapManager || typeof flashSwapManager.getSignerAddress !== 'function') {
+             throw new ArbitrageError('ProfitCalculatorInit', 'Invalid FlashSwapManager instance.');
+         }
+
 
         this.config = config;
         this.provider = provider;
         this.swapSimulator = swapSimulator;
         this.gasEstimator = gasEstimator;
+        this.flashSwapManager = flashSwapManager; // Store FlashSwapManager instance
 
         // Read config values, converting BigInt strings if necessary
         // Assuming these are already BigInts from config loader if defined in network files
@@ -32,17 +38,17 @@ class ProfitCalculator {
          );
 
          if (!this.nativeCurrencyToken) {
-             logger.warn(`[ProfitCalculator v2.9] Could not identify Native Currency Token object from config.`);
+             logger.warn(`[ProfitCalculator v2.10] Could not identify Native Currency Token object from config.`); // Version bump
              // Create a fallback token object if not found (assuming 18 decimals)
              this.nativeCurrencyToken = {
                  symbol: this.config.NATIVE_CURRENCY_SYMBOL || 'ETH',
                  decimals: 18,
                  address: ethers.ZeroAddress // Use ZeroAddress as a placeholder for native
              };
-             logger.info(`[ProfitCalculator v2.9] Created fallback Native Currency Token object: ${this.nativeCurrencyToken.symbol}`);
+             logger.info(`[ProfitCalculator v2.10] Created fallback Native Currency Token object: ${this.nativeCurrencyToken.symbol}`); // Version bump
          }
 
-        logger.debug('[ProfitCalculator v2.9] Initialized with config:', {
+        logger.debug('[ProfitCalculator v2.10] Initialized with config:', { // Version bump
             minProfitThresholds: this.minProfitThresholds, // Log the object structure
             profitBufferPercent: this.profitBufferPercent.toString(),
             aaveFlashLoanFeeBps: this.aaveFlashLoanFeeBps.toString(),
@@ -56,20 +62,37 @@ class ProfitCalculator {
      * Calculates the profitability of a given arbitrage opportunity.
      * This involves simulating the swaps, estimating gas costs, and applying fees/thresholds.
      * @param {Array<object>} opportunities - Array of potential opportunity objects from finders.
-     * @param {string} signerAddress - The address that will execute the transaction (used for gas estimation).
      * @returns {Promise<Array<object>>} Array of profitable opportunity objects, augmented with profit/cost details.
      */
-    async calculate(opportunities, signerAddress) {
+    async calculate(opportunities) { // Removed signerAddress parameter here, get it from manager
         logger.debug(`[ProfitCalculator] Calculating profitability for ${opportunities.length} opportunities...`);
         const profitableTrades = [];
 
-        // --- Ensure signerAddress is valid before starting calculation loop ---
-        if (!signerAddress || !ethers.isAddress(signerAddress)) {
-             const errorMsg = "Invalid signerAddress provided for profitability calculation.";
-             logger.error(`[ProfitCalculator] ${errorMsg}. Skipping all opportunities.`);
-             // Return empty array as no calculations can be performed without a signer
-             return [];
+        // Get signerAddress from the stored FlashSwapManager instance
+        let signerAddress;
+        try {
+            // --- Explicitly get and convert signer address to string ---
+            const rawSignerInfo = await this.flashSwapManager.getSignerAddress();
+             // Check if the result is a string address, or if it's the unexpected array/object
+             if (typeof rawSignerInfo === 'string' && ethers.isAddress(rawSignerInfo)) {
+                 signerAddress = rawSignerInfo; // Use the string address if valid
+                 logger.debug(`[ProfitCalculator] Obtained signer address string from manager: ${signerAddress}`);
+             } else {
+                 // Log the unexpected type/value
+                 const errorMsg = `FlashSwapManager.getSignerAddress returned unexpected format: ${rawSignerInfo}`;
+                 logger.error(`[ProfitCalculator] ${errorMsg}. Skipping all opportunities.`);
+                 // Return empty array as we cannot proceed without a valid signer address string
+                 return [];
+             }
+
+        } catch (error) {
+            const errorMsg = `Failed to get signer address from FlashSwapManager: ${error.message}`;
+            logger.error(`[ProfitCalculator] ${errorMsg}. Skipping all opportunities.`, error);
+             return []; // Return empty array on error
         }
+
+
+        // --- signerAddress is now guaranteed to be a string address if we reach here ---
         logger.debug(`[ProfitCalculator] Using signer address for gas estimation: ${signerAddress}`);
 
 
@@ -144,28 +167,33 @@ class ProfitCalculator {
             try {
                 // Estimate gas for the entire transaction using the path and other data
                 const gasCostNativeWeiResult = await this.gasEstimator.estimateTxGasCost(
-                    opportunity.type, // e.g., 'spatial'
-                    opportunity.path, // The simulated path details
-                    opportunity.amountIn, // Initial borrowed amount
-                    signerAddress // Address sending the transaction (guaranteed valid by outer check)
-                    // Add other necessary parameters for gas estimation if needed (e.g., slippage)
+                    opportunity, // Pass the full opportunity object
+                    signerAddress // Pass the VALID signerAddress obtained earlier
                 );
 
                 // Validate the returned value from the estimator
-                if (gasCostNativeWeiResult === null || gasCostNativeWeiResult === undefined || typeof gasCostNativeWeiResult !== 'bigint' || gasCostNativeWeiResult < 0n) {
-                     const errorMsg = `Gas estimation returned invalid value: ${gasCostNativeWeiResult}.`;
+                if (gasCostNativeWeiResult === null || gasCostNativeWeiResult === undefined || typeof gasCostNativeWeiResult !== 'object' || gasCostNativeWeiResult.totalCostWei === undefined) {
+                     const errorMsg = `Gas estimation returned invalid result object: ${gasCostNativeWeiResult}.`;
                      logger.error(`${logPrefix} ${errorMsg}`);
                      opportunity.gasEstimationError = errorMsg;
                      continue; // Skip opportunity if the returned value is invalid
                 }
-                 gasCostNativeWei = gasCostNativeWeiResult; // Assign the validated result
+                 gasCostNativeWei = gasCostNativeWeiResult.totalCostWei; // Extract total cost from the result object
                  opportunity.gasEstimate = gasCostNativeWei; // Augment opportunity object *after* validation
+                 opportunity.gasEstimateSuccess = gasCostNativeWeiResult.estimateGasSuccess; // Store estimateGas check result
 
-                 logger.debug(`${logPrefix} Gas estimation successful: ${gasCostNativeWei.toString()} wei`);
+                 logger.debug(`${logPrefix} Gas estimation successful (result object validated). Total Cost: ${gasCostNativeWei.toString()} wei. EstimateGas check: ${opportunity.gasEstimateSuccess}`);
+
+                 // If estimateGas check failed, skip this opportunity even if simulation was successful
+                if (!opportunity.gasEstimateSuccess) {
+                    logger.debug(`${logPrefix} EstimateGas check failed. Skipping opportunity.`);
+                    continue;
+                }
+
 
             } catch (gasError) {
                  // This catches errors THROWN by the estimator
-                 const errorMsg = `Gas estimation failed: ${gasError.message}`;
+                 const errorMsg = `Gas estimation failed unexpectedly: ${gasError.message}`;
                  logger.error(`${logPrefix} ${errorMsg}`, gasError);
                  opportunity.gasEstimationError = errorMsg; // Store error message
                  continue; // Skip to the next opportunity if gas estimation throws
@@ -278,8 +306,14 @@ class ProfitCalculator {
 
 
             // --- 5. Add to Profitable Trades List ---
-            profitableTrades.push(opportunity);
-            logger.debug(`${logPrefix} Added to profitable trades list.`);
+            // Only add if estimateGas check PASSED and profit meets threshold
+            if (opportunity.gasEstimateSuccess && netProfitAfterGasNativeWei > minProfitThresholdNativeWei) {
+                profitableTrades.push(opportunity);
+                logger.debug(`${logPrefix} Added to profitable trades list.`);
+            } else {
+                 logger.debug(`${logPrefix} Skipped: EstimateGas check failed (${!opportunity.gasEstimateSuccess}) or Profit (${netProfitAfterGasNativeWei}) <= Threshold (${minProfitThresholdNativeWei}).`);
+            }
+
 
         } // End opportunity loop
 
@@ -310,11 +344,9 @@ class ProfitCalculator {
          // Need price of Token / Native (Scaled 1e18)
          let tokenNativePriceScaled = 0n;
          // MOCKING based on common tokens relative to WETH (assuming WETH is Native)
-         if (this.nativeCurrencyToken.symbol !== 'WETH') {
-              // If Native isn't WETH, this mock needs to be updated to convert to the *actual* native.
-              // For localFork with Arbitrum Mainnet fork, Native is ETH, which is equivalent to WETH.
-              // So this mock is okay for localFork.
-              logger.warn(`[_convertToNativeWei Mock] Native currency is ${this.nativeCurrencyToken.symbol}. Mock price conversion might be inaccurate if not WETH/ETH.`);
+         if (this.nativeCurrencyToken.symbol !== 'WETH' && this.nativeCurrencyToken.address.toLowerCase() !== '0x82af49447d8a07e3bd95bd0d56f35241523fbab1'.toLowerCase()) {
+              // If Native isn't WETH (the common mock base), warn about potential inaccuracy.
+              logger.warn(`[_convertToNativeWei Mock] Native currency is ${this.nativeCurrencyToken.symbol} (${this.nativeCurrencyToken.address}). Mock price conversion might be inaccurate if not WETH/ETH.`);
          }
 
 
