@@ -1,5 +1,5 @@
 // core/swapSimulator.js
-// --- VERSION v1.4 --- Fixed require path for scannerUtils.
+// --- VERSION v1.5 --- Fixed require path for pairUtils.
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger'); // Adjust path if needed
@@ -7,9 +7,9 @@ const { ABIS } = require('../constants/abis'); // Adjust path if needed
 const { ArbitrageError } = require('../utils/errorHandler'); // Adjust path if needed
 const { Token } = require('@uniswap/sdk-core');
 const { TOKENS } = require('../constants/tokens');
-// CORRECTED PATH: Changed from '../scannerUtils' to './scannerUtils'
 const { getTickSpacingFromFeeBps } = require('./scannerUtils'); // Path ok relative to core/
-const { getCanonicalPairKey } = require('../../utils/pairUtils'); // Correct path
+// CORRECTED PATH: Changed from '../../utils/pairUtils' to '../utils/pairUtils'
+const { getCanonicalPairKey } = require('../utils/pairUtils'); // Correct path relative to core/
 
 const MAX_UINT128 = (1n << 128n) - 1n;
 
