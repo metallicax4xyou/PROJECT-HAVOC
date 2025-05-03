@@ -1,5 +1,5 @@
 // core/swapSimulator.js
-// --- VERSION v1.7 --- Fixed UniV3 simulation to pass arguments as a tuple to QuoterV2.
+// --- VERSION v1.8 --- Fixed UniV3 simulation passing incorrect fee argument to QuoterV2.
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger'); // Adjust path if needed
@@ -116,11 +116,9 @@ class SwapSimulator {
         }
      }
 
-    // Uniswap V3 Simulation (Adjusted to use poolState properties directly AND pass args as tuple)
+    // Uniswap V3 Simulation (Fixed argument passing for QuoterV2)
     async simulateV3Swap(poolState, tokenIn, amountIn) {
         // Destructure required properties from poolState. Assume these are populated by the fetcher and passed correctly by the finder.
-        // Note: While sqrtPriceX96, liquidity, tick are passed, the QuoterV2 might not strictly NEED them for quoteExactInputSingle,
-        // but they are part of the pool state for other potential uses (like price calc or manual simulation).
         const { fee, token0, token1, address, sqrtPriceX96, liquidity, tick } = poolState;
         const logPrefix = `[SwapSim V3 ${address?.substring(0,6)}]`;
 
@@ -132,20 +130,27 @@ class SwapSimulator {
 
         // Define the parameters for quoteExactInputSingle as an object, then convert to a tuple (array)
         // The Quoter V2 ABI expects a struct/tuple: QuoteExactInputSingleParams
+        // --- FIXED: Correctly pass the fee from poolState, not amountIn ---
         const params = {
              tokenIn: tokenIn.address,
              tokenOut: tokenOut.address,
-             fee: fee, // uint24 fee (should be in the correct format from fetcher/config)
+             fee: Number(fee), // uint24 fee - Needs to be a number for the ABI encoding, ensure fee is correct type from fetcher
              amountIn: amountIn, // uint256 amountIn (already in smallest units BigInt)
              // Use 0n for sqrtPriceLimitX96 to indicate no limit, or a calculated limit based on desired slippage
              // For simulation purposes, often no limit is needed to see max possible output
-             sqrtPriceLimitX96: 0n // uint160
+             sqrtPriceLimitX96: 0n // uint160 (BigInt)
         };
 
         // Basic validation for critical V3 state props (passed from finder)
         // This is mostly for debugging the state flow pipeline from fetcher -> finder -> simulator
         // The Quoter call itself will validate the addresses/fee/amounts.
         // Checking for undefined/null here helps confirm the data made it this far.
+         // Check fee type and value range
+         if (typeof params.fee !== 'number' || !Number.isInteger(params.fee) || params.fee < 0 || params.fee > 10000) { // uint24 covers up to ~16M, BPS are 0-10000
+             logger.warn(`${logPrefix} DEBUG: Unexpected fee type or value for Quoter (fee: ${params.fee}). Expected integer BPS 0-10000.`);
+             // Decide if this should fail simulation. Likely safer to fail if fee is bad.
+             return { success: false, amountOut: null, error: `Invalid fee value for Quoter: ${params.fee}` };
+         }
         if (sqrtPriceX96 === undefined || sqrtPriceX96 === null || liquidity === undefined || liquidity === null || tick === undefined || tick === null) {
              // Log only a debug message here, as we are now CONFIDENT the data is fetched and passed to the finder.
              // The issue might be in how the finder passes it or how extractSimState formats it.
@@ -157,7 +162,7 @@ class SwapSimulator {
 
         try {
             // Use the Quoter V2 contract instance from the constructor (already checked for null)
-            logger.debug(`${logPrefix} Quoting ${tokenIn.symbol}->${tokenOut.symbol} Fee ${fee} In ${amountIn.toString()} (raw)`);
+            logger.debug(`${logPrefix} Quoting ${tokenIn.symbol}->${tokenOut.symbol} Fee ${params.fee} In ${amountIn.toString()} (raw)`);
             // Call the quoter contract using the correct function and parameters AS A TUPLE (array)
             // quoteExactInputSingle returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)
             const quoteResult = await this.quoterContract.quoteExactInputSingle.staticCall([
@@ -330,9 +335,10 @@ class SwapSimulator {
                      // querySellBase(address trader, uint256 payBaseAmount)
                      // Use ethers.ZeroAddress as the trader for simulation
                      // --- TODO: Verify if THIS DODO ABI EXPECTS ARGUMENTS AS A TUPLE OR SEPARATE ---
-                     // The ABI you just got might expect querySellBase(tuple params). Need to verify.
-                     // For now, keeping as separate arguments as in the code you provided,
-                     // but be aware this might need adjustment based on the actual ABI.
+                     // You must verify this based on the actual ABI you obtained.
+                     // If it expects a tuple, the call should look like:
+                     // queryResult = await poolContract.querySellBase.staticCall([ethers.ZeroAddress, amountIn]);
+                     // Otherwise, keeping as separate arguments:
                      queryResult = await poolContract.querySellBase.staticCall(ethers.ZeroAddress, amountIn);
                      amountOut = BigInt(queryResult[0]); // The first element is receiveQuoteAmount
                      // Note: queryResult[1] is mtFee, might need later for detailed analysis, but standard simulation doesn't use it directly.
@@ -341,8 +347,8 @@ class SwapSimulator {
                 } catch (queryError) {
                     // Attempt to decode revert reason
                     let reason = queryError.reason || queryError.message;
-                    if (queryError.data && typeof queryError.data === 'string' && queryError.data !== '0x') {
-                        try { reason = ethers.toUtf8String(queryError.data); } catch {}
+                    if (queryError.data && typeof error.data === 'string' && error.data !== '0x') { // Use error.data here
+                        try { reason = ethers.toUtf8String(error.data); } catch {}
                     }
                     // Log common reverts at debug/info level, others at warn/error
                     if (reason.includes("BALANCE_NOT_ENOUGH") || reason.includes("TARGET_IS_ZERO") || reason.includes("SELL_BASE_RESULT_IS_ZERO") || reason.includes("DODO_SELL_AMOUNT_TOO_SMALL")) {
@@ -374,8 +380,8 @@ class SwapSimulator {
                     // querySellQuote(address trader, uint256 payQuoteAmount)
                     // Use ethers.ZeroAddress as the trader for simulation
                     // --- TODO: Verify if THIS DODO ABI EXPECTS ARGUMENTS AS A TUPLE OR SEPARATE ---
-                    // Need to verify based on the actual ABI you obtained.
-                    // For now, keeping as separate arguments.
+                    // You must verify this based on the actual ABI you obtained.
+                    // For now, keeping as separate arguments:
                     queryResult = await poolContract.querySellQuote.staticCall(ethers.ZeroAddress, amountIn);
                     amountOut = BigInt(queryResult[0]); // The first element is receiveBaseAmount
                     // Note: queryResult[1] is mtFee
@@ -384,8 +390,8 @@ class SwapSimulator {
                 } catch (queryError) {
                     // Attempt to decode revert reason
                     let reason = queryError.reason || queryError.message;
-                     if (queryError.data && typeof queryError.data === 'string' && queryError.data !== '0x') {
-                         try { reason = ethers.toUtf8String(queryError.data); } catch {}
+                     if (queryError.data && typeof error.data === 'string' && error.data !== '0x') { // Use error.data here
+                         try { reason = ethers.toUtf8String(error.data); } catch {}
                      }
                      // Log common reverts at debug/info level, others at warn/error
                     if (reason.includes("BALANCE_NOT_ENOUGH") || reason.includes("TARGET_IS_ZERO") || reason.includes("SELL_QUOTE_RESULT_IS_ZERO") || reason.includes("DODO_SELL_AMOUNT_TOO_SMALL")) {
