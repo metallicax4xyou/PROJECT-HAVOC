@@ -1,25 +1,29 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.2 --- Corrected environment variable loading and private key format handling.
+// --- VERSION v1.3 --- Adjusted hardcoded localFork key format & env var usage based on HH8 error.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
 require("hardhat-gas-reporter");
 require("dotenv").config(); // Ensure .env variables are loaded at the very top
 
-// Environment Variables - Access them here
+// --- Environment Variables (Accessed within the config scope) ---
+// Access these using process.env directly where needed, or assign to local consts *inside* the object
 const INFURA_API_KEY = process.env.INFURA_API_KEY || "";
 const ALCHEMY_API_KEY_ARBITRUM = process.env.ARBITRUM_RPC_URLS?.split(',')[0]?.replace(/.*alchemy.com\/v2\//, "") || ""; // Extract key from Alchemy URL if used
-// IMPORTANT: Hardhat network accounts typically expect the raw 64-char hex string *without* the 0x prefix.
-// Ensure your PRIVATE_KEY in .env is the raw hex string (64 chars).
-// If your .env PRIVATE_KEY includes "0x", we will strip it here.
-const PRIVATE_KEY_RAW = process.env.PRIVATE_KEY?.replace(/^0x/, "") || "";
 
+// IMPORTANT: Hardhat's config loading seems to expect the raw 64-char hex string (32 bytes) *without* the 0x prefix
+// for the string value itself.
+// Let's define the raw private key string from the environment variable.
+const PRIVATE_KEY_RAW_ENV = process.env.PRIVATE_KEY?.replace(/^0x/, "") || "";
 
-// Define the default accounts array for networks other than localFork.
-// Only include accounts if a valid private key is provided in .env.
-// Hardhat expects the 0x prefix for keys listed directly in the accounts array.
-const accounts = PRIVATE_KEY_RAW ? [`0x${PRIVATE_KEY_RAW}`] : [];
+// Hardhat's standard default test account private key (raw, 64 hex chars)
+const HARDHAT_DEFAULT_PRIVATE_KEY_RAW = "ac0974de85431e2a29a1bcedf3cfb9226611458f";
+
+// Determine the accounts array for networks other than localFork.
+// If a valid raw PK is in the environment variable (length 64), use it with the 0x prefix.
+// Otherwise, the array will be empty.
+const accountsForLiveNetworks = (PRIVATE_KEY_RAW_ENV.length === 64) ? [`0x${PRIVATE_KEY_RAW_ENV}`] : [];
 
 // Access specific RPC URLs from .env
 const ARBITRUM_RPC_URL = process.env.ARBITRUM_RPC_URLS?.split(',')[0] || `https://arb-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY_ARBITRUM}`;
@@ -43,17 +47,21 @@ module.exports = {
     // Hardhat Network (Used by default if no --network specified)
     // This will NOT fork Arbitrum Mainnet by default unless configured below.
     // For local testing without forking, you don't need complex accounts here.
+    // Hardhat generates default accounts automatically when running 'npx hardhat node'.
+    // We define 'accounts' here primarily for tasks/scripts that might *expect*
+    // accounts to be defined in the config.
     hardhat: {
-       // accounts: accounts.length > 0 ? accounts : undefined, // Optionally use the same accounts if PK is set
+       // Use the environment variable private key if valid, otherwise let hardhat generate defaults
+       accounts: accountsForLiveNetworks.length > 0 ? accountsForLiveNetworks : undefined,
        // chainId: 31337 // Default Hardhat chainId
     },
     // Local Fork Network (Used with --network localFork)
     // Configured to fork Arbitrum Mainnet at a specific block.
     localFork: {
       url: "http://127.0.0.1:8545", // Hardhat node RPC endpoint
-      // Use a hardcoded standard Hardhat account key for the local fork environment
-      // This key is known to work with Hardhat's default node setup and has funds (10000 ETH)
-      accounts: ["0xac0974de85431e2a29a1bcedf3cfb9226611458f"],
+      // *** CORRECTED: Use the RAW 64-char private key string in the accounts array ***
+      // Hardhat seems to interpret string elements in the 'accounts' array as raw private keys.
+      accounts: [`0x${HARDHAT_DEFAULT_PRIVATE_KEY_RAW}`],
       // Forking Configuration (Enabled when using this network)
       forking: {
         url: ARBITRUM_RPC_URL, // Use the Arbitrum Mainnet RPC URL from .env
@@ -64,19 +72,19 @@ module.exports = {
     // Arbitrum Mainnet (Used with --network arbitrum)
     arbitrum: {
       url: ARBITRUM_RPC_URL,
-      accounts: accounts, // Use the account derived from PRIVATE_KEY_RAW
+      accounts: accountsForLiveNetworks, // Use the account derived from PRIVATE_KEY_RAW_ENV
       chainId: 42161
     },
     // Goerli Testnet (Used with --network goerli)
     goerli: {
       url: GOERLI_RPC_URL,
-      accounts: accounts, // Use the account derived from PRIVATE_KEY_RAW
+      accounts: accountsForLiveNetworks, // Use the account derived from PRIVATE_KEY_RAW_ENV
       chainId: 5
     },
     // Arbitrum Goerli Testnet (Used with --network arbitrumGoerli)
     arbitrumGoerli: {
       url: ARBITRUM_GOERLI_RPC_URL,
-      accounts: accounts, // Use the account derived from PRIVATE_KEY_RAW
+      accounts: accountsForLiveNetworks, // Use the account derived from PRIVATE_KEY_RAW_ENV
       chainId: 421613
     },
   },
@@ -93,8 +101,7 @@ module.exports = {
   },
 };
 
-// Add a check to prevent running on live networks with no private key set if accounts is empty
-if (process.env.NODE_ENV !== 'development' && accounts.length === 0 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
-    console.error("CRITICAL: No PRIVATE_KEY set in .env for live network!");
-    // process.exit(1); // Optionally exit here if PK is mandatory for all but localFork
+// Optional: Add a check to warn if PRIVATE_KEY in .env is not the expected raw length for live networks
+if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.replace(/^0x/, "").length !== 64 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
+     console.warn(`[Hardhat Config] WARNING: PRIVATE_KEY environment variable has unexpected length (${process.env.PRIVATE_KEY.replace(/^0x/, "").length} after stripping 0x). Expected 64 for live networks.`);
 }
