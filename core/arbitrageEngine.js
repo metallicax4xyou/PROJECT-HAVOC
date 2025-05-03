@@ -1,5 +1,5 @@
 // core/arbitrageEngine.js
-// --- VERSION v1.10 --- Corrected typo in TradeHandlerClass validation (TradeHandlerClassClass -> TradeHandlerClass).
+// --- VERSION v1.11 --- Added duration calculation in runCycle finally block to resolve ReferenceError.
 
 const { EventEmitter } = require('events');
 const { ethers } = require('ethers');
@@ -23,7 +23,7 @@ class ArbitrageEngine extends EventEmitter {
      */
     constructor(config, provider, swapSimulator, gasEstimator, flashSwapManager, TradeHandlerClass) { // <-- ADDED THIS PARAMETER
         super();
-        logger.info('[AE v1.10] Initializing ArbitrageEngine components...'); // Version bump
+        logger.info('[AE v1.11] Initializing ArbitrageEngine components...'); // Version bump
         // Validation...
         if (!config) throw new ArbitrageError('InitializationError', 'AE: Missing config.');
         if (!provider) throw new ArbitrageError('InitializationError', 'AE: Missing provider.');
@@ -31,7 +31,6 @@ class ArbitrageEngine extends EventEmitter {
         if (!gasEstimator?.estimateTxGasCost) throw new ArbitrageError('InitializationError', 'AE: Invalid GasEstimator.');
         if (!flashSwapManager || typeof flashSwapManager.initiateAaveFlashLoan !== 'function') { throw new ArbitrageError('InitializationError', 'AE: Invalid FlashSwapManager instance required.'); }
         // Validate the TradeHandler Class constructor
-        // --- CORRECTED TYPO HERE ---
         if (!TradeHandlerClass || typeof TradeHandlerClass !== 'function' || !TradeHandlerClass.prototype || typeof TradeHandlerClass.prototype.handleTrades !== 'function') {
              throw new ArbitrageError('InitializationError', 'AE: Invalid TradeHandler Class constructor provided.');
         }
@@ -82,7 +81,7 @@ class ArbitrageEngine extends EventEmitter {
         this.nativeSymbol = this.config.NATIVE_CURRENCY_SYMBOL || 'ETH';
 
 
-        logger.info('[AE v1.10] ArbitrageEngine components initialized successfully.'); // Version bump
+        logger.info('[AE v1.11] ArbitrageEngine components initialized successfully.'); // Version bump
     }
 
     /**
@@ -225,7 +224,9 @@ class ArbitrageEngine extends EventEmitter {
             cycleStatus = `FAILED (${error.type || error.constructor.name})`; // Update status on failure
              // Do NOT re-throw here. The interval timer should continue unless startup failed.
         } finally {
-            const cycleDuration = Date.now() - cycleStartTime; // Calculate duration
+            // --- Calculate duration here ---
+            const cycleEndTime = Date.now();
+            const duration = cycleEndTime - cycleStartTime;
             // Use debug level for frequent cycle start/end logs
             logger.debug(`[AE.runCycle] ===== Cycle ${cycleStatus}. Duration: ${duration}ms =====`);
             this.isCycleRunning = false; // Ensure flag is reset regardless of outcome
