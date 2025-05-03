@@ -1,5 +1,5 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.18 --- Updated V3 price calculation call and inversion logic.
+// --- VERSION v1.19 --- Added debug logs in _createOpportunity to inspect extracted poolState and path.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
@@ -58,11 +58,11 @@ class SpatialFinder {
         // Read and store specific config values used frequently as class properties.
         // Ensure they are BigInts by casting, although configLoader should handle this if using safeParseBigInt.
         this.minNetPriceDiffBips = BigInt(finderSettings.SPATIAL_MIN_NET_PRICE_DIFFERENCE_BIPS);
-        this.maxReasonablePriceDiffBips = BigInt(finderSettings.SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS);
+        this.maxReasonablePriceDiffBips = BigInt(finderSettings.SPATIAL_MAX_REASONABLE_PRICE_BIPS); // Assuming a typo here, should be SPATIAL_MAX_REASONABLE_PRICE_DIFF_BIPS
         this.simulationInputAmounts = simulationAmounts; // Store the simulation amounts object
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.18] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
+        logger.info(`[SpatialFinder v1.19] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
     }
 
     /**
@@ -108,7 +108,6 @@ class SpatialFinder {
             switch (dexType?.toLowerCase()) {
                 case 'uniswapv3':
                     // Call the function that calculates T0/T1 scaled by PRICE_SCALE
-                    // CORRECTED FUNCTION NAME CALL
                     price0_1_scaled = calculateV3PriceT0_T1_scaled(poolState);
                     break;
 
@@ -144,12 +143,18 @@ class SpatialFinder {
                  try {
                      // Attempt to format the price for human readability in the log
                      // Price is T0/T1 scaled by PRICE_SCALE (1e18)
-                      const priceFormatted = ethers.formatUnits(price0_1_scaled, 18); // Format using 18 decimals for PRICE_SCALE
-                      // Recalculate inverse for logging clarity (T1/T0 scaled by 1e18)
-                      const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / price0_1_scaled;
-                      const priceInverseFormatted = ethers.formatUnits(priceInverseScaled, 18);
+                      // Use formatUnits with 18 decimals for the scaled price
+                      const priceFormatted_T0_T1 = ethers.formatUnits(price0_1_scaled, 18);
 
-                      logger.debug(`[SF._CalcPrice] Pool ${poolState.address.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted} | T1/T0 (Approx): ${priceInverseFormatted}. Returning price.`);
+                      // Calculate inverse price (T1/T0) scaled by 1e18 for logging clarity
+                      let priceInverseScaled = 0n;
+                      let priceInverseFormatted_T1_T0 = 'N/A';
+                      if (price0_1_scaled > 0n) {
+                          priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / price0_1_scaled;
+                          priceInverseFormatted_T1_T0 = ethers.formatUnits(priceInverseScaled, 18);
+                      }
+
+                      logger.debug(`[SF._CalcPrice] Pool ${poolState.address.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted_T0_T1} | T1/T0 (Approx): ${priceInverseFormatted_T1_T0}. Returning price.`);
                  } catch (formatError) {
                       logger.error(`[SF._CalcPrice] Error formatting price for log for pool ${poolState.address}: ${formatError.message}`);
                       logger.debug(`[SF._CalcPrice] Pool ${poolState.address.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()}. Returning price.`);
@@ -245,7 +250,7 @@ class SpatialFinder {
                           const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / p.price0_1_scaled;
                           const priceInverseFormatted = ethers.formatUnits(priceInverseScaled, 18);
 
-                          logger.debug(`  - Pool ${p.address} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}): Price T0/T1 scaled=${p.price0_1_scaled.toString()} (~${priceFormatted}) | T1/T0 (Approx): ~${priceInverseFormatted}`);
+                          logger.debug(`  - Pool ${p.address} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}): Price T0/T1 scaled=${p.price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted} | T1/T0 (Approx): ${priceInverseFormatted}. Returning price.`);
                      } catch (formatError) {
                           logger.error(`Error logging price for pool ${p.address}: ${formatError.message}`);
                           logger.debug(`  - Pool ${p.address} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}): Price T0/T1 scaled=${p.price0_1_scaled.toString()}`);
@@ -391,7 +396,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapT1toT0, poolSwapT0toT1, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate, rawDiffBips) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.18]`; // Updated version log
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.19]`; // Updated version log
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
@@ -497,7 +502,7 @@ class SpatialFinder {
              // Start with common properties
              const state = {
                  address: pool.address,
-                 dexType: pool.dexType,
+                 dexType: pool.dexType, // <--- Ensure dexType is included here!
                  fee: pool.fee, // V3 fee (uint24), V2/DODO default fee (number) - ensure this is consistently handled downstream
                  // Include token objects with full details (address, decimals, symbol, etc.). This is crucial.
                  token0: pool.token0,
@@ -521,11 +526,39 @@ class SpatialFinder {
              }
              // Add Camelot if implemented and needs specific state
              // else if (pool.dexType === 'camelot') { ... }
+
+             // --- ADD DEBUG LOG HERE ---
+             logger.debug(`${logPrefix} extractSimState returned for pool ${pool.address}: dexType=${state.dexType}, token0=${state.token0?.symbol}, token1=${state.token1?.symbol}, address=${state.address}, fee=${state.fee}`);
+             // --- END DEBUG LOG ---
+
              return state; // Return the extracted state object
         };
 
         // Construct the path object representation for the arbitrage opportunity.
         // This structured object is passed through the ProfitCalculator and used by the TxParamBuilders.
+        const step1PoolState = extractSimState(poolSwapT1toT0);
+        const step2PoolState = extractSimState(poolSwapT0toT1);
+
+        // --- ADD DEBUG LOG FOR PATH ARRAY ---
+        logger.debug(`${logPrefix} Constructed path array:`, JSON.stringify([
+            {
+                dex: poolSwapT1toT0.dexType,
+                address: poolSwapT1toT0.address,
+                tokenInSymbol: tokenBorrowedOrRepaid.symbol,
+                tokenOutSymbol: tokenIntermediate.symbol,
+                poolState_dexType: step1PoolState?.dexType // Log the extracted dexType
+            },
+             {
+                dex: poolSwapT0toT1.dexType,
+                address: poolSwapT0toT1.address,
+                tokenInSymbol: tokenIntermediate.symbol,
+                tokenOutSymbol: tokenBorrowedOrRepaid.symbol,
+                poolState_dexType: step2PoolState?.dexType // Log the extracted dexType
+            }
+        ], null, 2));
+        // --- END DEBUG LOG ---
+
+
         return {
             type: 'spatial', // Type of arbitrage (spatial, triangular, etc.)
             pairKey: canonicalKey, // Canonical key of the token pair involved (e.g., "WETH/USDC")
@@ -537,26 +570,26 @@ class SpatialFinder {
             path: [
                 // Step 1: Swap from tokenIn (T1) to tokenIntermediate (T0) on the first pool
                 {
-                    dex: poolSwapT1toT0.dexType, // DEX type (e.g., 'uniswapv3', 'sushiswap', 'dodo')
+                    dex: poolSwapT1toT0.dexType, // DEX type (e.g., 'uniswapv3', 'sushiswap', 'dodo') - Kept for clarity, but poolState should be source of truth for sim
                     address: poolSwapT1toT0.address, // Address of the pool for this step
                     fee: poolSwapT1toT0.fee, // Fee for this pool (relevant for V3)
                     tokenInSymbol: tokenBorrowedOrRepaid.symbol, // Input token symbol for this step
                     tokenOutSymbol: tokenIntermediate.symbol, // Output token symbol for this step
                     tokenInAddress: tokenBorrowedOrRepaid.address, // Input token address
                     tokenOutAddress: tokenIntermediate.address, // Output token address
-                    poolState: extractSimState(poolSwapT1toT0), // Include relevant pool state for simulation/encoding
+                    poolState: step1PoolState, // Include relevant pool state for simulation/encoding
                     minOut: 0n // Minimum output amount for intermediate swaps is typically 0
                 },
                 // Step 2: Swap from tokenIntermediate (T0) to tokenOut (T1) on the second pool
                 {
-                    dex: poolSwapT0toT1.dexType,
+                    dex: poolSwapT0toT1.dexType, // Kept for clarity
                     address: poolSwapT0toT1.address,
                     fee: poolSwapT0toT1.fee,
                     tokenInSymbol: tokenIntermediate.symbol,
                     tokenOutSymbol: tokenBorrowedOrRepaid.symbol,
                     tokenInAddress: tokenIntermediate.address,
                     tokenOutAddress: tokenBorrowedOrRepaid.address,
-                    poolState: extractSimState(poolSwapT0toT1),
+                    poolState: step2PoolState, // Include relevant pool state for simulation/encoding
                      // minOut for the final swap will be calculated by ProfitCalculator based on slippage
                     minOut: 0n // Placeholder - ProfitCalculator will set the real minOut for the last step
                 }
