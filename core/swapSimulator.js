@@ -1,5 +1,5 @@
 // core/swapSimulator.js
-// --- VERSION v1.3 --- Fixed simulateSwap to consistently use poolState.dexType and poolState.address.
+// --- VERSION v1.4 --- Fixed require path for scannerUtils.
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger'); // Adjust path if needed
@@ -7,7 +7,8 @@ const { ABIS } = require('../constants/abis'); // Adjust path if needed
 const { ArbitrageError } = require('../utils/errorHandler'); // Adjust path if needed
 const { Token } = require('@uniswap/sdk-core');
 const { TOKENS } = require('../constants/tokens');
-const { getTickSpacingFromFeeBps } = require('../scannerUtils'); // Path ok relative to core/
+// CORRECTED PATH: Changed from '../scannerUtils' to './scannerUtils'
+const { getTickSpacingFromFeeBps } = require('./scannerUtils'); // Path ok relative to core/
 const { getCanonicalPairKey } = require('../../utils/pairUtils'); // Correct path
 
 const MAX_UINT128 = (1n << 128n) - 1n;
@@ -335,3 +336,7 @@ class SwapSimulator {
         }
     }
 }
+
+module.exports = SwapSimulator;
+@metallicax4xyou ➜ /workspaces/arbitrum-f
+trum-flash (main) $ 
