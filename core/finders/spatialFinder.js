@@ -1,5 +1,5 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.22 --- Fixed typo priceB_0_1_scaled -> priceB_0_per_1_scaled. Added debug logs before extractSimState.
+// --- VERSION v1.23 --- Added BigInt replacer to JSON.stringify for path log.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
@@ -97,7 +97,7 @@ class SpatialFinder {
 
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.22] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
+        logger.info(`[SpatialFinder v1.23] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
     }
 
     /**
@@ -442,7 +442,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapT1toT0, poolSwapT0toT1, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate, rawDiffBips) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.22]`; // Updated version log
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.23]`; // Updated version log
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
@@ -624,7 +624,7 @@ class SpatialFinder {
 
              // --- ADD DEBUG LOG HERE (Final Extracted State) ---
              // Log a summary of the extracted state object for every pool type
-              logger.debug(`${logPrefix} extractSimState finished for pool ${pool.address?.substring(0,6)}. Extracted state summary: dexType=${state.dexType}, fee=${state.fee}, tokens=${state.token0?.symbol}/${state.token1?.symbol}. Specific state copied: V3=${!!state.sqrtPriceX96}, Sushi=${!!state.reserve0}, DODO=${!!state.pmmState}`);
+              logger.debug(`${logPrefix} extractSimState finished for pool ${pool.address?.substring(0,6)}. Extracted state summary: dexType=${state.dexType}, fee=${state.fee}, tokens=${state.token0?.symbol}/${state.token1?.symbol}. Specific state copied: V3=${!!state.sqrtPriceX96 || !!state.liquidity || !!state.tick}, Sushi=${!!state.reserve0}, DODO=${!!state.pmmState}`); // Updated boolean check for V3
              // --- END DEBUG LOG ---
 
              return state; // Return the extracted state object
@@ -643,6 +643,7 @@ class SpatialFinder {
 
 
         // --- ADD DEBUG LOG FOR PATH ARRAY ---
+        // Added replacer function to handle BigInt serialization
         logger.debug(`${logPrefix} Constructed path array (Pool States included):`, JSON.stringify([
             {
                 dex: poolSwapT1toT0.dexType, // Keep for clarity, but poolState.dexType is used by sim
@@ -663,7 +664,8 @@ class SpatialFinder {
                  // minOut for the final swap will be calculated by ProfitCalculator based on slippage
                 minOut: 0n // Placeholder - ProfitCalculator will set the real minOut for the last step
             }
-        ], null, 2)); // Use 2-space indentation for readability
+        ], (k, v) => typeof v === 'bigint' ? v.toString() : v, 2)); // Use replacer for BigInt
+
         // --- END DEBUG LOG ---
 
 
