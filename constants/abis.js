@@ -34,6 +34,7 @@ function safeLoadJson(relativePath) {
 // --- Load ABIs from compiled artifacts (for contracts you deployed) ---
 // Path relative from constants/: go up one level (..), then into artifacts/...
 const flashSwapArtifactPath = path.join('..', 'artifacts', 'contracts', 'FlashSwap.sol', 'FlashSwap.json');
+// Use safeLoadJson instead of safeRequire for better control over paths and error handling
 const FlashSwapABI = safeLoadJson(flashSwapArtifactPath);
 
 
