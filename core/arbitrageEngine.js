@@ -1,343 +1,272 @@
 // core/arbitrageEngine.js
-// --- VERSION v1.6 --- Adjusted log levels for less verbose per-cycle output
+// --- VERSION v1.7 --- Updated constructor to receive FlashSwapManager and pass it to ProfitCalculator.
 
-const { EventEmitter } = require('events');
-const { ethers } = require('ethers');
-const PoolScanner = require('./poolScanner');
-const ProfitCalculator = require('./profitCalculator');
-const SpatialFinder = require('./finders/spatialFinder');
 const logger = require('../utils/logger');
-const { ArbitrageError } = require('../utils/errorHandler');
-const { TOKENS } = require('../constants/tokens');
+const PoolScanner = require('./poolScanner');
+const SpatialFinder = require('./finders/spatialFinder');
+const TriangularV3Finder = require('./finders/triangularV3Finder'); // Assuming Triangular V3 finder exists
+const ProfitCalculator = require('./profitCalculator');
+const TradeHandler = require('./tradeHandler'); // Assuming TradeHandler exists
+const { ArbitrageError, handleError } = require('../utils/errorHandler'); // Import error handling
 
-class ArbitrageEngine extends EventEmitter {
-    constructor(config, provider, swapSimulator, gasEstimator, flashSwapManager) {
-        super();
-        logger.info('[AE v1.6] Initializing ArbitrageEngine components...'); // Updated version log
-        // Validation...
-        if (!config) throw new ArbitrageError('InitializationError', 'AE: Missing config.');
-        if (!provider) throw new ArbitrageError('InitializationError', 'AE: Missing provider.');
-        if (!swapSimulator?.simulateSwap) throw new ArbitrageError('InitializationError', 'AE: Invalid SwapSimulator.');
-        if (!gasEstimator?.estimateTxGasCost) throw new ArbitrageError('InitializationError', 'AE: Invalid GasEstimator.');
-        if (!flashSwapManager || typeof flashSwapManager.getSignerAddress !== 'function') { throw new ArbitrageError('InitializationError', 'AE: Invalid FlashSwapManager instance required.'); }
-        // No need to check config.provider here, bot.js ensures it
+
+class ArbitrageEngine {
+    /**
+     * @param {object} config - Application configuration.
+     * @param {ethers.Provider} provider - Ethers provider.
+     * @param {SwapSimulator} swapSimulator - Instance of SwapSimulator.
+     * @param {GasEstimator} gasEstimator - Instance of GasEstimator.
+     * @param {FlashSwapManager} flashSwapManager - Instance of FlashSwapManager. <-- ADDED THIS PARAMETER
+     */
+    constructor(config, provider, swapSimulator, gasEstimator, flashSwapManager) { // <-- ADDED THIS PARAMETER
+        logger.info('[AE v1.7] Initializing ArbitrageEngine components...'); // Version bump
+        if (!config) throw new ArbitrageError('ArbitrageEngineInit', 'Missing config.');
+        if (!provider) throw new ArbitrageError('ArbitrageEngineInit', 'Missing provider.');
+        if (!swapSimulator) throw new ArbitrageError('ArbitrageEngineInit', 'Invalid SwapSimulator instance.');
+        if (!gasEstimator) throw new ArbitrageError('ArbitrageEngineInit', 'Invalid GasEstimator instance.');
+        // Added validation for flashSwapManager, as ProfitCalculator will need it.
+        if (!flashSwapManager) throw new ArbitrageError('ArbitrageEngineInit', 'Invalid FlashSwapManager instance.');
+
 
         this.config = config;
         this.provider = provider;
-        this.flashSwapManager = flashSwapManager;
-        // Pass dependencies directly to ProfitCalculator constructor
-        this.profitCalculator = new ProfitCalculator(this.config, this.provider, swapSimulator, gasEstimator);
+        this.swapSimulator = swapSimulator;
+        this.gasEstimator = gasEstimator;
+        this.flashSwapManager = flashSwapManager; // Store the instance
 
+
+        // Initialize child components
+        this.poolScanner = new PoolScanner(config, provider);
+        logger.info('[PoolScanner v1.3] PoolScanner fetcher initialization complete.'); // Confirmed v1.3 in logs
+        // Pass finder settings from config
+        this.spatialFinder = new SpatialFinder(config, this.config.FINDER_SETTINGS);
+         // Initialize other finders if they exist and are needed
+         // this.triangularV3Finder = new TriangularV3Finder(config, this.config.FINDER_SETTINGS); // Example
+
+
+        // Initialize ProfitCalculator, passing required dependencies
+        // Pass the flashSwapManager instance to ProfitCalculator <-- ADDED THIS PARAMETER
+        this.profitCalculator = new ProfitCalculator(config, provider, swapSimulator, gasEstimator, flashSwapManager);
+
+
+        // Initialize TradeHandler, passing required dependencies
+        // Pass the flashSwapManager instance to TradeHandler
+        this.tradeHandler = new TradeHandler(config, provider, flashSwapManager, this.profitCalculator); // Assuming TradeHandler constructor takes these
+
+
+        // Event listeners map (Opportunity type -> Handler function)
+        this.opportunityHandlers = {
+            'spatial': this.tradeHandler.handleSpatialArbitrage.bind(this.tradeHandler),
+            // Add other handlers as implemented
+            // 'triangular': this.tradeHandler.handleTriangularArbitrage.bind(this.tradeHandler), // Example
+        };
+
+        // State variables
         this.isRunning = false;
-        this.cycleInterval = null;
-        this.isCycleRunning = false;
-        this.nativeSymbol = this.config.NATIVE_CURRENCY_SYMBOL || 'ETH';
+        this.currentCycleTimeout = null; // To hold the timeout ID
 
-        // +++ ADD DEBUG LOG +++
-        logger.debug('[AE Constructor] Received config object keys:', Object.keys(config));
-        // Log specifically if FINDER_SETTINGS exists and its type
-        logger.debug(`[AE Constructor] config.FINDER_SETTINGS exists: ${!!config.FINDER_SETTINGS}, type: ${typeof config.FINDER_SETTINGS}`);
-        // Optionally log the FINDER_SETTINGS content if debug is needed (can be large)
-        // try { logger.debug('[AE Constructor] config.FINDER_SETTINGS content:', JSON.stringify(config.FINDER_SETTINGS, (k,v) => typeof v === 'bigint' ? v.toString() : v, 2)); } catch {}
-        // +++ END DEBUG LOG +++
-
-        try {
-            // Initialize components used within the cycle
-            this.poolScanner = new PoolScanner(config); // Pass full config
-            // This is where the error occurs if config is missing FINDER_SETTINGS
-            this.spatialFinder = new SpatialFinder(config); // Pass full config
-            // Initialize other finders here as they are added
-            // this.triangularFinder = new TriangularV3Finder(config);
-        } catch (error) {
-            logger.error(`[AE] CRITICAL ERROR during component init: ${error.message}`, error);
-            // Add more context to the wrapping error
-            throw new ArbitrageError(`InitializationError`, `Failed AE components: ${error.message}`, error);
-        }
-        logger.info('[AE v1.6] ArbitrageEngine components initialized successfully.'); // Updated version log
+        logger.info('[AE v1.7] ArbitrageEngine components initialized successfully.'); // Version bump
     }
 
+    /**
+     * Starts the main arbitrage cycle.
+     */
     async start() {
-        logger.info('[AE.start] Attempting to start engine...');
         if (this.isRunning) {
-            logger.warn('[AE.start] Engine already running.');
+            logger.info('[AE.start] Engine is already running.');
             return;
         }
         this.isRunning = true;
-        logger.info('[AE.start] Engine marked as running. Executing initial runCycle...');
+        logger.info('[AE.start] Attempting to start engine...');
 
-        try {
-            logger.debug('[AE.start] >>> Calling initial runCycle...');
-            await this.runCycle();
-            logger.debug('[AE.start] <<< Initial runCycle finished.');
-        } catch(error) {
-            logger.error('[AE.start] CRITICAL ERROR during initial runCycle execution:', error);
-            logger.info('[AE.start] Stopping engine due to initial cycle failure.');
-            this.stop(); // Ensure engine stops on initial cycle failure
-            return;
-        }
+        // Initial run cycle
+        logger.debug('[AE.start] >>> Calling initial runCycle...');
+        await this.runCycle();
+        logger.debug('[AE.start] <<< Initial runCycle finished.');
 
 
-        if (this.isRunning) { // Check if engine is still running after the initial cycle
-            logger.debug('[AE.start] Setting up cycle interval...');
-            this.cycleInterval = setInterval(() => {
-                this.runCycle().catch(intervalError => {
-                    logger.error('[AE Interval Error] Error caught from runCycle:', intervalError);
-                });
-            }, this.config.CYCLE_INTERVAL_MS);
+        // Schedule subsequent cycles
+        logger.debug('[AE.start] Setting up cycle interval...');
+        this.currentCycleTimeout = setInterval(
+            () => this.runCycle().catch(error => {
+                 logger.error('[AE.runCycle] Uncaught error in cycle:', error);
+                 handleError(error, 'ArbitrageEngine.runCycle'); // Centralized error handling
+            }),
+            this.config.CYCLE_INTERVAL_MS
+        );
 
-            if (this.cycleInterval) {
-                logger.info(`[AE.start] Engine started successfully. Cycle interval: ${this.config.CYCLE_INTERVAL_MS}ms`);
-                // Indicate that the bot is fully operational
-                logger.info('\n>>> BOT IS RUNNING <<<\n'); // Added clear indicator
-                logger.info('(Press Ctrl+C to stop)\n======================'); // Added stop instruction
-            } else {
-                 logger.error('[AE.start] Failed to set cycle interval!');
-                 this.stop(); // Ensure engine stops if interval setup fails
-            }
-        } else {
-            logger.warn('[AE.start] Engine stopped during initial runCycle.');
-        }
+        logger.info(`[AE.start] Engine started successfully. Cycle interval: ${this.config.CYCLE_INTERVAL_MS}ms`);
+         logger.info(`\n>>> BOT IS RUNNING <<<\n`);
+         logger.info(`(Press Ctrl+C to stop)\n======================`);
     }
 
+    /**
+     * Stops the main arbitrage cycle.
+     */
     stop() {
-        logger.info('[AE.stop] Stopping Arbitrage Engine...');
-        if (!this.isRunning && !this.cycleInterval) {
-            logger.warn('[AE.stop] Engine already stopped.');
+        if (!this.isRunning) {
+            logger.info('[AE.stop] Engine is not running.');
             return;
         }
-        this.isRunning = false; // Set flag first
-        if (this.cycleInterval) {
-            clearInterval(this.cycleInterval);
-            this.cycleInterval = null;
-            logger.debug('[AE.stop] Cycle interval cleared.');
-        }
-        this.isCycleRunning = false; // Ensure cycle running flag is reset
-        logger.info('[AE.stop] Arbitrage Engine stopped.');
+        clearInterval(this.currentCycleTimeout);
+        this.isRunning = false;
+        logger.info('[AE.stop] Engine stopped.');
+         logger.info(`\n>>> BOT STOPPED <<<\n`);
+         logger.info(`======================`);
     }
 
+    /**
+     * Executes one full cycle of scanning, finding, calculating, and dispatching trades.
+     */
     async runCycle() {
-        // Use debug level for frequent cycle start/end logs
+        logger.debug('===== Starting New Cycle =====');
         const cycleStartTime = Date.now();
-        logger.debug('[AE.runCycle] ===== Starting New Cycle =====');
 
-        if (!this.isRunning) {
-            logger.info('[AE.runCycle] Engine stopped.');
-            return;
-        }
-        if (this.isCycleRunning) {
-            logger.warn('[AE.runCycle] Previous cycle still running. Skipping.');
-            return;
-        }
-        this.isCycleRunning = true;
-
-        let cycleStatus = 'FAILED'; // Default status
         try {
-            const { poolStates, pairRegistry } = await this._fetchPoolData();
-            const allOpportunities = this._findOpportunities(poolStates, pairRegistry);
+            // 1. Fetch latest pool data
+            const fetchedPoolStates = await this._fetchPoolData();
+            if (!fetchedPoolStates || fetchedPoolStates.length === 0) {
+                logger.debug('[AE.runCycle] No pool states fetched in this cycle.');
+            } else {
+                // 2. Find potential arbitrage opportunities
+                const potentialOpportunities = await this._findOpportunities(fetchedPoolStates);
 
-            if (allOpportunities.length > 0) {
-                const profitableTrades = await this._calculateProfitability(allOpportunities);
-                if (profitableTrades.length > 0) {
-                    this._handleProfitableTrades(profitableTrades);
-                    // If STOP_ON_FIRST_EXECUTION is true and we handle profitable trades, stop the engine
-                    if (this.config.STOP_ON_FIRST_EXECUTION) {
-                         logger.info('[AE.runCycle] STOP_ON_FIRST_EXECUTION is true. Stopping engine after finding profitable trade(s).');
-                         this.stop(); // Stop the engine gracefully
-                    }
+                if (!potentialOpportunities || potentialOpportunities.length === 0) {
+                     logger.debug('[AE.runCycle] No potential opportunities found in this cycle.');
                 } else {
-                    // Use debug level when no profitable trades are found
-                    logger.debug(`[AE.runCycle] Opportunities found (${allOpportunities.length}) but none were profitable after calculation.`);
+                    // 3. Calculate profitability and filter
+                    const profitableOpportunities = await this._calculateProfitability(potentialOpportunities);
+
+                    if (!profitableOpportunities || profitableOpportunities.length === 0) {
+                         logger.debug(`[AE.runCycle] Opportunities found (${potentialOpportunities.length}) but none were profitable after calculation.`);
+                    } else {
+                        // 4. Dispatch profitable trades
+                        await this._dispatchTrades(profitableOpportunities);
+                    }
                 }
-            } else {
-                // Use debug level when no potential opportunities are found by finders
-                logger.debug('[AE.runCycle] No potential opportunities found by finders.');
             }
-
-            // If the cycle completes without errors and is still running (not stopped by STOP_ON_FIRST_EXECUTION)
-            if (this.isRunning) {
-                 cycleStatus = 'COMPLETED';
-            } else {
-                 // If engine stopped during the cycle (e.g. by STOP_ON_FIRST_EXECUTION)
-                 cycleStatus = 'STOPPED';
-            }
-
 
         } catch (error) {
-            logger.error('[AE.runCycle] !!!!!!!! ERROR during cycle !!!!!!!!!!');
-            logger.error(`[AE.runCycle] Error Type: ${error.constructor.name}, Msg: ${error.message}`);
-             // Log stack trace only for non-ArbitrageErrors or if LOG_LEVEL is debug/verbose
-            if (!(error instanceof ArbitrageError) || logger.level <= logger.levels.DEBUG) {
-                 logger.error('[AE.runCycle] Stack:', error.stack);
-            }
-            cycleStatus = `FAILED (${error.type || error.constructor.name})`; // Update status on failure
+            // Catch unexpected errors in the main cycle flow
+             logger.error('[AE.runCycle] Uncaught error in main cycle flow:', error);
+             handleError(error, 'ArbitrageEngine.runCycle'); // Use centralized handler
         } finally {
-            const cycleEndTime = Date.now();
-            const duration = cycleEndTime - cycleStartTime;
-            // Use debug level for frequent cycle start/end logs
-            logger.debug(`[AE.runCycle] ===== Cycle ${cycleStatus}. Duration: ${duration}ms =====`);
-            this.isCycleRunning = false; // Ensure flag is reset regardless of outcome
+            const cycleDuration = Date.now() - cycleStartTime;
+            logger.debug(`===== Cycle COMPLETED. Duration: ${cycleDuration}ms =====`);
         }
     }
 
+    /**
+     * Fetches the latest state for all configured pools.
+     * @returns {Promise<Array<object>|null>} Array of pool state objects, or null on critical error.
+     * @private
+     */
     async _fetchPoolData() {
-        // Use debug level for start/end of fetching
         logger.debug('[AE._fetchPoolData] Fetching pool states...');
-        if (!this.poolScanner) {
-             const errorMsg = "PoolScanner instance missing.";
-             logger.error(`[AE._fetchPoolData] CRITICAL: ${errorMsg}`);
-             throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
+        try {
+            const poolStates = await this.poolScanner.fetchPoolStates(this.config.POOL_CONFIGS);
+            logger.debug(`[AE._fetchPoolData] Fetched ${poolStates?.length || 0} pool states. Registry size: ${this.poolScanner.getPairRegistrySize()}`);
+            return poolStates;
+        } catch (error) {
+            logger.error('[AE._fetchPoolData] Failed to fetch pool data:', error);
+            handleError(error, 'ArbitrageEngine._fetchPoolData');
+            return null; // Return null on failure
         }
-        const { poolStates, pairRegistry } = await this.poolScanner.fetchPoolStates();
-        // Use debug level for summary of fetching
-        logger.debug(`[AE._fetchPoolData] Fetched ${poolStates.length} pool states. Registry size: ${pairRegistry.size}`);
-        return { poolStates, pairRegistry };
     }
 
-    _findOpportunities(poolStates, pairRegistry) {
-        // Use debug level for start of finding
+    /**
+     * Analyzes pool states to find potential arbitrage opportunities.
+     * @param {Array<object>} poolStates - Latest fetched pool state objects.
+     * @returns {Promise<Array<object>>} Array of potential opportunity objects.
+     * @private
+     */
+    async _findOpportunities(poolStates) {
         logger.debug('[AE._findOpportunities] Finding potential opportunities...');
-        let allOpportunities = [];
+        this.spatialFinder.updateRegistry(poolStates); // Update the finder's internal pool registry
+         // this.triangularV3Finder.updateRegistry(poolStates); // Update other finders
 
-        if (this.spatialFinder && pairRegistry) {
-             // Update the finder's internal registry if it uses one
-             // Note: SpatialFinder v1.12 might not use this method explicitly anymore,
-             // it might rely on the pairRegistry passed to findArbitrage.
-             // Keeping this call here as a potential future hook or if the finder implementation changes.
-            try {
-                 if (typeof this.spatialFinder.updatePairRegistry === 'function') {
-                      this.spatialFinder.updatePairRegistry(pairRegistry);
-                 } else {
-                      logger.debug('[AE._findOpportunities] SpatialFinder does not have updatePairRegistry method.');
-                 }
-            } catch (e) {
-                 logger.warn(`[AE._findOpportunities] Error calling updatePairRegistry on SpatialFinder: ${e.message}`);
-            }
-        }
-
-
-        if (this.spatialFinder && poolStates.length > 0) {
-            // Use debug level for starting a specific finder
-            logger.debug('[AE._findOpportunities] Running SpatialFinder...');
-            const spatialOpportunities = this.spatialFinder.findArbitrage(poolStates); // Pass poolStates directly
-            // Use debug level for finder results summary
-            logger.debug(`[AE._findOpportunities] SpatialFinder found ${spatialOpportunities.length} potentials.`);
-            allOpportunities = allOpportunities.concat(spatialOpportunities);
-        } else if (!this.spatialFinder) {
-            logger.warn("[AE._findOpportunities] SpatialFinder instance missing.");
-        }
-
-        // Add other finders here as they are added
-        // if (this.triangularFinder && poolStates.length > 0) {
-        //      logger.debug('[AE._findOpportunities] Running TriangularV3Finder...');
-        //      const triangularOpportunities = this.triangularFinder.findArbitrage(poolStates, pairRegistry); // Triangular needs pairRegistry
-        //      logger.debug(`[AE._findOpportunities] TriangularV3Finder found ${triangularOpportunities.length} potentials.`);
-        //      allOpportunities = allOpportunities.concat(triangularOpportunities);
-        // } else if (!this.triangularFinder) {
-        //      logger.warn("[AE._findOpportunities] TriangularV3Finder instance missing.");
-        // }
-
-
-        // Use debug level for total potentials found summary
-        logger.debug(`[AE._findOpportunities] Total potential opportunities found: ${allOpportunities.length}`);
-        return allOpportunities;
-    }
-
-    async _calculateProfitability(opportunities) {
-        // Use debug level for start of calculation
-        logger.debug(`[AE._calculateProfitability] Calculating profitability for ${opportunities.length} opportunities...`);
-        if (!this.profitCalculator) {
-             const errorMsg = "ProfitCalculator instance missing!";
-             logger.error(`[AE._calculateProfitability] CRITICAL: ${errorMsg}`);
-             throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
-        }
-         if (!this.flashSwapManager) {
-             const errorMsg = "FlashSwapManager instance missing!";
-             logger.error(`[AE._calculateProfitability] CRITICAL: ${errorMsg}`);
-             throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
-         }
-
-        let signerAddress = null;
+        let potentialOpportunities = [];
         try {
-            signerAddress = await this.flashSwapManager.getSignerAddress();
-            if (!signerAddress || !ethers.isAddress(signerAddress) || signerAddress === ethers.ZeroAddress) {
-                 throw new Error(`Invalid signer address returned: ${signerAddress}`);
-            }
-            logger.debug(`[AE._calculateProfitability] Using signer address for gas estimation: ${signerAddress}`);
-        } catch (addrError) {
-            logger.error(`[AE._calculateProfitability] CRITICAL: Could not get signer address: ${addrError.message}`);
-            throw new ArbitrageError(`Failed to retrieve signer address: ${addrError.message}`, 'INTERNAL_ERROR', addrError);
+            // Run Spatial Finder
+            const spatialOpportunities = this.spatialFinder.findArbitrage(poolStates);
+            logger.debug(`[AE._findOpportunities] SpatialFinder found ${spatialOpportunities?.length || 0} potentials.`);
+            potentialOpportunities = potentialOpportunities.concat(spatialOpportunities);
+
+            // Run other finders as implemented
+            // const triangularOpportunities = this.triangularV3Finder.findArbitrage(poolStates);
+            // logger.debug(`[AE._findOpportunities] TriangularV3Finder found ${triangularOpportunities?.length || 0} potentials.`);
+            // potentialOpportunities = potentialOpportunities.concat(triangularOpportunities);
+
+        } catch (error) {
+            logger.error('[AE._findOpportunities] Error during opportunity finding:', error);
+             handleError(error, 'ArbitrageEngine._findOpportunities');
+             // Continue with any opportunities found before the error, or an empty array
         }
 
-
-        const profitableTrades = await this.profitCalculator.calculate(opportunities, signerAddress);
-
-        // Keep info level for the summary of profitable trades found
-        logger.info(`[AE._calculateProfitability] Found ${profitableTrades.length} profitable trades (after gas/threshold).`);
-
-        return profitableTrades;
+        logger.debug(`[AE._findOpportunities] Total potential opportunities found: ${potentialOpportunities.length}`);
+        return potentialOpportunities;
     }
 
-    _handleProfitableTrades(profitableTrades) {
-        // Keep info level for the start and end of handling profitable trades - this is a key event!
-        logger.info(`[AE._handleProfitableTrades] --- ✅ Profitable Trades Found (${profitableTrades.length}) ---`);
-        profitableTrades.forEach((trade, index) => {
-            this._logTradeDetails(trade, index + 1);
-        });
-
-        // Emit the event for the TradeHandler
-        this.emit('profitableOpportunities', profitableTrades);
-        logger.info(`[AE._handleProfitableTrades] --- Emitted 'profitableOpportunities' event ---`);
-    }
-
-    _logTradeDetails(trade, index) {
-        // Keep info level for detailed trade logs - this happens only for profitable trades
+    /**
+     * Calculates the estimated profitability for potential opportunities and filters them.
+     * @param {Array<object>} potentialOpportunities - Array of potential opportunity objects.
+     * @returns {Promise<Array<object>>} Array of profitable opportunity objects.
+     * @private
+     */
+    async _calculateProfitability(potentialOpportunities) {
+        logger.debug(`[AE._calculateProfitability] Calculating profitability for ${potentialOpportunities.length} opportunities...`);
+        let profitableOpportunities = [];
         try {
-            const pathDesc = trade.path?.map(p => {
-                const symbols = p.poolState?.token0Symbol && p.poolState?.token1Symbol ? `${p.poolState.token0Symbol}/${p.poolState.token1Symbol}` : '?/?';
-                return `${p.dex || '?'}(${symbols})`;
-            }).join('->') || 'N/A';
-
-            const formatEth = (weiStr) => {
-                if (weiStr === null || weiStr === undefined) return 'N/A';
-                try { return ethers.formatEther(BigInt(weiStr)); } catch { return 'Error'; }
-            };
-             const formatUnits = (amountStr, tokenSymbol) => {
-                if (amountStr === null || amountStr === undefined || !tokenSymbol) return 'N/A';
-                try {
-                    const token = this.config.TOKENS[tokenSymbol];
-                    const decimals = token?.decimals || 18;
-                    // Ensure amountStr is a string or BigInt before passing to formatUnits
-                    return ethers.formatUnits(BigInt(amountStr), decimals);
-                } catch (e) {
-                    logger.debug(`[AE._logTradeDetails] Error formatting units for ${amountStr} ${tokenSymbol}: ${e.message}`);
-                    return 'Error';
-                }
-            };
-
-            logger.info(`  [${index}] ${trade.type} | ${pathDesc}`);
-            logger.info(`      In: ${formatUnits(trade.amountIn, trade.tokenIn?.symbol)} ${trade.tokenIn?.symbol} | Sim Out: ${formatUnits(trade.amountOut, trade.tokenOut?.symbol)} ${trade.tokenOut?.symbol}`);
-            logger.info(`      NET Profit: ~${formatEth(trade.netProfitNativeWei)} ${this.nativeSymbol} (Gas Cost ~${formatEth(trade.gasCostNativeWei)} ${this.nativeSymbol})`);
-            logger.info(`      Threshold Used (Native): ${formatEth(trade.thresholdNativeWei)} ${this.nativeSymbol}`);
-            // Display Tithe amount if available
-            if (trade.titheAmountNativeWei !== null && trade.titheAmountNativeWei !== undefined) {
-                 logger.info(`      Tithe Amount: ~${formatEth(trade.titheAmountNativeWei)} ${this.nativeSymbol}`);
-            }
-            if (trade.profitPercentage !== null && trade.profitPercentage !== undefined) {
-                 logger.info(`      Profit Percentage: ~${trade.profitPercentage.toFixed(4)}%`);
-            }
-             // Add flash loan details if available
-             if (trade.flashLoanDetails) {
-                  logger.info(`      Flash Loan: ${formatUnits(trade.flashLoanDetails.amount, trade.flashLoanDetails.token.symbol)} ${trade.flashLoanDetails.token.symbol} (Fee: ${formatEth(trade.flashLoanDetails.feeNativeWei)} ${this.nativeSymbol})`);
+             // Pass the signer address obtained via FlashSwapManager to the calculator
+             const signerAddress = await this.flashSwapManager.getSignerAddress();
+             if (!signerAddress) {
+                 logger.error('[AE._calculateProfitability] Could not get signer address from FlashSwapManager. Cannot calculate profitability.');
+                 // Return empty array, but do not throw here. The error is logged.
+                 return [];
              }
+             // Calculate method now gets signerAddress implicitly via its constructor/instance property
+             profitableOpportunities = await this.profitCalculator.calculate(potentialOpportunities);
 
-
-        } catch (logError) {
-            logger.error(`[AE._logTradeDetails] Error logging trade details for index ${index}: ${logError.message}`);
-            // Log the raw trade object at debug level on error
-            try { logger.debug("Raw trade object:", JSON.stringify(trade, (k,v) => typeof v === 'bigint' ? v.toString() : v, 2)); } catch { logger.debug("Raw trade object: (Cannot stringify)");}
+        } catch (error) {
+            // This catch handles errors thrown by the ProfitCalculator itself (e.g., validation)
+             logger.error('[AE._calculateProfitability] Error during profitability calculation:', error);
+             handleError(error, 'ArbitrageEngine._calculateProfitability');
+             // Return empty array on failure
         }
+
+        return profitableOpportunities;
     }
 
-} // End ArbitrageEngine class
+    /**
+     * Dispatches the profitable trades for execution.
+     * @param {Array<object>} profitableOpportunities - Array of profitable opportunity objects.
+     * @private
+     */
+    async _dispatchTrades(profitableOpportunities) {
+        logger.info(`[AE._dispatchTrades] Found ${profitableOpportunities.length} profitable trades. Dispatching...`);
+
+        // For now, just handle the first profitable opportunity and stop if configured.
+        if (profitableOpportunities.length > 0) {
+            const bestOpportunity = profitableOpportunities[0]; // Simple selection: take the first one
+
+            // Pass the opportunity to the TradeHandler
+            try {
+                 await this.tradeHandler.handleTrade(bestOpportunity);
+                 logger.info('[AE._dispatchTrades] Trade handling process completed.');
+
+                 // Stop bot after first successful trade if configured
+                 if (this.config.STOP_ON_FIRST_EXECUTION) {
+                     logger.info('[AE._dispatchTrades] STOP_ON_FIRST_EXECUTION is true. Stopping engine.');
+                     this.stop(); // Stop the cycle
+                 }
+
+            } catch (error) {
+                 logger.error('[AE._dispatchTrades] Error handling trade:', error);
+                 handleError(error, 'ArbitrageEngine._dispatchTrades');
+                 // Continue to next cycle even if trade handling fails
+            }
+        }
+    }
+}
 
 module.exports = ArbitrageEngine;
