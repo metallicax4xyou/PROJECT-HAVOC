@@ -1,6 +1,5 @@
 // bot.js
-// --- VERSION v1.7 ---
-// Refactored profitableOpportunities handler to core/tradeHandler.js
+// --- VERSION 1.2 --- Pass TradeHandler class constructor to ArbitrageEngine.
 
 require('dotenv').config();
 
@@ -16,8 +15,8 @@ const SwapSimulator = require('./core/swapSimulator');
 const GasEstimator = require('./utils/gasEstimator');
 const config = require('./config');
 
-// --- Import the new trade handler ---
-const { processAndExecuteTrades } = require('./core/tradeHandler');
+// --- Import the TradeHandler CLASS constructor ---
+const TradeHandler = require('./core/tradeHandler');
 // --- ---
 
 // --- Graceful Shutdown ---
@@ -105,7 +104,8 @@ async function main() {
          }
          logger.debug('[Main] Step 7b: Calling ArbitrageEngine constructor...');
          try {
-             arbitrageEngineInstance = new ArbitrageEngine(config, provider, swapSimulatorInstance, gasEstimatorInstance, flashSwapManagerInstance);
+             // Pass the TradeHandler CLASS constructor as the sixth argument <-- ADDED TradeHandler CLASS HERE
+             arbitrageEngineInstance = new ArbitrageEngine(config, provider, swapSimulatorInstance, gasEstimatorInstance, flashSwapManagerInstance, TradeHandler);
          } catch (aeError) {
              logger.error("!!! CRASH DURING ArbitrageEngine INSTANTIATION !!!", aeError);
              if (aeError instanceof Error) { logger.error(`AE Error Type: ${aeError.constructor.name}, Message: ${aeError.message}`); }
@@ -117,22 +117,9 @@ async function main() {
 
         // --- STEP 8: Setup Listeners (Simplified) ---
         logger.info('[Main] Step 8: Setting up event listeners...');
-        arbitrageEngineInstance.on('profitableOpportunities', (trades) => {
-            // Call the dedicated handler function, passing necessary context
-            // No need for async here unless you want to wait for the handler to finish (not recommended for event emitters)
-             processAndExecuteTrades(
-                 trades,
-                 config,
-                 flashSwapManagerInstance,
-                 gasEstimatorInstance,
-                 logger // Pass the global logger instance
-             ).catch(handlerError => {
-                  // Catch errors specifically from the handler if needed, though it should handle internally
-                  logger.error("[Main EVENT] Uncaught error from trade handler:", handlerError);
-                  ErrorHandler?.handleError(handlerError, 'TradeHandlerTopLevelCatch');
-             });
-        });
-        logger.info('[Main] Step 8: Event listeners set up.');
+        // The ArbitrageEngine now handles calling tradeHandler.handleTrades internally.
+        // The event emitter 'profitableOpportunities' is now internal to AE.
+        logger.info('[Main] Step 8: Event listeners set up. AE handles dispatch.');
 
 
         // --- STEP 9: Start Engine ---
