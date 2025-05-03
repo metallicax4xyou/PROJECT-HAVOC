@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.3 --- Adjusted hardcoded localFork key format & env var usage based on HH8 error.
+// --- VERSION v1.4 --- Adjusted hardcoded localFork key format & env var usage for HH8 error consistency.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -12,18 +12,17 @@ require("dotenv").config(); // Ensure .env variables are loaded at the very top
 const INFURA_API_KEY = process.env.INFURA_API_KEY || "";
 const ALCHEMY_API_KEY_ARBITRUM = process.env.ARBITRUM_RPC_URLS?.split(',')[0]?.replace(/.*alchemy.com\/v2\//, "") || ""; // Extract key from Alchemy URL if used
 
-// IMPORTANT: Hardhat's config loading seems to expect the raw 64-char hex string (32 bytes) *without* the 0x prefix
-// for the string value itself.
-// Let's define the raw private key string from the environment variable.
+// Recommended format for private keys in Hardhat networks accounts array is often the raw 64-char hex string.
+// Let's derive that from the environment variable, stripping any '0x'.
 const PRIVATE_KEY_RAW_ENV = process.env.PRIVATE_KEY?.replace(/^0x/, "") || "";
 
 // Hardhat's standard default test account private key (raw, 64 hex chars)
 const HARDHAT_DEFAULT_PRIVATE_KEY_RAW = "ac0974de85431e2a29a1bcedf3cfb9226611458f";
 
 // Determine the accounts array for networks other than localFork.
-// If a valid raw PK is in the environment variable (length 64), use it with the 0x prefix.
+// If a valid raw PK is in the environment variable (length 64), use it in the expected Hardhat format (raw string).
 // Otherwise, the array will be empty.
-const accountsForLiveNetworks = (PRIVATE_KEY_RAW_ENV.length === 64) ? [`0x${PRIVATE_KEY_RAW_ENV}`] : [];
+const accountsForLiveNetworks = (PRIVATE_KEY_RAW_ENV.length === 64) ? [PRIVATE_KEY_RAW_ENV] : [];
 
 // Access specific RPC URLs from .env
 const ARBITRUM_RPC_URL = process.env.ARBITRUM_RPC_URLS?.split(',')[0] || `https://arb-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY_ARBITRUM}`;
@@ -59,9 +58,9 @@ module.exports = {
     // Configured to fork Arbitrum Mainnet at a specific block.
     localFork: {
       url: "http://127.0.0.1:8545", // Hardhat node RPC endpoint
-      // *** CORRECTED: Use the RAW 64-char private key string in the accounts array ***
-      // Hardhat seems to interpret string elements in the 'accounts' array as raw private keys.
-      accounts: [`0x${HARDHAT_DEFAULT_PRIVATE_KEY_RAW}`],
+      // *** CORRECTED AGAIN: Use the RAW 64-char private key string in the accounts array ***
+      // This format seems to be what the HH8 error specifically expects in the array.
+      accounts: [HARDHAT_DEFAULT_PRIVATE_KEY_RAW],
       // Forking Configuration (Enabled when using this network)
       forking: {
         url: ARBITRUM_RPC_URL, // Use the Arbitrum Mainnet RPC URL from .env
