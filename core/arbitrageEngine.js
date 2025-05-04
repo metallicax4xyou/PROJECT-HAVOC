@@ -1,5 +1,5 @@
 // core/arbitrageEngine.js
-// --- VERSION v1.15 --- Temporarily commented out GasEstimatorClass validation to debug instantiation flow.
+// --- VERSION v1.16 --- Added debug log for FlashSwap ABI retrieved from FlashSwapManager.
 
 const { EventEmitter } = require('events');
 const { ethers } = require('ethers');
@@ -16,25 +16,23 @@ class ArbitrageEngine extends EventEmitter {
      * @param {object} config - Application configuration.
      * @param {ethers.Provider} provider - Ethers provider.
      * @param {SwapSimulator} swapSimulator - Instance of SwapSimulator.
-     * @param {GasEstimator} GasEstimatorClass - The GasEstimator class constructor. <-- ACCEPT GAS ESTIMATOR CLASS
+     * @param {GasEstimator} GasEstimatorClass - The GasEstimator class constructor.
      * @param {FlashSwapManager} flashSwapManager - Instance of FlashSwapManager.
      * @param {TradeHandler} TradeHandlerClass - The TradeHandler class constructor.
      */
     constructor(config, provider, swapSimulator, GasEstimatorClass, flashSwapManager, TradeHandlerClass) {
         super();
-        logger.info('[AE v1.15] Initializing ArbitrageEngine components...'); // Version bump
+        logger.info('[AE v1.16] Initializing ArbitrageEngine components...'); // Version bump
         // Validation...
         if (!config) throw new ArbitrageError('InitializationError', 'AE: Missing config.');
         if (!provider) throw new ArbitrageError('InitializationError', 'AE: Missing provider.');
         if (!swapSimulator?.simulateSwap) throw new ArbitrageError('InitializationError', 'AE: Invalid SwapSimulator.');
-         // Validate the GasEstimator Class constructor
-        // if (!GasEstimatorClass || typeof GasEstimatorClass !== 'function' || !GasEstimatorClass.prototype || typeof GasEstimatorClass.prototype.estimateTxGasCost !== 'function') {
-        //      throw new ArbitrageError('InitializationError', 'AE: Invalid GasEstimator Class constructor provided.');
-        // }
+        if (!GasEstimatorClass || typeof GasEstimatorClass !== 'function' || !GasEstimatorClass.prototype || typeof GasEstimatorClass.prototype.estimateTxGasCost !== 'function') {
+             throw new ArbitrageError('InitializationError', 'AE: Invalid GasEstimator Class constructor provided.');
+        }
         if (!flashSwapManager || typeof flashSwapManager.initiateAaveFlashLoan !== 'function' || typeof flashSwapManager.getFlashSwapABI !== 'function') {
              throw new ArbitrageError('InitializationError', 'AE: Invalid FlashSwapManager instance required (Missing initiate methods or getFlashSwapABI).');
         }
-        // Validate the TradeHandler Class constructor
         if (!TradeHandlerClass || typeof TradeHandlerClass !== 'function' || !TradeHandlerClass.prototype || typeof TradeHandlerClass.prototype.handleTrades !== 'function') {
              throw new ArbitrageError('InitializationError', 'AE: Invalid TradeHandler Class constructor provided.');
         }
@@ -48,24 +46,30 @@ class ArbitrageEngine extends EventEmitter {
         // Initialize child components
         this.poolScanner = new PoolScanner(config);
         this.spatialFinder = new SpatialFinder(config);
+        // this.triangularV3Finder = new TriangularV3Finder(config);
 
 
         // --- GET ABI from FlashSwapManager and initialize GasEstimator ---
         const flashSwapABI = this.flashSwapManager.getFlashSwapABI();
-        if (!flashSwapABI) {
+
+        // --- ADD DEBUG LOG HERE ---
+        logger.debug('[AE Init] FlashSwap ABI retrieved from FSM:', flashSwapABI ? 'Valid Array' : 'Null/Undefined', Array.isArray(flashSwapABI) ? `(Length: ${flashSwapABI.length})` : '');
+        // --- END DEBUG LOG ---
+
+        if (!flashSwapABI) { // Removed !Array.isArray(flashSwapABI) check here, let GasEstimator handle it
              const errorMsg = "Failed to get FlashSwap ABI from FlashSwapManager.";
              logger.error(`[AE Init] CRITICAL: ${errorMsg}`);
              throw new ArbitrageError('InitializationError', errorMsg);
         }
         // Initialize GasEstimator, passing config, provider, and the FlashSwap ABI
-        this.gasEstimator = new GasEstimatorClass(config, provider, flashSwapABI); // THIS INSTANTIATES the class!
+        this.gasEstimator = new GasEstimatorClass(config, provider, flashSwapABI); // Pass FlashSwap ABI
 
 
         // Initialize ProfitCalculator, passing required dependencies
-        this.profitCalculator = new ProfitCalculator(config, provider, swapSimulator, this.gasEstimator, flashSwapManager);
+        this.profitCalculator = new ProfitCalculator(config, provider, swapSimulator, this.gasEstimator, flashSwapManager); // Pass the initialized gasEstimator
 
         // Initialize TradeHandler INSTANCE
-        this.tradeHandler = new TradeHandlerClass(config, provider, flashSwapManager, this.gasEstimator, logger);
+        this.tradeHandler = new TradeHandlerClass(config, provider, flashSwapManager, this.gasEstimator, logger); // Pass the initialized gasEstimator
 
 
         // State variables
@@ -75,7 +79,7 @@ class ArbitrageEngine extends EventEmitter {
         this.nativeSymbol = this.config.NATIVE_CURRENCY_SYMBOL || 'ETH';
 
 
-        logger.info('[AE v1.15] ArbitrageEngine components initialized successfully.'); // Version bump
+        logger.info('[AE v1.16] ArbitrageEngine components initialized successfully.'); // Version bump
     }
 
     /**
@@ -93,7 +97,7 @@ class ArbitrageEngine extends EventEmitter {
 
         // Initial run cycle
         try {
-            logger.debug('[AE.start] >>> Calling initial runCycle... (v1.15)'); // Version bump
+            logger.debug('[AE.start] >>> Calling initial runCycle... (v1.16)');
             await this.runCycle();
             logger.debug('[AE.start] <<< Initial runCycle finished.');
         } catch(error) {
@@ -101,6 +105,8 @@ class ArbitrageEngine extends EventEmitter {
             handleError(error, 'ArbitrageEngine.initialRunCycle');
             logger.info('[AE.start] Stopping engine due to initial cycle failure.');
             this.stop();
+            // Optionally re-throw if you want the main bot.js script to catch it
+            // throw error;
         }
 
 
@@ -108,9 +114,12 @@ class ArbitrageEngine extends EventEmitter {
         if (this.isRunning) {
             logger.debug('[AE.start] Setting up cycle interval...');
             this.cycleInterval = setInterval(() => {
+                // Wrap runCycle call in try/catch for interval errors
                 this.runCycle().catch(intervalError => {
                     logger.error("[AE Interval Error] Uncaught error from runCycle in interval:", intervalError);
                     handleError(intervalError, 'ArbitrageEngine.runCycleInterval');
+                    // Consider stopping the bot if persistent errors occur in the interval
+                    // if (shouldStopOnIntervalError(intervalError)) { this.stop(); }
                 });
             }, this.config.CYCLE_INTERVAL_MS);
 
@@ -147,7 +156,7 @@ class ArbitrageEngine extends EventEmitter {
 
     async runCycle() {
         const cycleStartTime = Date.now();
-        logger.debug('[AE.runCycle] ===== Starting New Cycle (v1.15) ====='); // Version bump in cycle log
+        logger.debug('[AE.runCycle] ===== Starting New Cycle (v1.16) ====='); // Version bump in cycle log
 
         if (!this.isRunning) {
             logger.debug('[AE.runCycle] Engine is stopping. Skipping cycle execution.');
@@ -162,24 +171,30 @@ class ArbitrageEngine extends EventEmitter {
 
         let cycleStatus = 'FAILED';
         try {
+            // 1. Fetch latest pool data
             const { poolStates, pairRegistry } = await this._fetchPoolData();
+
 
             if (!poolStates || poolStates.length === 0) {
                 logger.debug('[AE.runCycle] No pool states fetched in this cycle.');
                 cycleStatus = 'COMPLETED (No Data)';
             } else {
+                // 2. Find potential arbitrage opportunities
                 const potentialOpportunities = this._findOpportunities(poolStates, pairRegistry);
+
 
                 if (!potentialOpportunities || potentialOpportunities.length === 0) {
                      logger.debug(`[AE.runCycle] No potential opportunities found after finder execution.`);
                      cycleStatus = 'COMPLETED (No Potential Opps)';
                 } else {
+                    // 3. Calculate profitability and filter
                     const profitableOpportunities = await this._calculateProfitability(potentialOpportunities);
 
                     if (!profitableOpportunities || profitableOpportunities.length === 0) {
                          logger.debug(`[AE.runCycle] Opportunities found (${potentialOpportunities.length}) but none were profitable after calculation.`);
                          cycleStatus = 'COMPLETED (No Profitable Opps)';
                     } else {
+                        // 4. Dispatch profitable trades
                         logger.info(`[AE.runCycle] Found ${profitableOpportunities.length} profitable opportunities! Dispatching trades.`);
                         await this._handleProfitableTrades(profitableOpportunities);
                          cycleStatus = 'COMPLETED (Trades Dispatched)';
@@ -242,6 +257,10 @@ class ArbitrageEngine extends EventEmitter {
              logger.debug('[AE._findOpportunities] No pool states available for SpatialFinder.');
         }
 
+
+        // Triangular Finder (Add logic when implemented)
+
+
         logger.debug(`[AE._findOpportunities] Total potential opportunities found: ${allOpportunities.length}`);
         return allOpportunities;
     }
@@ -299,7 +318,6 @@ class ArbitrageEngine extends EventEmitter {
                 try {
                     if (typeof amountBigInt !== 'bigint') amountBigInt = BigInt(amountBigInt);
                     if (amountBigInt === 0n) return `0.0 ${token.symbol || '?'}`;
-
                     return `${ethers.formatUnits(amountBigInt, token.decimals)} ${token.symbol || '?'}`;
                 } catch (e) {
                     logger.debug(`[AE._logTradeDetails] Error formatting amount ${amountBigInt} for ${token?.symbol}: ${e.message}`);
@@ -353,6 +371,8 @@ class ArbitrageEngine extends EventEmitter {
             try { logger.debug("Raw trade object:", JSON.stringify(trade, (k,v) => typeof v === 'bigint' ? v.toString() : v, 2)); } catch { logger.debug("Raw trade object: (Cannot stringify)");}
         }
     }
-}
 
+} // End ArbitrageEngine class
+
+// Export the class
 module.exports = ArbitrageEngine;
