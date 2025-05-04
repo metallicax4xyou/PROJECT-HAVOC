@@ -1,20 +1,23 @@
 // core/profitCalculator.js
-// --- VERSION v2.10 --- Explicitly convert signerAddress to string before passing to GasEstimator.
+// --- VERSION v2.12 --- Extracted detailed profit calculation to core/calculation/profitDetailCalculator.js.
 
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
-const { calculateEffectivePrices, PRICE_SCALE, TEN_THOUSAND } = require('./calculation/priceCalculation'); // Import price calc functions, PRICE_SCALE, TEN_THOUSAND
+// Removed PRICE_SCALE, TEN_THOUSAND import from priceCalculation as they are now used in profitDetailCalculator
+const { calculateEffectivePrices } = require('./calculation/priceCalculation'); // Only need price calc functions if used here
 const { ArbitrageError } = require('../utils/errorHandler');
 const { TOKENS } = require('../constants/tokens'); // Import TOKENS to look up token objects
+const priceConverter = require('../utils/priceConverter'); // Import the price converter utility
+// Import the new detailed profit calculator utility
+const { calculateDetailedProfit } = require('./calculation/profitDetailCalculator'); // <-- NEW IMPORT
 
 class ProfitCalculator {
-    constructor(config, provider, swapSimulator, gasEstimator, flashSwapManager) { // Added flashSwapManager to constructor args
-        logger.info('[ProfitCalculator v2.10] Initializing. Helpers moved to profitCalcUtils. Handles Aave fee (9 BPS).'); // Version bump
+    constructor(config, provider, swapSimulator, gasEstimator, flashSwapManager) {
+        logger.info('[ProfitCalculator v2.12] Initializing. Detailed calculation moved to profitDetailCalculator.'); // Version bump
         if (!config) throw new ArbitrageError('ProfitCalculatorInit', 'Missing config.');
         if (!provider) throw new ArbitrageError('ProfitCalculatorInit', 'Missing provider.');
         if (!swapSimulator?.simulateSwap) throw new ArbitrageError('ProfitCalculatorInit', 'Invalid SwapSimulator instance.');
-        if (!gasEstimator?.estimateTxGasCost) throw new ArbitrageError('ProfitCalculatorInit', 'Invalid GasEstimator instance.');
-        // Added validation for flashSwapManager
+        if (!gasEstimator?.estimateTxGasCost || typeof gasEstimator.estimateTxGasCost !== 'function') throw new ArbitrageError('ProfitCalculatorInit', 'Invalid GasEstimator instance or missing method.');
          if (!flashSwapManager || typeof flashSwapManager.getSignerAddress !== 'function') {
              throw new ArbitrageError('ProfitCalculatorInit', 'Invalid FlashSwapManager instance.');
          }
@@ -24,36 +27,51 @@ class ProfitCalculator {
         this.provider = provider;
         this.swapSimulator = swapSimulator;
         this.gasEstimator = gasEstimator;
-        this.flashSwapManager = flashSwapManager; // Store FlashSwapManager instance
+        this.flashSwapManager = flashSwapManager;
 
         // Read config values, converting BigInt strings if necessary
-        // Assuming these are already BigInts from config loader if defined in network files
-        this.minProfitThresholds = config.MIN_PROFIT_THRESHOLDS; // Should be an object { SYMBOL: number, ... } - Note: these are numbers in config, converted to BigInt later
-        this.profitBufferPercent = BigInt(config.PROFIT_BUFFER_PERCENT); // Percentage as BigInt
-        this.aaveFlashLoanFeeBps = BigInt(config.AAVE_FLASH_LOAN_FEE_BPS); // Basis points as BigInt
+         this.minProfitThresholds = config.MIN_PROFIT_THRESHOLDS; // Used directly in calculateDetailedProfit
+         // Safely read AAVE_FLASH_LOAN_FEE_BPS, default to 9 (basis points) if missing/invalid
+         this.aaveFlashLoanFeeBps = BigInt(config.AAVE_FLASH_LOAN_FEE_BPS || 9);
+         if (this.aaveFlashLoanFeeBps < 0n) { // Allow 0 fee
+              logger.warn('[ProfitCalculator Init] AAVE_FLASH_LOAN_FEE_BPS is negative. Ensure this is intended.');
+              // Don't change to 0n, pass the configured value, calculation utility should handle non-negative fees.
+         }
 
         // Find Native Currency Token object from config.TOKENS
         this.nativeCurrencyToken = Object.values(this.config.TOKENS).find(
              token => token.symbol?.toUpperCase() === this.config.NATIVE_CURRENCY_SYMBOL?.toUpperCase()
+             || (this.config.NATIVE_CURRENCY_ADDRESS && token.address?.toLowerCase() === this.config.NATIVE_CURRENCY_ADDRESS.toLowerCase())
          );
 
          if (!this.nativeCurrencyToken) {
-             logger.warn(`[ProfitCalculator v2.10] Could not identify Native Currency Token object from config.`); // Version bump
-             // Create a fallback token object if not found (assuming 18 decimals)
-             this.nativeCurrencyToken = {
-                 symbol: this.config.NATIVE_CURRENCY_SYMBOL || 'ETH',
-                 decimals: 18,
-                 address: ethers.ZeroAddress // Use ZeroAddress as a placeholder for native
-             };
-             logger.info(`[ProfitCalculator v2.10] Created fallback Native Currency Token object: ${this.nativeCurrencyToken.symbol}`); // Version bump
+              const wethAddr = '0x82af49447d8a07e3bd95bd0d56f35241523fbab1'.toLowerCase(); // Arbitrum WETH
+              const ethSymbol = 'ETH';
+              const foundWethOrEth = Object.values(this.config.TOKENS).find(
+                 token => token.symbol?.toUpperCase() === ethSymbol || token.address?.toLowerCase() === wethAddr
+              );
+
+              if (foundWethOrEth) {
+                  this.nativeCurrencyToken = foundWethOrEth;
+                   logger.warn(`[ProfitCalculator v2.12] Could not identify Native Currency Token by config.NATIVE_CURRENCY_SYMBOL/ADDRESS, but found a potential match (${this.nativeCurrencyToken.symbol}) in TOKENS. Using this as fallback.`); // Version bump
+              } else {
+                 logger.error(`[ProfitCalculator v2.12] CRITICAL: Could not identify Native Currency Token object from config.TOKENS by symbol "${this.config.NATIVE_CURRENCY_SYMBOL}" or address "${this.config.NATIVE_CURRENCY_ADDRESS}".`); // Version bump
+                 // Create a minimal fallback token object if not found (assuming 18 decimals) - This is a last resort!
+                 this.nativeCurrencyToken = {
+                     symbol: this.config.NATIVE_CURRENCY_SYMBOL || 'ETH', // Use configured symbol or default
+                     decimals: 18, // Assume 18 decimals for native like ETH/WETH
+                     address: this.config.NATIVE_CURRENCY_ADDRESS || ethers.ZeroAddress // Use configured address or ZeroAddress
+                 };
+                 logger.error(`[ProfitCalculator v2.12] Using minimal fallback Native Currency Token object: ${this.nativeCurrencyToken.symbol} (${this.nativeCurrencyToken.address}) with ${this.nativeCurrencyToken.decimals} decimals. Price conversions may be inaccurate or fail.`); // Version bump
+              }
          }
 
-        logger.debug('[ProfitCalculator v2.10] Initialized with config:', { // Version bump
-            minProfitThresholds: this.minProfitThresholds, // Log the object structure
-            profitBufferPercent: this.profitBufferPercent.toString(),
+        logger.debug('[ProfitCalculator v2.12] Initialized with config:', { // Version bump
+            // minProfitThresholds: this.minProfitThresholds, // Don't log full object here, used in detail calc
             aaveFlashLoanFeeBps: this.aaveFlashLoanFeeBps.toString(),
             nativeCurrencySymbol: this.nativeCurrencyToken.symbol,
-            nativeCurrencyDecimals: this.nativeCurrencyToken.decimals
+            nativeCurrencyDecimals: this.nativeCurrencyToken.decimals,
+             nativeCurrencyAddress: this.nativeCurrencyToken.address
         });
     }
 
@@ -64,340 +82,178 @@ class ProfitCalculator {
      * @param {Array<object>} opportunities - Array of potential opportunity objects from finders.
      * @returns {Promise<Array<object>>} Array of profitable opportunity objects, augmented with profit/cost details.
      */
-    async calculate(opportunities) { // Removed signerAddress parameter here, get it from manager
-        logger.debug(`[ProfitCalculator] Calculating profitability for ${opportunities.length} opportunities...`);
+    async calculate(opportunities) {
+        const logPrefix = `[ProfitCalculator v2.12]`; // Version bump
+        logger.debug(`${logPrefix} Calculating profitability for ${opportunities.length} opportunities...`);
         const profitableTrades = [];
 
         // Get signerAddress from the stored FlashSwapManager instance
         let signerAddress;
         try {
-            // --- Explicitly get and convert signer address to string ---
             const rawSignerInfo = await this.flashSwapManager.getSignerAddress();
-             // Check if the result is a string address, or if it's the unexpected array/object
              if (typeof rawSignerInfo === 'string' && ethers.isAddress(rawSignerInfo)) {
                  signerAddress = rawSignerInfo; // Use the string address if valid
-                 logger.debug(`[ProfitCalculator] Obtained signer address string from manager: ${signerAddress}`);
+                 logger.debug(`${logPrefix} Obtained signer address string from manager: ${signerAddress}`);
              } else {
-                 // Log the unexpected type/value
-                 const errorMsg = `FlashSwapManager.getSignerAddress returned unexpected format: ${rawSignerInfo}`;
-                 logger.error(`[ProfitCalculator] ${errorMsg}. Skipping all opportunities.`);
-                 // Return empty array as we cannot proceed without a valid signer address string
-                 return [];
+                 const errorMsg = `FlashSwapManager.getSignerAddress returned unexpected format: ${rawSignerInfo}. Expected a string address.`;
+                 logger.error(`${logPrefix} ${errorMsg}. Skipping all opportunities.`);
+                 return []; // Return empty array as we cannot proceed without a valid signer address string
              }
 
         } catch (error) {
             const errorMsg = `Failed to get signer address from FlashSwapManager: ${error.message}`;
-            logger.error(`[ProfitCalculator] ${errorMsg}. Skipping all opportunities.`, error);
+            logger.error(`${logPrefix} ${errorMsg}. Skipping all opportunities.`, error);
              return []; // Return empty array on error
         }
 
-
         // --- signerAddress is now guaranteed to be a string address if we reach here ---
-        logger.debug(`[ProfitCalculator] Using signer address for gas estimation: ${signerAddress}`);
+        logger.debug(`${logPrefix} Using signer address for gas estimation: ${signerAddress}`);
 
 
         for (const opportunity of opportunities) {
-            const logPrefix = `[ProfitCalc ${opportunity.type} ${opportunity.pairKey}]`;
-            //logger.debug(`${logPrefix} Processing opportunity:`, opportunity); // Too verbose, only log if issues
+            const opportunityLogPrefix = `${logPrefix} [${opportunity.type || '?'}-${opportunity.pairKey || '?'}]`;
+            logger.debug(`${opportunityLogPrefix} Processing opportunity...`);
+
+            // Ensure initial amountIn is valid before simulation
+            const initialAmountIn = BigInt(opportunity.amountIn || 0n);
+            if (initialAmountIn <= 0n) {
+                 logger.debug(`${opportunityLogPrefix} Initial amountIn is non-positive (${initialAmountIn}). Skipping.`);
+                 continue;
+            }
 
             // --- 1. Simulate the swap path ---
-            let currentAmountIn = opportunity.amountIn; // Starting amount (borrowed)
             let simulationSuccess = true;
+            let currentAmountIn = initialAmountIn;
             let currentAmountOut = 0n; // Amount after the final swap
-            let intermediateAmountOut = 0n; // Amount after the first swap
+            let intermediateAmountOut = 0n; // Amount after the first swap (needed for two-hop)
+            let simulationError = null;
 
-            logger.debug(`${logPrefix} Starting simulation with initial amountIn: ${currentAmountIn.toString()} (raw)`);
+            logger.debug(`${opportunityLogPrefix} Starting simulation with initial amountIn: ${currentAmountIn.toString()} (raw)`);
 
-            // Iterate through each step in the swap path
             for (let i = 0; i < opportunity.path.length; i++) {
                 const step = opportunity.path[i];
 
-                // Get Token objects for the CURRENT step's input/output
-                // Use the token symbols from the step to look up the actual Token objects from config.TOKENS
                 const stepTokenIn = this.config.TOKENS[step.tokenInSymbol];
                 const stepTokenOut = this.config.TOKENS[step.tokenOutSymbol];
 
                 if (!stepTokenIn || !stepTokenOut) {
-                    const errorMsg = `Missing Token object for step ${i} (${step.tokenInSymbol}->${step.tokenOutSymbol}).`;
-                    logger.error(`${logPrefix} ${errorMsg}`);
+                    simulationError = `Missing Token object for step ${i} (${step.tokenInSymbol || '?' }->${step.tokenOutSymbol || '?'}).`;
+                    logger.error(`${opportunityLogPrefix} ${simulationError}`);
                     simulationSuccess = false;
-                    opportunity.simulationError = errorMsg; // Add error detail to opportunity
-                    break; // Exit the loop if we can't find the token objects
+                    break;
                 }
 
-                // Call the SwapSimulator for this step
                 const simResult = await this.swapSimulator.simulateSwap(
-                    step.poolState, // poolState for the current step (contains dexType, address, etc.)
-                    stepTokenIn, // Pass the correct Token object for this step's input
-                    currentAmountIn // amountIn for the current step (output from previous step, or initial amountIn)
+                    step.poolState,
+                    stepTokenIn,
+                    currentAmountIn
                 );
 
                 if (!simResult.success) {
                     simulationSuccess = false;
-                    logger.debug(`${logPrefix} Simulation failed or returned invalid data for step ${i}. Reason: ${simResult.error}`);
-                    opportunity.simulationError = simResult.error; // Store simulation error reason
-                    break; // Exit the loop if any simulation step fails
+                    simulationError = simResult.error;
+                    logger.debug(`${opportunityLogPrefix} Simulation failed for step ${i}. Reason: ${simulationError}`);
+                    break;
                 }
 
-                // Update currentAmountIn for the next step or store final amountOut
-                currentAmountIn = simResult.amountOut; // Output of current step is input for next
+                currentAmountIn = BigInt(simResult.amountOut || 0n);
 
-                if (i === 0) {
-                    intermediateAmountOut = simResult.amountOut; // Store amount after the first swap
-                }
-                if (i === opportunity.path.length - 1) {
-                    currentAmountOut = simResult.amountOut; // Store final output after the last swap
-                }
+                if (i === 0) intermediateAmountOut = currentAmountIn;
+                if (i === opportunity.path.length - 1) currentAmountOut = currentAmountIn;
             } // End path iteration
 
-            // If simulation failed for any step, skip this opportunity
+            opportunity.simulationError = simulationError; // Store simulation error reason
+            opportunity.amountOut = currentAmountOut; // Final amount after all swaps
+            opportunity.intermediateAmountOut = intermediateAmountOut; // Amount after first swap
+
+            // If simulation failed or yielded non-positive output, skip this opportunity
             if (!simulationSuccess || currentAmountOut <= 0n) {
-                logger.debug(`${logPrefix} Simulation failed or yielded non-positive output (${currentAmountOut}). Skipping.`);
+                logger.debug(`${opportunityLogPrefix} Simulation failed or yielded non-positive output (${currentAmountOut}). Skipping.`);
                 continue; // Skip to the next opportunity
             }
 
-            // Augment opportunity object with simulation results
-            opportunity.amountOut = currentAmountOut;
-            opportunity.intermediateAmountOut = intermediateAmountOut;
-            logger.debug(`${logPrefix} Simulation successful. Final amountOut: ${currentAmountOut.toString()} (raw)`);
+            logger.debug(`${opportunityLogPrefix} Simulation successful. Final amountOut: ${currentAmountOut.toString()} (raw). Intermediate: ${intermediateAmountOut.toString()}`);
 
 
             // --- 2. Estimate Gas Cost ---
-            let gasCostNativeWei;
+            let gasEstimationResult;
             try {
-                // Estimate gas for the entire transaction using the path and other data
-                const gasCostNativeWeiResult = await this.gasEstimator.estimateTxGasCost(
+                // The estimator returns { pathGasLimit, effectiveGasPrice, totalCostWei, estimateGasSuccess, errorMessage }
+                gasEstimationResult = await this.gasEstimator.estimateTxGasCost(
                     opportunity, // Pass the full opportunity object
                     signerAddress // Pass the VALID signerAddress obtained earlier
                 );
 
-                // Validate the returned value from the estimator
-                if (gasCostNativeWeiResult === null || gasCostNativeWeiResult === undefined || typeof gasCostNativeWeiResult !== 'object' || gasCostNativeWeiResult.totalCostWei === undefined) {
-                     const errorMsg = `Gas estimation returned invalid result object: ${gasCostNativeWeiResult}.`;
-                     logger.error(`${logPrefix} ${errorMsg}`);
-                     opportunity.gasEstimationError = errorMsg;
+                // Validate the returned object structure and success flag
+                if (!gasEstimationResult || gasEstimationResult.totalCostWei === undefined || typeof gasEstimationResult.estimateGasSuccess !== 'boolean' || gasEstimationResult.pathGasLimit === undefined) {
+                     const errorMsg = `Gas estimation returned invalid result object: ${JSON.stringify(gasEstimationResult)}.`;
+                     logger.error(`${opportunityLogPrefix} ${errorMsg}`);
+                     opportunity.gasEstimate = { totalCostWei: 0n, pathGasLimit: 0n, effectiveGasPrice: 0n, estimateGasSuccess: false, errorMessage: errorMsg }; // Store failed state
                      continue; // Skip opportunity if the returned value is invalid
                 }
-                 gasCostNativeWei = gasCostNativeWeiResult.totalCostWei; // Extract total cost from the result object
-                 opportunity.gasEstimate = gasCostNativeWei; // Augment opportunity object *after* validation
-                 opportunity.gasEstimateSuccess = gasCostNativeWeiResult.estimateGasSuccess; // Store estimateGas check result
+                 // Store the *entire* gas estimation result object on the opportunity
+                 opportunity.gasEstimate = gasEstimationResult; // Store the object including pathGasLimit, effectiveGasPrice etc.
+                 logger.debug(`${opportunityLogPrefix} Gas estimation successful. Total Cost: ${gasEstimationResult.totalCostWei.toString()} wei. EstimateGas check: ${gasEstimationResult.estimateGasSuccess}. Path Gas Limit: ${gasEstimationResult.pathGasLimit?.toString() || 'N/A'}`);
 
-                 logger.debug(`${logPrefix} Gas estimation successful (result object validated). Total Cost: ${gasCostNativeWei.toString()} wei. EstimateGas check: ${opportunity.gasEstimateSuccess}`);
-
-                 // If estimateGas check failed, skip this opportunity even if simulation was successful
-                if (!opportunity.gasEstimateSuccess) {
-                    logger.debug(`${logPrefix} EstimateGas check failed. Skipping opportunity.`);
+                 // If estimateGas check failed within the estimator, skip this opportunity
+                if (!gasEstimationResult.estimateGasSuccess) {
+                    logger.debug(`${opportunityLogPrefix} EstimateGas check failed: ${gasEstimationResult.errorMessage || 'No specific message'}. Skipping opportunity.`);
                     continue;
                 }
 
-
             } catch (gasError) {
-                 // This catches errors THROWN by the estimator
                  const errorMsg = `Gas estimation failed unexpectedly: ${gasError.message}`;
-                 logger.error(`${logPrefix} ${errorMsg}`, gasError);
-                 opportunity.gasEstimationError = errorMsg; // Store error message
+                 logger.error(`${opportunityLogPrefix} ${errorMsg}`, gasError);
+                 opportunity.gasEstimate = { totalCostWei: 0n, pathGasLimit: 0n, effectiveGasPrice: 0n, estimateGasSuccess: false, errorMessage: errorMsg }; // Store failed state
                  continue; // Skip to the next opportunity if gas estimation throws
             }
 
+            // --- Simulation and Gas Estimation are complete and validated ---
+            // --- Now, calculate detailed profit metrics and check final profitability ---
 
-            // --- 3. Calculate Net Profit ---
-            // Net Profit = Amount Out (Borrowed) - Amount In (Borrowed) - Flash Loan Fee (Borrowed) - Gas Cost (Native converted from Borrowed) - Tithe (Native)
-            // Net Profit calculations below are based on the simplified mock logic from previous versions.
-            // This section needs to be reviewed and potentially replaced with accurate cross-token/cross-dex calculations.
-
-            // Calculate Gross Profit in borrowed token wei
-            const grossProfitBorrowedTokenWei = currentAmountOut - opportunity.amountIn;
-
-            // Calculate Flash Loan Fee in borrowed token wei (Assuming Aave fee is on the borrowed amount itself)
-            const flashLoanFeeBorrowedTokenWei = (opportunity.amountIn * this.aaveFlashLoanFeeBps) / TEN_THOUSAND;
-            opportunity.flashLoanDetails = { // Add details to opportunity for logging
-                token: opportunity.tokenIn, // Borrowed token
-                amount: opportunity.amountIn, // Borrowed amount
-                feeBps: this.aaveFlashLoanFeeBps,
-                feeBorrowedTokenWei: flashLoanFeeBorrowedTokenWei, // Fee in borrowed token wei
-                feeNativeWei: 0n // Placeholder, calculated below
-            };
-            logger.debug(`${logPrefix} Gross Profit (Borrowed): ${grossProfitBorrowedTokenWei.toString()} wei. FL Fee (Borrowed): ${flashLoanFeeBorrowedTokenWei.toString()} wei.`);
-
-            const netProfitPreGasBorrowedTokenWei = grossProfitBorrowedTokenWei - flashLoanFeeBorrowedTokenWei;
-            logger.debug(`${logPrefix} Net Profit (Pre-Gas, Borrowed): ${netProfitPreGasBorrowedTokenWei.toString()} wei.`);
-
-            if (netProfitPreGasBorrowedTokenWei <= 0n) {
-                logger.debug(`${logPrefix} Net Profit (Pre-Gas) is non-positive (${netProfitPreGasBorrowedTokenWei}). Skipping.`);
-                continue; // Skip if not profitable before gas and price conversion
-            }
-
-
-            // Convert Net Profit (Pre-Gas, Borrowed Token Wei) to Native Wei
-            // This requires the price of Borrowed Token relative to Native Token.
-            // Using a mock conversion helper for now. This needs a robust price feed or graph traversal.
-            let netProfitPreGasNativeWei = 0n;
+            let isProfitable = false;
             try {
-                 netProfitPreGasNativeWei = await this._convertToNativeWei(netProfitPreGasBorrowedTokenWei, opportunity.tokenIn);
-                 // Convert Flash Loan Fee (Borrowed Wei) to Native Wei for logging
-                 opportunity.flashLoanDetails.feeNativeWei = await this._convertToNativeWei(flashLoanFeeBorrowedTokenWei, opportunity.tokenIn);
+                // --- Use the extracted detailed profit calculator utility ---
+                isProfitable = await calculateDetailedProfit(
+                    opportunity, // This object will be augmented in place
+                    { amountOut: opportunity.amountOut, intermediateAmountOut: opportunity.intermediateAmountOut }, // Pass simulation results
+                    opportunity.gasEstimate, // Pass the gas estimation result object
+                    this.config, // Pass necessary config parts
+                    this.nativeCurrencyToken, // Pass native currency token object
+                    this.aaveFlashLoanFeeBps // Pass Aave fee BPS
+                );
 
-                 logger.debug(`${logPrefix} Net Profit (Pre-Gas, Native): ${netProfitPreGasNativeWei.toString()} wei`);
+                // If calculateDetailedProfit throws, it's caught by the outer loop catch block
 
-            } catch (conversionError) {
-                 logger.error(`${logPrefix} Error converting Net Profit (Borrowed) to Native Wei: ${conversionError.message}`, conversionError);
-                 opportunity.conversionError = conversionError.message;
-                 continue; // Skip if conversion fails
+            } catch (detailCalcError) {
+                // This catch block specifically for errors *thrown* by calculateDetailedProfit
+                 // The utility should throw ArbitrageErrors for critical issues.
+                 logger.error(`${opportunityLogPrefix} Error during detailed profit calculation: ${detailCalcError.message}`, detailCalcError);
+                 // The utility should handle its own specific logging inside.
+                 // We catch here to prevent the main loop from crashing and continue with the next opportunity.
+                 continue; // Skip this opportunity due to calculation error
             }
 
 
-            // Subtract Gas Cost (already in Native Wei)
-             if (netProfitPreGasNativeWei < gasCostNativeWei) {
-                 logger.debug(`${logPrefix} Net profit (${netProfitPreGasNativeWei}) less than gas cost (${gasCostNativeWei}). Skipping.`);
-                 continue; // Skip if not profitable after gas
-             }
-            const netProfitAfterGasNativeWei = netProfitPreGasNativeWei - gasCostNativeWei;
-            opportunity.netProfitNativeWei = netProfitAfterGasNativeWei; // Augment opportunity object
-            logger.debug(`${logPrefix} Net Profit (After Gas, Native): ${netProfitAfterGasNativeWei.toString()} wei`);
-
-
-            // Apply Minimum Profit Threshold
-            // The threshold is defined in the config (in Native Standard units). Convert to Native Wei.
-             const thresholdInNativeStandardUnits = this.minProfitThresholds[opportunity.borrowTokenSymbol] || this.minProfitThresholds.DEFAULT;
-             const minProfitThresholdNativeWei = BigInt(Math.round(thresholdInNativeStandardUnits * (10 ** this.nativeCurrencyToken.decimals))); // Convert to native wei smallest units
-             opportunity.thresholdNativeWei = minProfitThresholdNativeWei; // Store threshold in native wei
-
-            if (netProfitAfterGasNativeWei <= minProfitThresholdNativeWei) {
-                logger.debug(`${logPrefix} Net profit (${netProfitAfterGasNativeWei}) below threshold (${minProfitThresholdNativeWei}). Skipping.`);
-                continue; // Skip if profit is below threshold
-            }
-            logger.debug(`${logPrefix} Net profit (${netProfitAfterGasNativeWei}) meets threshold (${minProfitThresholdNativeWei}).`);
-
-
-            // --- 4. Calculate Tithe ---
-            // Tithe is a percentage of the Net Profit (After Gas)
-            // Tithe Amount (Native Wei) = Net Profit After Gas (Native Wei) * Tithe Percentage / 100
-            // Assuming Tithe Percentage is hardcoded in the contract (30%) or config (need to confirm config source)
-            // The contract is coded for 30% (3000 BPS). Let's use that.
-            const titheBps = 3000n; // Hardcoded 30% = 3000 BPS
-            const titheAmountNativeWei = (netProfitAfterGasNativeWei * titheBps) / TEN_THOUSAND; // Tithe calculated in Native Wei
-            opportunity.titheAmountNativeWei = titheAmountNativeWei; // Augment opportunity object
-            logger.debug(`${logPrefix} Tithe Amount (Native): ${titheAmountNativeWei.toString()} wei (${titheBps * 100n / TEN_THOUSAND}% of ${netProfitAfterGasNativeWei})`);
-
-            // Calculate Profit Percentage relative to the borrowed amount in Native Wei (for scoring/logging)
-            let profitPercentage = 0;
-            // Need the borrowed amount in Native Wei for this calculation
-            let borrowedAmountNativeWei_ForPercent = 0n;
-             try {
-                 borrowedAmountNativeWei_ForPercent = await this._convertToNativeWei(opportunity.amountIn, opportunity.tokenIn);
-             } catch (conversionError) {
-                  logger.warn(`${logPrefix} Error converting borrowed amount to Native for percent calc: ${conversionError.message}`);
-                  // Continue, just profitPercentage will remain 0
-             }
-
-            if (borrowedAmountNativeWei_ForPercent > 0n) {
-                // Percentage = (Net Profit After Gas Native Wei * 10000) / Borrowed Amount Native Wei (in BPS)
-                // Convert BPS to percentage by dividing by 100
-                profitPercentage = Number((netProfitAfterGasNativeWei * 10000n) / borrowedAmountNativeWei_ForPercent) / 100;
-            }
-            opportunity.profitPercentage = profitPercentage; // Augment opportunity object
-            logger.debug(`${logPrefix} Estimated Profit Percentage: ${profitPercentage}%`);
-
-
-            // Augment opportunity object with final profit details
-            opportunity.estimatedProfit = netProfitAfterGasNativeWei; // Net profit after gas (before tithe)
-            const estimatedProfitForExecutorNativeWei = netProfitAfterGasNativeWei - titheAmountNativeWei;
-            opportunity.estimatedProfitForExecutorNativeWei = estimatedProfitForExecutorNativeWei; // Profit left for bot after tithe transfer
-
-
-            // --- 5. Add to Profitable Trades List ---
-            // Only add if estimateGas check PASSED and profit meets threshold
-            if (opportunity.gasEstimateSuccess && netProfitAfterGasNativeWei > minProfitThresholdNativeWei) {
+            // --- 3. Add to Profitable Trades List if deemed profitable ---
+            // calculateDetailedProfit handles all the checks (threshold, gas success implicitly)
+            if (isProfitable) {
                 profitableTrades.push(opportunity);
-                logger.debug(`${logPrefix} Added to profitable trades list.`);
+                logger.debug(`${opportunityLogPrefix} Added to profitable trades list after detailed calculation.`);
             } else {
-                 logger.debug(`${logPrefix} Skipped: EstimateGas check failed (${!opportunity.gasEstimateSuccess}) or Profit (${netProfitAfterGasNativeWei}) <= Threshold (${minProfitThresholdNativeWei}).`);
+                 logger.debug(`${opportunityLogPrefix} Not profitable after detailed calculation checks. Skipping.`);
             }
 
 
-        } // End opportunity loop
+        } // End opportunity loop (for...of)
 
-        logger.debug(`[ProfitCalculator] Finished calculation. Found ${profitableTrades.length} profitable trades.`);
-        logger.info(`[ProfitCalculator] Found ${profitableTrades.length} profitable trades (after gas/threshold).`); // Keep this info log
 
-        return profitableTrades; // Return list of profitable trades
+        logger.info(`${logPrefix} Finished calculation cycle. Found ${profitableTrades.length} profitable trades (after simulation, gas, and detailed profit checks).`);
+
+        return profitableTrades; // Return list of profitable trades that passed all checks
     }
 
-    // Helper function to convert an amount of a token (in smallest units) to Native Wei
-    // This is a MOCK placeholder and needs proper implementation using price feeds.
-    // It should be moved to a dedicated price conversion utility eventually.
-    async _convertToNativeWei(amountWei, tokenObject) {
-         // --- MOCK IMPLEMENTATION ---
-         if (!tokenObject?.address || tokenObject.decimals === undefined || tokenObject.decimals === null) {
-             throw new ArbitrageError("_convertToNativeWei Mock", "Invalid token object for native conversion mock.");
-         }
-          if (amountWei === undefined || amountWei === null) return 0n; // Handle null/undefined amount
-          if (amountWei === 0n) return 0n; // 0 wei of any token is 0 native wei
-
-         // If token is native, return amount directly
-         // Check address as well as symbol for robustness
-         if (tokenObject.symbol === this.nativeCurrencyToken.symbol || tokenObject.address.toLowerCase() === this.nativeCurrencyToken.address.toLowerCase()) {
-             return amountWei;
-         }
-
-         // For non-native tokens, use a mock price conversion
-         // Need price of Token / Native (Scaled 1e18)
-         let tokenNativePriceScaled = 0n;
-         // MOCKING based on common tokens relative to WETH (assuming WETH is Native)
-         if (this.nativeCurrencyToken.symbol !== 'WETH' && this.nativeCurrencyToken.address.toLowerCase() !== '0x82af49447d8a07e3bd95bd0d56f35241523fbab1'.toLowerCase()) {
-              // If Native isn't WETH (the common mock base), warn about potential inaccuracy.
-              logger.warn(`[_convertToNativeWei Mock] Native currency is ${this.nativeCurrencyToken.symbol} (${this.nativeCurrencyToken.address}). Mock price conversion might be inaccurate if not WETH/ETH.`);
-         }
-
-
-         if (tokenObject.symbol === 'USDC' || tokenObject.symbol === 'USDC.e' || tokenObject.symbol === 'USDT' || tokenObject.symbol === 'DAI' || tokenObject.symbol === 'FRAX') {
-             // Assume stablecoin price relative to Native (~WETH/ETH) is ~1/1850 (using 1850 as ETH/Stablecoin price)
-             // Price Stablecoin / Native Standard = 1 / Price Native / Stablecoin Standard
-             // Price Native / Stablecoin Standard ~ 1850
-             // Scaled Price Stablecoin / Native (1e18) = Price Standard * 1e18
-             // Price Stablecoin / Native Standard = Price (Stablecoin wei / Native wei) * (10^NativeDecimals / 10^StablecoinDecimals)
-             // Mock Price: Assume 1 Standard Stablecoin = 1/1850 Standard Native (Scaled 1e18)
-              tokenNativePriceScaled = PRICE_SCALE / 1850n; // PRICE_SCALE is 1e18
-
-         } else if (tokenObject.symbol === 'WBTC') {
-              // Assume WBTC/Native price is ~50 (WBTC is worth about 50 WETH)
-              // Mock Price: 1 Standard WBTC = 50 Standard Native (Scaled 1e18)
-             tokenNativePriceScaled = 50n * PRICE_SCALE;
-
-         } else {
-             // For other tokens (ARB, LINK, GMX, MAGIC), let's just assume 1:1 with Native for testing
-             tokenNativePriceScaled = PRICE_SCALE; // Mock Price: 1 Standard Token = 1 Standard Native, scaled by 1e18
-         }
-
-         if (tokenNativePriceScaled === 0n) {
-              logger.warn(`[_convertToNativeWei Mock] Mock price for ${tokenObject.symbol}/${this.nativeCurrencyToken.symbol} is 0. Cannot convert.`);
-              // Return 0n rather than throwing, allows the loop to continue
-              return 0n;
-         }
-
-         // Convert amount (Token Wei) to Native Wei using the mock price (Price Token/Native, scaled 1e18)
-         // Amount Native Wei = (Amount Token Wei * Price (Native/Token Standard)) * (10^NativeDecimals / 10^TokenDecimals)
-         // Price (Native/Token Standard) = PRICE_SCALE / tokenNativePriceScaled (Scaled 1e18)
-         // Amount Native Wei = (Amount Token Wei * (PRICE_SCALE / tokenNativePriceScaled)) * ((10n ** BigInt(this.nativeCurrencyToken.decimals)) / (10n ** BigInt(tokenObject.decimals)))
-         // Amount Native Wei = (Amount Token Wei * PRICE_SCALE * (10^NativeDecimals)) / (tokenNativePriceScaled * (10^TokenDecimals))
-
-         const tokenDecimals = BigInt(tokenObject.decimals);
-         const nativeDecimals = BigInt(this.nativeCurrencyToken.decimals);
-
-         const numerator = amountWei * PRICE_SCALE * (10n ** nativeDecimals);
-         const denominator = tokenNativePriceScaled * (10n ** tokenDecimals);
-
-         if (denominator === 0n) {
-              logger.error(`[_convertToNativeWei Mock] Division by zero during conversion for ${tokenObject.symbol}.`);
-              return 0n; // Return 0n on division by zero
-         }
-
-         const amountNativeWei = numerator / denominator;
-         // logger.debug(`[_convertToNativeWei Mock] Converted ${amountWei.toString()} ${tokenObject.symbol} wei to ${amountNativeWei.toString()} ${this.nativeCurrencyToken.symbol} wei`); // Too verbose
-
-         return amountNativeWei;
-         // --- END MOCK IMPLEMENTATION ---
-    }
+    // --- _convertToNativeWei method removed ---
 
 
 } // End ProfitCalculator class
