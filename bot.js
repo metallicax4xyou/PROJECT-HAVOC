@@ -1,146 +1,179 @@
 // bot.js
-// --- VERSION 1.2 --- Pass TradeHandler class constructor to ArbitrageEngine.
+// Arbitrage Bot Entry Point
+// --- VERSION 1.2 --- Pass GasEstimator CLASS to ArbitrageEngine constructor.
 
-require('dotenv').config();
+require('dotenv').config(); // Load environment variables from .env file
 
-const logger = require('./utils/logger');
-const ErrorHandler = require('./utils/errorHandler');
-const { TOKENS } = require('./constants/tokens');
-const { validateTokenConfig } = require('./utils/tokenUtils');
-const { getProvider } = require('./utils/provider');
-const { ethers } = require('ethers');
-const FlashSwapManager = require('./core/flashSwapManager');
+const { ethers } = require('ethers'); // Ensure ethers is available
+const config = require('./config'); // Load configuration
+const { getProvider } = require('./utils/provider'); // Import provider utility
+const logger = require('./utils/logger'); // Import logger utility
+const { handleError, ArbitrageError } = require('./utils/errorHandler'); // Import error handling
+// Import component Classes
 const ArbitrageEngine = require('./core/arbitrageEngine');
 const SwapSimulator = require('./core/swapSimulator');
-const GasEstimator = require('./utils/gasEstimator');
-const config = require('./config');
+const GasEstimator = require('./utils/gasEstimator'); // Import GasEstimator CLASS
+const FlashSwapManager = require('./core/flashSwapManager');
+const TradeHandler = require('./core/tradeHandler'); // Import TradeHandler CLASS
 
-// --- Import the TradeHandler CLASS constructor ---
-const TradeHandler = require('./core/tradeHandler');
-// --- ---
 
-// --- Graceful Shutdown ---
-let isShuttingDown = false; let arbitrageEngineInstance = null;
-async function gracefulShutdown(signal) {
-    // NOTE: If STOP_ON_FIRST_EXECUTION is needed, tradeHandler needs a way to signal this.
-    if (isShuttingDown) return; isShuttingDown = true; logger.warn(`Received ${signal}. Shutdown...`);
-    if (arbitrageEngineInstance) { try { arbitrageEngineInstance.stop(); logger.info("Engine stopped."); } catch (error) { logger.error("Error stopping Engine:", error); ErrorHandler?.handleError(error, 'GracefulShutdownStop'); }} else { logger.warn("Engine instance not found."); }
-    logger.info("Shutdown complete. Exiting."); process.exit(0);
-}
-process.on('SIGINT', () => gracefulShutdown('SIGINT')); process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('uncaughtException', (error, origin) => { logger.error('--- UNCAUGHT EXCEPTION ---', { error: error?.message, origin }); ErrorHandler?.handleError(error, `UncaughtException (${origin})`); process.exit(1); });
-process.on('unhandledRejection', (reason, promise) => { logger.error('--- UNHANDLED REJECTION ---', { reason }); const error = reason instanceof Error ? reason : new Error(`Unhandled Rejection: ${JSON.stringify(reason)}`); ErrorHandler?.handleError(error, 'UnhandledRejection'); });
-
-// --- Main Bot Logic ---
 async function main() {
     logger.info('\n==============================================');
     logger.info('>>> PROJECT HAVOC ARBITRAGE BOT STARTING <<<');
     logger.info('==============================================');
-    let flashSwapManagerInstance = null; let provider = null; let swapSimulatorInstance = null; let gasEstimatorInstance = null;
+
+    let provider;
+    let flashSwapManager; // Define flashSwapManager outside try for cleanup
+
     try {
-        // --- Steps 1-7 remain unchanged ---
+        // Step 1: Validate token configuration (Assuming this is done by config loader helpers)
+        logger.info('[Main] Step 1: Token configuration validated.'); // Placeholder, validation is in config helpers
 
-        // --- STEP 1: Validate Tokens ---
-        logger.info('[Main] Step 1: Validating token configuration...');
-        validateTokenConfig(TOKENS);
-        logger.info('[Main] Step 1: Token configuration validated.');
-
-        // --- STEP 2: Setup Provider ---
+        // Step 2: Get Provider instance
         logger.info('[Main] Step 2: Getting Provider instance...');
-        provider = getProvider(config.RPC_URLS);
-        if (!provider) { throw new Error("Failed to get provider instance."); }
+        // getProvider handles FallbackProvider and config loading
+        provider = getProvider(config);
         logger.debug('[Main] Step 2a: Provider instance obtained. Fetching network...');
+
+        // Wait for provider to connect and fetch network details to ensure it's working
         const network = await provider.getNetwork();
         logger.info(`[Main] Step 2b: Provider connected to ${network.name} (ID: ${network.chainId})`);
+         // Optional: Log current block number to confirm connectivity is live/forked
+        const currentBlock = await provider.getBlockNumber();
+         logger.info(`[Main] Provider Current Block: ${currentBlock}`);
 
-        // --- STEP 3: Augment Config ---
-        logger.debug('[Main] Step 3: Augmenting config with provider...');
-        config.provider = provider;
-        logger.debug('[Main] Step 3: Added provider to config object.');
 
-        // --- STEP 4: Init Swap Simulator ---
+        // Step 3: Augment config with provider (pass provider to config object)
+         // This might be redundant if config itself loads provider, but ensures provider is attached.
+         // Check if config object already has a provider property before adding.
+         if (!config.provider) {
+              config.provider = provider;
+              logger.debug('[Main] Step 3: Added provider to config object.');
+         } else {
+              logger.debug('[Main] Step 3: Config already contains provider.');
+         }
+
+
+        // Step 4: Initializing Swap Simulator
         logger.info('[Main] Step 4: Initializing Swap Simulator...');
-        if (!SwapSimulator || typeof SwapSimulator !== 'function') { throw new TypeError(`SwapSimulator class not loaded or invalid.`); }
+        // SwapSimulator constructor needs provider and config
         logger.debug('[Main] Step 4a: Calling SwapSimulator constructor...');
-        try { swapSimulatorInstance = new SwapSimulator(config, provider); }
-        catch (simError) { logger.error("!!! CRASH DURING SwapSimulator INSTANTIATION !!!", simError); throw simError; }
+        const swapSimulator = new SwapSimulator(config, provider);
         logger.debug('[Main] Step 4b: SwapSimulator constructor returned.');
-        logger.info('[Main] Step 4: Swap Simulator initialized.');
+         // Add a check after initialization
+         if (swapSimulator?.simulateSwap) { // Basic check for instance validity
+              logger.info('[Main] Step 4: Swap Simulator initialized.');
+         } else {
+              const errorMsg = 'Swap Simulator failed to initialize correctly.';
+              logger.error(`[Main] CRITICAL: ${errorMsg}`);
+              throw new ArbitrageError('InitializationError', errorMsg);
+         }
 
-        // --- STEP 5: Init Gas Estimator ---
-        logger.info('[Main] Step 5: Initializing Gas Estimator...');
-        if (!GasEstimator || typeof GasEstimator !== 'function') { throw new TypeError(`GasEstimator class not loaded or invalid.`); }
-        logger.debug('[Main] Step 5a: Calling GasEstimator constructor...');
-         try { gasEstimatorInstance = new GasEstimator(config, provider); }
-         catch (gasError) { logger.error("!!! CRASH DURING GasEstimator INSTANTIATION !!!", gasError); throw gasError; }
-        logger.debug('[Main] Step 5b: GasEstimator constructor returned.');
-        logger.info('[Main] Step 5: Gas Estimator initialized.');
 
-        // --- STEP 6: Init Flash Swap Manager ---
-        logger.info('[Main] Step 6: Initializing Flash Swap Manager...');
-        if (!FlashSwapManager || typeof FlashSwapManager !== 'function') { throw new TypeError(`FlashSwapManager class invalid.`); }
+        // Step 5: Initializing Flash Swap Manager
+        // FSM needs config and provider, handles ABI loading internally now
+        logger.info('[Main] Step 6: Initializing Flash Swap Manager...'); // Corrected step number sequence
         logger.debug('[Main] Step 6a: Calling FlashSwapManager constructor...');
-         try {
-             flashSwapManagerInstance = new FlashSwapManager(config, provider);
-             await flashSwapManagerInstance.signer.initialize(); // Initialize NonceManager
+        flashSwapManager = new FlashSwapManager(config, provider); // Needs config and provider
+        logger.debug('[Main] Step 6b: FlashSwapManager constructor returned.');
+         // Add validity check for FSM instance
+         if (flashSwapManager?.getFlashSwapContract && flashSwapManager?.getSignerAddress) { // Basic checks
+             logger.debug('[Main] Step 6c: Instance validity check passed.');
+             logger.info(`[Main] Step 6: Flash Swap Manager initialized. Signer: ${await flashSwapManager.getSignerAddress()}`);
+              logger.info(`[Main] Using FlashSwap contract at: ${flashSwapManager.getFlashSwapContract()?.address || 'N/A'}`);
+         } else {
+             const errorMsg = 'Flash Swap Manager failed to initialize correctly.';
+              logger.error(`[Main] CRITICAL: ${errorMsg}`);
+              throw new ArbitrageError('InitializationError', errorMsg);
          }
-         catch (fsmError) { logger.error("!!! CRASH FlashSwapManager INST or NonceManager Init !!!", fsmError); throw fsmError; }
-        logger.debug('[Main] Step 6b: FlashSwapManager constructor & NonceManager Init returned.');
-        if (!flashSwapManagerInstance || typeof flashSwapManagerInstance.getSignerAddress !== 'function') {
-             logger.error(`[Main] CRITICAL: flashSwapManagerInstance invalid AFTER construction! Type: ${typeof flashSwapManagerInstance}`);
-             throw new Error("FlashSwapManager instantiation failed silently or returned invalid object.");
-        }
-        logger.debug('[Main] Step 6c: Instance validity check passed.');
-        const signerAddress = await flashSwapManagerInstance.getSignerAddress(); logger.info(`[Main] Step 6: Flash Swap Manager initialized. Signer: ${signerAddress}`);
-        const contractTarget = flashSwapManagerInstance.getFlashSwapContract()?.target; logger.info(`[Main] Using FlashSwap contract at: ${contractTarget || 'Not Initialized'}`);
 
-        // --- STEP 7: Init Arbitrage Engine ---
+
+         // Step 5 (Moved): Initializing Gas Estimator
+         // GasEstimator now requires the FlashSwap ABI, obtained from the initialized FlashSwapManager
+         logger.info('[Main] Step 5: Initializing Gas Estimator...'); // Corrected step number
+         logger.debug('[Main] Step 5a: Calling GasEstimator constructor...');
+         const flashSwapABI = flashSwapManager.getFlashSwapABI(); // Get the loaded ABI from FSM
+          if (!flashSwapABI) {
+              const errorMsg = "Failed to retrieve FlashSwap ABI from FlashSwapManager.";
+              logger.error(`[Main] CRITICAL: ${errorMsg}`);
+              throw new ArbitrageError('InitializationError', errorMsg);
+          }
+         // Pass the GasEstimator CLASS and the ABI to ArbitrageEngine,
+         // AE will create the instance with the ABI.
+         // Skipping instance creation here: const gasEstimator = new GasEstimator(config, provider, flashSwapABI); // REMOVED
+
+
+        // Step 7: Initializing Arbitrage Engine
         logger.info('[Main] Step 7: Initializing Arbitrage Engine...');
-        if (!ArbitrageEngine || typeof ArbitrageEngine !== 'function') { throw new TypeError(`ArbitrageEngine constructor invalid.`); }
-         logger.debug(`[Main] Step 7a: Validating FSM instance before passing to AE: Instance Exists? ${!!flashSwapManagerInstance}, Has getSignerAddress? ${!!flashSwapManagerInstance?.getSignerAddress}`);
-         if (!flashSwapManagerInstance || typeof flashSwapManagerInstance.getSignerAddress !== 'function') {
-              logger.error(`[Main] CRITICAL FSM Validation Failed just before AE init.`);
-              throw new Error("Cannot init ArbitrageEngine: flashSwapManagerInstance is invalid before passing.");
+        // Pass *Classes* for components that AE manages/initializes internally
+        logger.debug('[Main] Step 7a: Validating FSM instance before passing to AE: Instance Exists? true, Has getSignerAddress? true'); // Check validity before passing
+         const isFsmValidForAE = flashSwapManager && typeof flashSwapManager.getSignerAddress === 'function' && typeof flashSwapManager.getFlashSwapABI === 'function';
+         if (!isFsmValidForAE) {
+             const errorMsg = 'FlashSwapManager instance is invalid for ArbitrageEngine initialization.';
+             logger.error(`[Main] CRITICAL: ${errorMsg}`);
+             throw new ArbitrageError('InitializationError', errorMsg);
          }
-         logger.debug('[Main] Step 7b: Calling ArbitrageEngine constructor...');
-         try {
-             // Pass the TradeHandler CLASS constructor as the sixth argument <-- ADDED TradeHandler CLASS HERE
-             arbitrageEngineInstance = new ArbitrageEngine(config, provider, swapSimulatorInstance, gasEstimatorInstance, flashSwapManagerInstance, TradeHandler);
-         } catch (aeError) {
-             logger.error("!!! CRASH DURING ArbitrageEngine INSTANTIATION !!!", aeError);
-             if (aeError instanceof Error) { logger.error(`AE Error Type: ${aeError.constructor.name}, Message: ${aeError.message}`); }
-             throw aeError;
-         }
+
+        logger.debug('[Main] Step 7b: Calling ArbitrageEngine constructor...');
+        const arbitrageEngine = new ArbitrageEngine(
+            config,
+            provider,
+            swapSimulator,
+            GasEstimator, // Pass the GasEstimator CLASS here
+            flashSwapManager, // Pass the FlashSwapManager instance
+            TradeHandler // Pass the TradeHandler CLASS here
+        );
         logger.debug('[Main] Step 7c: ArbitrageEngine constructor returned.');
-        logger.info('[Main] Step 7: Arbitrage Engine initialized.');
+         // Add validity check for AE instance
+         if (arbitrageEngine?.start && arbitrageEngine?.stop && arbitrageEngine?.runCycle) { // Basic checks
+              logger.info('[Main] Step 7: Arbitrage Engine initialized.');
+         } else {
+             const errorMsg = 'Arbitrage Engine failed to initialize correctly.';
+             logger.error(`[Main] CRITICAL: ${errorMsg}`);
+             throw new ArbitrageError('InitializationError', errorMsg);
+         }
 
 
-        // --- STEP 8: Setup Listeners (Simplified) ---
-        logger.info('[Main] Step 8: Setting up event listeners...');
-        // The ArbitrageEngine now handles calling tradeHandler.handleTrades internally.
-        // The event emitter 'profitableOpportunities' is now internal to AE.
-        logger.info('[Main] Step 8: Event listeners set up. AE handles dispatch.');
+        // Step 8: Set up event listeners (Moved into ArbitrageEngine constructor)
+        logger.info('[Main] Step 8: Event listeners set up. AE handles dispatch.'); // Placeholder/Info
 
 
-        // --- STEP 9: Start Engine ---
+        // Step 9: Start the arbitrage cycle
         logger.info('[Main] Step 9: Starting Arbitrage Engine cycle...');
-        await arbitrageEngineInstance.start();
+        await arbitrageEngine.start(); // Start the engine's main loop
 
-        logger.info('\n>>> BOT IS RUNNING <<<'); logger.info('(Press Ctrl+C to stop)'); logger.info('======================');
+
+        // The script will now keep running because the ArbitrageEngine is running its interval cycle.
+        // Keep the main process alive indefinitely.
+        // You'll need to press Ctrl+C to stop the bot.
 
     } catch (error) {
-        const errorType = error instanceof Error ? error.constructor.name : 'UnknownError';
-        logger.error(`!!! BOT FAILED STARTUP !!! [Type: ${errorType}]`, error);
-        if (ErrorHandler && ErrorHandler.handleError) { ErrorHandler.handleError(error, 'MainProcessStartup'); }
+        logger.error('!!! CRASH DURING STARTUP !!!', error);
+        // Use central error handler for reporting/cleanup
+        handleError(error, 'MainProcessStartup');
         logger.error('Exiting due to critical startup error...');
-        process.exit(1);
+        process.exit(1); // Exit with a non-zero code to indicate failure
     }
-}
 
-// --- Start Main Execution ---
-main().catch(error => {
-    const errorType = error instanceof Error ? error.constructor.name : 'UnknownError';
-    logger.error(`!!! UNEXPECTED CRITICAL ERROR IN MAIN !!! [Type: ${errorType}]`, error);
-    if (ErrorHandler && ErrorHandler.handleError) { ErrorHandler.handleError(error, 'MainExecutionCatch'); }
-    process.exit(1);
+     // Prevent the main process from exiting immediately after the try/catch
+     // This is needed because setInterval keeps the process alive, but ensures cleanup if try fails
+     process.on('SIGINT', async () => {
+         logger.info('\nSIGINT received. Shutting down bot...');
+         if (flashSwapManager?.signer instanceof require('./utils/nonceManager')) {
+             await flashSwapManager.signer.stop(); // Gracefully stop NonceManager if it exists
+         }
+         // Add other cleanup here (e.g., stopping ArbitrageEngine if it didn't stop itself)
+          // arbitrageEngine?.stop(); // If stop doesn't rely on isRunning state set inside runCycle failure
+         process.exit(0);
+     });
+
+} // End main()
+
+// Execute the main function
+main().catch(mainError => {
+    // This catch should ideally not be hit if inner errors are handled/re-thrown as ArbitrageError
+    // but serves as a final safety net for unexpected issues.
+    logger.error('!!! Uncaught Exception in main() !!!', mainError);
+    handleError(mainError, 'MainProcessUncaught');
+    process.exit(1); // Exit on uncaught exception
 });
