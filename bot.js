@@ -91,17 +91,10 @@ async function main() {
          // Step 5 (Moved): Initializing Gas Estimator
          // GasEstimator now requires the FlashSwap ABI, obtained from the initialized FlashSwapManager
          logger.info('[Main] Step 5: Initializing Gas Estimator...'); // Corrected step number
-         logger.debug('[Main] Step 5a: Calling GasEstimator constructor...');
-         const flashSwapABI = flashSwapManager.getFlashSwapABI(); // Get the loaded ABI from FSM
-          if (!flashSwapABI) {
-              const errorMsg = "Failed to retrieve FlashSwap ABI from FlashSwapManager.";
-              logger.error(`[Main] CRITICAL: ${errorMsg}`);
-              throw new ArbitrageError('InitializationError', errorMsg);
-          }
-         // Pass the GasEstimator CLASS and the ABI to ArbitrageEngine,
-         // AE will create the instance with the ABI.
-         // Skipping instance creation here: const gasEstimator = new GasEstimator(config, provider, flashSwapABI); // REMOVED
-
+         // We pass the GasEstimator CLASS directly to ArbitrageEngine,
+         // which will get the ABI from FSM and create the instance.
+         // No need to create the GasEstimator instance here anymore.
+         // Skipping instance creation here: const gasEstimator = new GasEstimator(config, provider, flashSwapABI); // REMOVED from v1.1
 
         // Step 7: Initializing Arbitrage Engine
         logger.info('[Main] Step 7: Initializing Arbitrage Engine...');
@@ -155,16 +148,31 @@ async function main() {
         process.exit(1); // Exit with a non-zero code to indicate failure
     }
 
-     // Prevent the main process from exiting immediately after the try/catch
-     // This is needed because setInterval keeps the process alive, but ensures cleanup if try fails
+     // Keep the process alive, but set up graceful shutdown
+     process.stdin.resume(); // Keep the process from exiting immediately
      process.on('SIGINT', async () => {
          logger.info('\nSIGINT received. Shutting down bot...');
-         if (flashSwapManager?.signer instanceof require('./utils/nonceManager')) {
-             await flashSwapManager.signer.stop(); // Gracefully stop NonceManager if it exists
+         // Attempt graceful shutdown of components if they were initialized
+         // The ArbitrageEngine should handle its own stop logic which includes clearing its interval.
+         // The NonceManager needs to finish any pending transactions.
+         try {
+              // Assuming arbitrageEngine instance exists and has a stop method
+              // Note: Calling stop might trigger cleanup already handled elsewhere, need careful sequencing.
+              // Let's assume the ArbitrageEngine's stop method is the primary shutdown trigger.
+              // If AE failed to initialize, flashSwapManager might still exist for NonceManager cleanup.
+              if (ArbitrageEngine?.isRunning) { // Check if AE was successfully started and is running
+                 await ArbitrageEngine.stop(); // Call stop if AE is active
+              } else if (flashSwapManager?.signer instanceof require('./utils/nonceManager')) {
+                  // If AE didn't even start, manually stop the NonceManager if it exists
+                  logger.debug('[Main Shutdown] AE not running, attempting to stop NonceManager directly.');
+                  await flashSwapManager.signer.stop(); // Gracefully stop NonceManager
+              }
+             logger.info('[Main Shutdown] Cleanup complete. Exiting.');
+             process.exit(0); // Exit gracefully
+         } catch (cleanupError) {
+             logger.error('[Main Shutdown] Error during graceful shutdown:', cleanupError);
+             process.exit(1); // Exit with error code
          }
-         // Add other cleanup here (e.g., stopping ArbitrageEngine if it didn't stop itself)
-          // arbitrageEngine?.stop(); // If stop doesn't rely on isRunning state set inside runCycle failure
-         process.exit(0);
      });
 
 } // End main()
