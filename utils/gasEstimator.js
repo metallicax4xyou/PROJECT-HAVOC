@@ -1,5 +1,5 @@
 // utils/gasEstimator.js
-// --- VERSION v1.13 --- Corrected SyntaxError in path gas limit calculation.
+// --- VERSION v1.14 --- Added detailed logging for FlashSwap ABI content and function checks.
 
 const { ethers } = require('ethers');
 const logger = require('./logger');
@@ -15,19 +15,36 @@ class GasEstimator {
      * @param {Array<object>} flashSwapABI - The ABI array for the FlashSwap contract.
      */
     constructor(config, provider, flashSwapABI) {
-        logger.debug('[GasEstimator v1.13] Initializing...'); // Version bump
+        logger.debug('[GasEstimator v1.14] Initializing...'); // Version bump
 
         if (!config || !provider) throw new ArbitrageError('GasEstimatorInit', 'Config/Provider required.');
         if (!config.GAS_COST_ESTIMATES?.FLASH_SWAP_BASE) logger.warn('[GasEstInit] GAS_COST_ESTIMATES incomplete.');
+
         // Check for FlashSwap ABI presence and create Interface
         if (!flashSwapABI || !Array.isArray(flashSwapABI)) {
             logger.error('[GasEstInit] CRITICAL: FlashSwap ABI not provided or invalid.');
             this.flashSwapInterface = null;
         } else {
              try {
+                 // --- ADDED DETAILED ABI LOGGING ---
+                 logger.debug("[GasEstInit] Received FlashSwap ABI (first 5 entries):", JSON.stringify(flashSwapABI.slice(0, 5), null, 2)); // Log snippet
+                 logger.debug("[GasEstInit] Received FlashSwap ABI (last 5 entries):", JSON.stringify(flashSwapABI.slice(-5), null, 2)); // Log snippet
+                 logger.debug(`[GasEstInit] Received FlashSwap ABI total length: ${flashSwapABI.length}`);
+                 // --- END DETAILED ABI LOGGING ---
+
+
                  this.flashSwapInterface = new ethers.Interface(flashSwapABI); // Use the provided ABI
+
+                 // --- ADDED DETAILED FUNCTION CHECK LOGGING ---
+                 const hasInitiateFlashSwap = this.flashSwapInterface.hasFunction('initiateFlashSwap');
+                 const hasInitiateAaveFlashLoan = this.flashSwapInterface.hasFunction('initiateAaveFlashLoan');
+                 logger.debug(`[GasEstInit] Check result: hasFunction('initiateFlashSwap'): ${hasInitiateFlashSwap}`);
+                 logger.debug(`[GasEstInit] Check result: hasFunction('initiateAaveFlashLoan'): ${hasInitiateAaveFlashLoan}`);
+                 // --- END DETAILED FUNCTION CHECK LOGGING ---
+
+
                  // Check if initiateFlashSwap and initiateAaveFlashLoan functions exist in the interface
-                 if (!this.flashSwapInterface.hasFunction('initiateFlashSwap') || !this.flashSwapInterface.hasFunction('initiateAaveFlashLoan')) {
+                 if (!hasInitiateFlashSwap || !hasInitiateAaveFlashLoan) {
                      logger.error('[GasEstInit] CRITICAL: Provided FlashSwap ABI is missing initiateFlashSwap or initiateAaveFlashLoan function definition.');
                      this.flashSwapInterface = null; // Mark as unavailable if key functions are missing
                  } else {
@@ -42,8 +59,7 @@ class GasEstimator {
 
         if (!this.flashSwapInterface) { logger.error('[GasEstInit] FlashSwap Interface could not be initialized. estimateGas check will fail.'); }
         // Add check for TITHE_WALLET_ADDRESS in config (still needed for builders)
-        // --- CORRECTED TYPO ---
-        if (!config.TITHE_WALLET_ADDRESS || !ethers.isAddress(config.TITHE_WALLET_ADDRESS)) { // Corrected typo from TITHE_WALLET_WALLET_ADDRESS
+        if (!config.TITHE_WALLET_ADDRESS || !ethers.isAddress(config.TITHE_WALLET_ADDRESS)) {
              logger.warn('[GasEstInit] WARNING: TITHE_WALLET_ADDRESS is missing or invalid in config. Parameter builders may fail.');
         }
 
@@ -55,7 +71,7 @@ class GasEstimator {
         this.maxGasPriceGwei = ethers.parseUnits(String(config.MAX_GAS_GWEI || 1), 'gwei');
         this.fallbackGasLimit = BigInt(config.FALLBACK_GAS_LIMIT || 3000000);
 
-        logger.info(`[GasEstimator v1.13] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`); // Version bump
+        logger.info(`[GasEstimator v1.14] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`); // Version bump
     }
 
     async getFeeData() {
@@ -102,7 +118,7 @@ class GasEstimator {
      * @private Internal helper method
      */
     async _encodeMinimalCalldataForEstimate(opportunity, providerType) {
-        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.13]`; // Version bump
+        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.14]`; // Version bump
 
         // Use the interface created in the constructor
         if (!this.flashSwapInterface) {
@@ -317,12 +333,10 @@ class GasEstimator {
                  pathGasLimit += (pathGasLimit * bufferPercent) / 100n;
              }
          }
-         // --- CORRECTED SYNTAX ERROR ---
          else { // This else should follow directly after the closing bracket of the if block above
               logger.warn(`${logPrefix} Calculated pathGasLimit is zero or negative before buffer. Using fallback.`);
               pathGasLimit = this.fallbackGasLimit;
          }
-         // --- END CORRECTED SYNTAX ERROR ---
 
          logger.debug(`${logPrefix} Path-based limit (+buffer): ${pathGasLimit}`);
 
