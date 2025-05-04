@@ -1,8 +1,8 @@
 // core/arbitrageEngine.js
-// --- VERSION v1.16 --- Added debug log for FlashSwap ABI retrieved from FlashSwapManager.
+// --- VERSION v1.17 --- Extracted trade logging to utils/tradeLogger.js
 
 const { EventEmitter } = require('events');
-const { ethers } = require('ethers');
+const { ethers } = require('ethers'); // Still needed for BigInt/parsing in constructor validation? No, not really. Can remove.
 const PoolScanner = require('./poolScanner');
 const ProfitCalculator = require('./profitCalculator');
 const SpatialFinder = require('./finders/spatialFinder');
@@ -10,6 +10,8 @@ const logger = require('../utils/logger');
 const { ArbitrageError, handleError } = require('../utils/errorHandler');
 // Import the TradeHandler CLASS
 const TradeHandler = require('./tradeHandler');
+// Import the new Trade Logger utility
+const tradeLogger = require('../utils/tradeLogger'); // <-- NEW IMPORT
 
 class ArbitrageEngine extends EventEmitter {
     /**
@@ -22,7 +24,7 @@ class ArbitrageEngine extends EventEmitter {
      */
     constructor(config, provider, swapSimulator, GasEstimatorClass, flashSwapManager, TradeHandlerClass) {
         super();
-        logger.info('[AE v1.16] Initializing ArbitrageEngine components...'); // Version bump
+        logger.info('[AE v1.17] Initializing ArbitrageEngine components...'); // Version bump
         // Validation...
         if (!config) throw new ArbitrageError('InitializationError', 'AE: Missing config.');
         if (!provider) throw new ArbitrageError('InitializationError', 'AE: Missing provider.');
@@ -41,6 +43,7 @@ class ArbitrageEngine extends EventEmitter {
         this.config = config;
         this.provider = provider;
         this.flashSwapManager = flashSwapManager;
+        this.nativeSymbol = this.config.NATIVE_CURRENCY_SYMBOL || 'ETH'; // Define here as it's needed by tradeLogger
 
 
         // Initialize child components
@@ -56,30 +59,29 @@ class ArbitrageEngine extends EventEmitter {
         logger.debug('[AE Init] FlashSwap ABI retrieved from FSM:', flashSwapABI ? 'Valid Array' : 'Null/Undefined', Array.isArray(flashSwapABI) ? `(Length: ${flashSwapABI.length})` : '');
         // --- END DEBUG LOG ---
 
-        if (!flashSwapABI) { // Removed !Array.isArray(flashSwapABI) check here, let GasEstimator handle it
+        if (!flashSwapABI) {
              const errorMsg = "Failed to get FlashSwap ABI from FlashSwapManager.";
              logger.error(`[AE Init] CRITICAL: ${errorMsg}`);
              throw new ArbitrageError('InitializationError', errorMsg);
         }
         // Initialize GasEstimator, passing config, provider, and the FlashSwap ABI
-        this.gasEstimator = new GasEstimatorClass(config, provider, flashSwapABI); // Pass FlashSwap ABI
+        this.gasEstimator = new GasEstimatorClass(config, provider, flashSwapABI);
 
 
         // Initialize ProfitCalculator, passing required dependencies
-        this.profitCalculator = new ProfitCalculator(config, provider, swapSimulator, this.gasEstimator, flashSwapManager); // Pass the initialized gasEstimator
+        this.profitCalculator = new ProfitCalculator(config, provider, swapSimulator, this.gasEstimator, flashSwapManager);
 
         // Initialize TradeHandler INSTANCE
-        this.tradeHandler = new TradeHandlerClass(config, provider, flashSwapManager, this.gasEstimator, logger); // Pass the initialized gasEstimator
+        this.tradeHandler = new TradeHandlerClass(config, provider, flashSwapManager, this.gasEstimator, logger);
 
 
         // State variables
         this.isRunning = false;
         this.cycleInterval = null;
         this.isCycleRunning = false;
-        this.nativeSymbol = this.config.NATIVE_CURRENCY_SYMBOL || 'ETH';
 
 
-        logger.info('[AE v1.16] ArbitrageEngine components initialized successfully.'); // Version bump
+        logger.info('[AE v1.17] ArbitrageEngine components initialized successfully.'); // Version bump
     }
 
     /**
@@ -97,7 +99,7 @@ class ArbitrageEngine extends EventEmitter {
 
         // Initial run cycle
         try {
-            logger.debug('[AE.start] >>> Calling initial runCycle... (v1.16)');
+            logger.debug('[AE.start] >>> Calling initial runCycle... (v1.17)');
             await this.runCycle();
             logger.debug('[AE.start] <<< Initial runCycle finished.');
         } catch(error) {
@@ -156,7 +158,7 @@ class ArbitrageEngine extends EventEmitter {
 
     async runCycle() {
         const cycleStartTime = Date.now();
-        logger.debug('[AE.runCycle] ===== Starting New Cycle (v1.16) ====='); // Version bump in cycle log
+        logger.debug('[AE.runCycle] ===== Starting New Cycle (v1.17) ====='); // Version bump in cycle log
 
         if (!this.isRunning) {
             logger.debug('[AE.runCycle] Engine is stopping. Skipping cycle execution.');
@@ -203,17 +205,22 @@ class ArbitrageEngine extends EventEmitter {
             }
 
             if (this.isRunning && cycleStatus.startsWith('COMPLETED')) {
+                // Success - potentially log something or update a metric
             } else if (this.isRunning) {
+                 // If engine is running but status isn't completed, it implies an uncaught error in the try block
                  cycleStatus = 'FAILED (Uncaught)';
             }
 
 
         } catch (error) {
+            // This catch block handles errors specifically from the runCycle logic itself
             logger.error('[AE.runCycle] !!!!!!!! UNEXPECTED ERROR during cycle !!!!!!!!!!');
             logger.error(`[AE.runCycle] Error Type: ${error.constructor.name}, Msg: ${error.message}`);
+             // Log stack trace only if it's not an ArbitrageError or if debug logging is enabled
             if (!(error instanceof ArbitrageError) || logger.level <= logger.levels.DEBUG) {
                  logger.error('[AE.runCycle] Stack:', error.stack);
             }
+            // Use central error handler for reporting/cleanup if needed (optional, runCycle already logs)
             handleError(error, 'ArbitrageEngine.runCycleTopLevelCatch');
             cycleStatus = `FAILED (${error.type || error.constructor.name})`;
         } finally {
@@ -287,10 +294,12 @@ class ArbitrageEngine extends EventEmitter {
         if (profitableTrades?.length > 0) {
              logger.info(`[AE._handleProfitableTrades] --- ✅ Profitable Trades Found (${profitableTrades.length}) ---`);
              profitableTrades.forEach((trade, index) => {
-                  this._logTradeDetails(trade, index + 1);
+                  // Use the external tradeLogger utility
+                  tradeLogger.logTradeDetails(trade, index + 1, this.nativeSymbol); // <-- UPDATED CALL
              });
 
              try {
+                 // TradeHandler handles the actual transaction execution
                  await this.tradeHandler.handleTrades(profitableTrades);
                  logger.debug(`[AE._handleProfitableTrades] TradeHandler completed handling profitable trades.`);
              } catch (handlerError) {
@@ -305,72 +314,7 @@ class ArbitrageEngine extends EventEmitter {
         logger.debug(`[AE._handleProfitableTrades] Finished handling profitable trades.`);
     }
 
-    _logTradeDetails(trade, index) {
-        try {
-            const pathDesc = trade.path?.map(p => {
-                const symbols = p.poolState?.token0Symbol && p.poolState?.token1Symbol ? `${p.poolState.token0Symbol}/${p.poolState.token1Symbol}` : '?/?';
-                 const fee = p.fee !== undefined && p.fee !== null ? `@${p.fee}` : '';
-                return `${p.dex || '?'}(${symbols}${fee})`;
-            }).join('->') || 'N/A';
-
-            const formatAmount = (amountBigInt, token) => {
-                if (amountBigInt === null || amountBigInt === undefined || !token?.decimals) return 'N/A';
-                try {
-                    if (typeof amountBigInt !== 'bigint') amountBigInt = BigInt(amountBigInt);
-                    if (amountBigInt === 0n) return `0.0 ${token.symbol || '?'}`;
-                    return `${ethers.formatUnits(amountBigInt, token.decimals)} ${token.symbol || '?'}`;
-                } catch (e) {
-                    logger.debug(`[AE._logTradeDetails] Error formatting amount ${amountBigInt} for ${token?.symbol}: ${e.message}`);
-                    return `Error formatting (${amountBigInt.toString()})`;
-                }
-            };
-
-             const formatEth = (weiAmount) => {
-                 if (weiAmount === null || weiAmount === undefined) return 'N/A';
-                 try {
-                     if (typeof weiAmount !== 'bigint') weiAmount = BigInt(weiAmount);
-                     return `${ethers.formatEther(weiAmount)} ${this.nativeSymbol}`;
-                 } catch (e) {
-                     logger.debug(`[AE._logTradeDetails] Error formatting ETH amount ${weiAmount}: ${e.message}`);
-                     return `Error formatting (${weiAmount.toString()}) ${this.nativeSymbol}`;
-                 }
-             };
-
-
-            logger.info(`  [${index}] ${trade.type || '?'}-Arb | Path: ${pathDesc}`);
-            logger.info(`      Borrow: ${formatAmount(trade.amountIn, trade.tokenIn)}`);
-            if (trade.intermediateAmountOut !== undefined && trade.intermediateAmountOut !== null && trade.tokenIntermediate) {
-                 logger.info(`      -> Intermediate Out: ${formatAmount(trade.intermediateAmountOut, trade.tokenIntermediate)}`);
-            }
-            logger.info(`      -> Final Out: ${formatAmount(trade.amountOut, trade.tokenOut)}`);
-
-            if (trade.netProfitNativeWei !== undefined && trade.netProfitNativeWei !== null) {
-                 logger.info(`      NET Profit: ${formatEth(trade.netProfitNativeWei)} (Gross: ${formatEth(trade.estimatedProfit || 0n)})`);
-                 logger.info(`      Costs: Gas ~${formatEth(trade.gasEstimate?.totalCostWei || 0n)}, Loan Fee ~${formatEth(trade.flashLoanDetails?.feeNativeWei || 0n)}`);
-                 logger.info(`      Gas Estimate Check: ${trade.gasEstimateSuccess ? 'OK' : 'FAIL'} ${trade.gasEstimate?.errorMessage ? '(' + trade.gasEstimate.errorMessage + ')' : ''}`);
-
-                 if (trade.thresholdNativeWei !== undefined && trade.thresholdNativeWei !== null) {
-                      logger.info(`      Threshold Required: ${formatEth(trade.thresholdNativeWei)}`);
-                 }
-                 if (trade.titheAmountNativeWei !== null && trade.titheAmountNativeWei !== undefined && trade.titheAmountNativeWei > 0n) {
-                      logger.info(`      Tithe Amount: ${formatEth(trade.titheAmountNativeWei)} (To: ${trade.titheRecipient})`);
-                 }
-                 if (trade.profitPercentage !== null && trade.profitPercentage !== undefined) {
-                      logger.info(`      Profit Percentage: ~${trade.profitPercentage.toFixed(4)}% (vs borrowed ${trade.tokenIn?.symbol || '?'})`);
-                 }
-            } else {
-                 logger.info(`      Profit calculation details not available or failed.`);
-                 logger.debug(`      Raw Simulation Output (Borrowed Token Decimals): ${trade.amountOut?.toString() || 'N/A'}`);
-            }
-
-             logger.debug(`      Raw Amounts: Borrow=${trade.amountIn?.toString()}, IntermediateOut=${trade.intermediateAmountOut?.toString()}, FinalOut=${trade.amountOut?.toString()}`);
-
-
-        } catch (logError) {
-            logger.error(`[AE._logTradeDetails] Error logging trade details for index ${index}: ${logError.message}`);
-            try { logger.debug("Raw trade object:", JSON.stringify(trade, (k,v) => typeof v === 'bigint' ? v.toString() : v, 2)); } catch { logger.debug("Raw trade object: (Cannot stringify)");}
-        }
-    }
+    // --- _logTradeDetails method has been removed and moved to utils/tradeLogger.js ---
 
 } // End ArbitrageEngine class
 
