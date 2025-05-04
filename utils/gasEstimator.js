@@ -1,28 +1,21 @@
 // utils/gasEstimator.js
-// --- VERSION v1.12 --- Use FlashSwap ABI provided via constructor. Removed internal FlashSwap ABI loading.
+// --- VERSION v1.13 --- Corrected SyntaxError in path gas limit calculation.
 
 const { ethers } = require('ethers');
 const logger = require('./logger');
 const { ArbitrageError } = require('./errorHandler');
 const ErrorHandler = require('./errorHandler');
 // const TxParamBuilder = require('../core/tx/paramBuilder'); // Keep commented if using lazy require
-// --- REMOVED ABI IMPORT ---
-// const { ABIS } = require('../constants/abis'); // No longer needed for FlashSwap ABI
-
-
-// --- REMOVED internal FlashSwap Interface Initialization ---
-// let flashSwapInterface;
-// if (!ABIS.FlashSwap) { ... } else { ... }
 
 
 class GasEstimator {
     /**
      * @param {object} config - The application configuration object.
      * @param {ethers.Provider} provider - The ethers provider instance.
-     * @param {Array<object>} flashSwapABI - The ABI array for the FlashSwap contract. <-- ACCEPT ABI HERE
+     * @param {Array<object>} flashSwapABI - The ABI array for the FlashSwap contract.
      */
-    constructor(config, provider, flashSwapABI) { // <-- ACCEPT ABI HERE
-        logger.debug('[GasEstimator v1.12] Initializing...'); // Version bump
+    constructor(config, provider, flashSwapABI) {
+        logger.debug('[GasEstimator v1.13] Initializing...'); // Version bump
 
         if (!config || !provider) throw new ArbitrageError('GasEstimatorInit', 'Config/Provider required.');
         if (!config.GAS_COST_ESTIMATES?.FLASH_SWAP_BASE) logger.warn('[GasEstInit] GAS_COST_ESTIMATES incomplete.');
@@ -49,24 +42,20 @@ class GasEstimator {
 
         if (!this.flashSwapInterface) { logger.error('[GasEstInit] FlashSwap Interface could not be initialized. estimateGas check will fail.'); }
         // Add check for TITHE_WALLET_ADDRESS in config (still needed for builders)
-        if (!config.TITHE_WALLET_ADDRESS || !ethers.isAddress(config.TITHE_WALLET_WALLET_ADDRESS)) { // Typo here, should be TITHE_WALLET_ADDRESS
+        // --- CORRECTED TYPO ---
+        if (!config.TITHE_WALLET_ADDRESS || !ethers.isAddress(config.TITHE_WALLET_ADDRESS)) { // Corrected typo from TITHE_WALLET_WALLET_ADDRESS
              logger.warn('[GasEstInit] WARNING: TITHE_WALLET_ADDRESS is missing or invalid in config. Parameter builders may fail.');
         }
 
 
         this.config = config;
         this.provider = provider;
-        // Note: FlashSwapManager instance is NOT directly needed by GasEstimator for *estimation*.
-        // It's needed by the AavePathBuilder, which is lazily required. Pass it there.
-        // Reverting the change to store flashSwapManager instance here.
-        // this.flashSwapManager = flashSwapManager; // Removed
-
 
         this.gasEstimates = config.GAS_COST_ESTIMATES || {};
         this.maxGasPriceGwei = ethers.parseUnits(String(config.MAX_GAS_GWEI || 1), 'gwei');
         this.fallbackGasLimit = BigInt(config.FALLBACK_GAS_LIMIT || 3000000);
 
-        logger.info(`[GasEstimator v1.12] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`); // Version bump
+        logger.info(`[GasEstimator v1.13] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`); // Version bump
     }
 
     async getFeeData() {
@@ -105,8 +94,7 @@ class GasEstimator {
 
     /**
      * Encodes minimal transaction calldata for either UniV3 or Aave flash loan for gas estimation check.
-     * Uses minimal amounts (1 wei borrow, 0 min out for intermediate, adjusted to 1 for DODO quote sell for intermediate,
-     * and a small non-zero value for final minOut when needed for gas estimation).
+     * Uses minimal amounts (1 wei borrow, 1 wei min out for intermediate/final for estimateGas purposes).
      * Passes the titheRecipient address from config to the parameter builders.
      * @param {object} opportunity The opportunity object.
      * @param {string} providerType 'UNIV3' or 'AAVE'.
@@ -114,7 +102,7 @@ class GasEstimator {
      * @private Internal helper method
      */
     async _encodeMinimalCalldataForEstimate(opportunity, providerType) {
-        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.12]`; // Version bump
+        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.13]`; // Version bump
 
         // Use the interface created in the constructor
         if (!this.flashSwapInterface) {
@@ -125,6 +113,7 @@ class GasEstimator {
 
         // Retrieve titheRecipient from config
         const titheRecipient = this.config.TITHE_WALLET_ADDRESS;
+         // Validation of titheRecipient address format
          if (!titheRecipient || !ethers.isAddress(titheRecipient)) {
              const errorMsg = `Invalid TITHE_WALLET_ADDRESS in config: ${titheRecipient}. Cannot encode minimal calldata.`;
              logger.error(`${logPrefix} ${errorMsg}`);
@@ -144,12 +133,14 @@ class GasEstimator {
 
 
         try {
-            // Minimal simulation result placeholder for builders
-            // We need minimal amounts but also need to ensure minOut values aren't zero
-            // if the builder validates them. A small non-zero value like 1n might be needed.
-            // Let's use a very small value (1 wei) for initial/intermediate amounts in minimal sim result
-            // And use a small non-zero value (1n) for final minOut check if needed by builder.
-            const minimalSimResult = { initialAmount: 1n, hop1AmountOut: 1n, finalAmount: 1n }; // Use 1n for minimal amounts
+            // Corrected minimal simulation result placeholder for builders.
+            // Use 1n for initial, hop1, and final amounts to ensure minimal amounts > 0 are passed.
+            // This is specifically for the estimateGas check encoding, not for profit simulation.
+            const correctedMinimalSimResult = {
+                initialAmount: 1n, // Minimal borrow amount (e.g., 1 wei)
+                hop1AmountOutSimulated: 1n, // Minimal intermediate out amount (e.g., 1 wei)
+                finalAmountSimulated: 1n, // Minimal final out amount (e.g., 1 wei)
+            };
             let builderFunction;
             let buildResult;
 
@@ -161,35 +152,32 @@ class GasEstimator {
                      builderFunction = TxParamBuilder.buildTriangularParams; // Expects 4 args: opportunity, simResult, config, titheRecipient
                  } else {
                       const errorMsg = `Unsupported opportunity type/path for UniV3 estimateGas encoding: ${opportunity.type} / ${dexPath}`;
-                     throw new ArbitrageError(errorMsg, 'PARAM_BUILD_ERROR'); // Use ArbitrageError for builder issues
+                     throw new ArbitrageError(errorMsg, 'PARAM_BUILD_ERROR');
                  }
                  if (!builderFunction) {
                       const errorMsg = "UniV3 builder function not found in TxParamBuilder.";
-                     throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR'); // Use ArbitrageError
+                     throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
                  }
 
-                 // --- Pass titheRecipient to the builder ---
-                 // The builder will use the minimalSimResult amounts internally.
-                 buildResult = builderFunction(opportunity, minimalSimResult, this.config, titheRecipient); // Pass titheRecipient
+                 // Pass titheRecipient and corrected minimal sim result to the builder
+                 buildResult = builderFunction(opportunity, correctedMinimalSimResult, this.config, titheRecipient);
 
 
-                 // Encoding logic (remains the same, uses the interface created in constructor)
+                 // Encoding logic
                  const encodedParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [buildResult.params]);
                  const borrowPoolState = opportunity.path[0].poolState;
                  if (!borrowPoolState || !borrowPoolState.token0?.address || !borrowPoolState.token1?.address) {
                       const errorMsg = "Invalid V3 borrow pool state for estimateGas encoding.";
-                     throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR'); // Use ArbitrageError
+                     throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
                  }
                  let amount0 = 0n; let amount1 = 0n;
-                 // Use minimalSimResult.initialAmount for the borrow amount
-                 const borrowAmountMinimal = minimalSimResult.initialAmount; // This is 1n
+                 const borrowAmountMinimal = correctedMinimalSimResult.initialAmount;
                  if (buildResult.borrowTokenAddress.toLowerCase() === borrowPoolState.token0.address.toLowerCase()) amount0 = borrowAmountMinimal;
                  else if (buildResult.borrowTokenAddress.toLowerCase() === borrowPoolState.token1.address.toLowerCase()) amount1 = borrowAmountMinimal;
                  else {
                       const errorMsg = `Borrow token mismatch for UniV3 estimateGas encoding.`;
-                     throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR'); // Use ArbitrageError
+                     throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
                  }
-                 // Use the contract interface loaded in the constructor
                  const calldata = this.flashSwapInterface.encodeFunctionData(buildResult.contractFunctionName, [borrowPoolState.address, amount0, amount1, encodedParamsBytes]);
                  return { calldata, contractFunctionName: buildResult.contractFunctionName };
 
@@ -197,168 +185,60 @@ class GasEstimator {
                  builderFunction = TxParamBuilder.buildAavePathParams; // Expects 5 args: opportunity, simResult, config, flashSwapManager (temp or real), titheRecipient
                  if (!builderFunction) {
                       const errorMsg = "Aave builder function not found in TxParamBuilder exports.";
-                     throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR'); // Use ArbitrageError
+                     throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
                  }
-                 // Pass a minimal flashSwapManager instance if the builder needs it for getSignerAddress()
-                 // or pass null if the builder handles null gracefully in this context.
-                 // Let's pass null, as the builder in GasEstimator shouldn't need a real FSM instance.
-                 const minimalFlashSwapManager = null; // Pass null or simple mock if necessary for builder signature
 
-                 // --- Pass titheRecipient to the builder ---
-                 // The builder will use the minimalSimResult amounts internally.
-                 buildResult = await builderFunction(opportunity, minimalSimResult, this.config, minimalFlashSwapManager, titheRecipient);
+                 // Pass null for FlashSwapManager as AavePathBuilder shouldn't need a real one for encoding for estimateGas
+                 const minimalFlashSwapManager = null;
+
+                 // Pass titheRecipient and corrected minimal sim result to the builder
+                 buildResult = await builderFunction(opportunity, correctedMinimalSimResult, this.config, minimalFlashSwapManager, titheRecipient);
 
 
-                 // --- ADJUSTMENT for DODO QUOTE SELL during estimation (remains the same) ---
-                 // This logic needs to handle the new structure returned by the builder (ArbParams struct properties)
+                 // Encoding Logic: The builder (AavePathBuilder) should return { params: { path: SwapStep[], titheRecipient: address }, typeString: "tuple(...)" }
+                 // Access the path array from the builder's result params for DODO adjustment if needed.
                  let adjustedParams = { ...buildResult.params }; // Should be the ArbParams struct { path: SwapStep[], titheRecipient: address }
                  let adjustedPath = [...adjustedParams.path]; // Array of SwapStep structs
                  adjustedParams.path = adjustedPath; // Assign the copied path array back
 
                  let needsReEncoding = false; // Flag if adjustment occurred
 
-                 // This adjustment logic needs to look at the SwapStep minOut values *within* the builder's output `buildResult.params.path`
+                 // The DODO adjustment logic: Ensure minimal amounts > 0 for estimateGas if the builder set them to 0.
+                 // This might be redundant now if the builder correctly uses correctedMinimalSimResult.
+                 // Let's simplify this adjustment. If any SwapStep's minOut is 0, set it to 1n for estimateGas check.
                  for(let i = 0; i < adjustedPath.length; i++) {
-                     const step = adjustedPath[i]; // This is a SwapStep struct { dexType, pool, tokenIn, tokenOut, minOut, fee }
-                     // Check if it's a DODO step AND selling the quote token (tokenIn != baseToken)
-                     // Need pool info from config to find base token
-                     const poolInfo = this.config.POOL_CONFIGS?.find(p => p.address.toLowerCase() === step.pool.toLowerCase() && p.dexType === 'dodo');
-                     const baseTokenSymbol = poolInfo?.baseTokenSymbol;
-                     const baseToken = baseTokenSymbol ? this.config.TOKENS[baseTokenSymbol] : null;
-
-                     // The adjustment logic needs to ensure the *final* SwapStep's minOut is > 0
-                     // for the estimateGas check, while intermediate steps can potentially be 0
-                     // depending on what `estimateGas` requires.
-                     // Let's revisit the original reason for this adjustment... it was to ensure minimal amounts > 0
-                     // are used for simulation if needed by the builder, which then calculates minOut.
-                     // If the builder *directly* uses the minimal sim result's amounts (which are 1n),
-                     // the calculated minOut might be 0 due to fee/slippage calculation on 1n.
-                     // A simpler fix is to ensure the *minimalSimResult.finalAmount* passed to the builder is 1n,
-                     // which should result in a non-zero `amountOutMinimumFinal` if the builder uses it.
-                     // The `calculateMinAmountOut(hop2AmountOutSimulated, ...)` in builders needs hop2AmountOutSimulated > 0.
-                     // Let's ensure minimalSimResult.finalAmount passed to builder is 1n. It is (see above).
-                     // The warning "Invalid input: amountOut=0" suggests calculateMinAmountOut is receiving 0.
-                     // This means minimalSimResult.finalAmount (or intermediateAmountOut) might not be 1n when used.
-                     // Let's log minimalSimResult passed to builders for debugging this.
-
-                     // *** New approach: Ensure minimalSimResult passed to builders has finalAmount = 1n ***
-                     // *** Done above. The warning must be coming from elsewhere or the builder isn't using it. ***
-                     // *** Let's check the builders code again for calculateMinAmountOut(0n, ...) calls. ***
-
-                     // The `calculateMinAmountOut` call is inside the builder. If the builder receives
-                     // `minimalSimResult.finalAmount` as 1n, `calculateMinAmountOut` should not get 0n.
-                     // Let's check the builder code again.
-                     // twoHopV3Builder.js:47:61 calculateMinAmountOut(hop2AmountOutSimulated, config.SLIPPAGE_TOLERANCE_BPS);
-                     // This means hop2AmountOutSimulated must be 0n when passed to calculateMinAmountOut.
-                     // But minimalSimResult.finalAmount is set to 1n.
-                     // AH! The builder gets `simulationResult` as the second arg, but it internally uses `simulationResult.hop1AmountOutSimulated` and `simulationResult.hop2AmountOutSimulated`.
-                     // The minimalSimResult object needs these specific properties!
-                     // Correct minimalSimResult placeholder:
-                      const correctedMinimalSimResult = {
-                          initialAmount: 1n, // Minimal borrow
-                          hop1AmountOutSimulated: 1n, // Minimal intermediate out
-                          finalAmountSimulated: 1n, // Minimal final out
-                          // DODO specific fields if needed by builder?
-                          // For now, assume builders only use hop1AmountOutSimulated and finalAmountSimulated
-                      };
-
-                      // Rerun the builder call with the corrected minimalSimResult
-                      // Re-doing the buildResult call inside the try block with correctedMinimalSimResult
-                      if (providerType === 'UNIV3') {
-                           // ... UniV3 builder logic (same as before) ...
-                           builderFunction = TxParamBuilder.buildTwoHopParams; // Or buildTriangularParams
-                            // Pass corrected minimal sim result
-                           buildResult = builderFunction(opportunity, correctedMinimalSimResult, this.config, titheRecipient);
-                           // ... rest of UniV3 encoding ...
-                      } else if (providerType === 'AAVE') {
-                           // ... Aave builder logic (same as before) ...
-                           builderFunction = TxParamBuilder.buildAavePathParams;
-                            // Pass corrected minimal sim result
-                           buildResult = await builderFunction(opportunity, correctedMinimalSimResult, this.config, minimalFlashSwapManager, titheRecipient);
-                           // ... rest of Aave encoding ...
+                      const step = adjustedPath[i]; // This is a SwapStep struct { dexType, pool, tokenIn, tokenOut, minOut, fee }
+                      if (step.minOut === 0n) {
+                           logger.debug(`${logPrefix} Adjusting minOut from 0 to 1n for step ${i} during gas estimation encoding.`);
+                           adjustedPath[i] = { ...step, minOut: 1n };
+                           needsReEncoding = true;
                       }
-                      // --- END REVISED BUILDER CALL WITH CORRECTED MINIMAL SIM RESULT ---
+                 }
 
-                     // The DODO adjustment logic below was specifically for the Aave path.
-                     // It aimed to set minOut to 1n for DODO quote sells if it was 0, *within the encoded params*.
-                     // If the builder already sets minOut > 0 based on the minimal sim result, this might be redundant.
-                     // Let's keep it for now but simplify, assuming the builder returned the expected ArbParams struct.
+                 // Re-encode the *adjusted* params struct if changes were made
+                 const encodedArbParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [needsReEncoding ? adjustedParams : buildResult.params]);
 
-                     // Check if the builder returned the expected structure for Aave (ArbParams struct encoded)
-                     if (providerType === 'AAVE' && buildResult?.typeString?.startsWith('tuple(tuple(uint8 dexType,address pool,address tokenIn,address tokenOut,uint256 minOut,uint24 fee)[] path') && buildResult.params?.path && buildResult.params?.titheRecipient) {
-                          // Access the path array from the builder's result params
-                          const originalPathFromBuilder = buildResult.params.path;
-                          adjustedPath = [...originalPathFromBuilder]; // Copy the path array from the builder's result
-                          adjustedParams = { ...buildResult.params, path: adjustedPath }; // Copy the whole params struct
+                 // Args for initiateAaveFlashLoan(address[] assets, uint256[] amounts, bytes params)
+                 // Borrowed asset and amount for the minimal sim:
+                 const assetMinimal = buildResult.borrowTokenAddress; // Builder should provide this (first token in path[0] or specific borrow token)
+                 const amountMinimal = correctedMinimalSimResult.initialAmount; // This is 1n
+                 const args = [[assetMinimal], [amountMinimal], encodedArbParamsBytes]; // Pass encoded ArbParams struct
 
-                          for(let i = 0; i < adjustedPath.length; i++) {
-                              const step = adjustedPath[i]; // This is a SwapStep struct { dexType, pool, tokenIn, tokenOut, minOut, fee }
-                              // Check if it's a DODO step AND selling the quote token (tokenIn != baseToken)
-                              const poolInfo = this.config.POOL_CONFIGS?.find(p => p.address.toLowerCase() === step.pool.toLowerCase() && p.dexType === 'dodo');
-                              const baseTokenSymbol = poolInfo?.baseTokenSymbol;
-                              const baseToken = baseTokenSymbol ? this.config.TOKENS[baseTokenSymbol] : null;
+                 const calldata = this.flashSwapInterface.encodeFunctionData(buildResult.contractFunctionName, args);
+                 return { calldata, contractFunctionName: buildResult.contractFunctionName };
 
-                              if (step.dexType === 2 /* DEX_TYPE_DODO */ && baseToken && step.tokenIn.toLowerCase() !== baseToken.address.toLowerCase()) {
-                                   // This is a DODO quote sell. If minOut is currently 0 (from minimalSimResult calculations), set it to 1 for estimateGas.
-                                   if (step.minOut === 0n) { // Check the minOut value in the SwapStep struct from the builder
-                                       logger.debug(`${logPrefix} Adjusting DODO quote sell minOut from 0 to 1 for step ${i} during gas estimation encoding.`);
-                                       adjustedPath[i] = { ...step, minOut: 1n }; // Use 1n (BigInt one)
-                                       needsReEncoding = true; // Indicate we need to encode the adjustedParams
-                                   }
-                              }
-                          }
-                         // Re-encode the *adjusted* params struct if changes were made
-                         if (needsReEncoding) {
-                              encodedArbParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [adjustedParams]);
-                         } else {
-                              // If no adjustments, encode the builder's original result params
-                              encodedArbParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [buildResult.params]);
-                         }
-
-                          // Args for initiateAaveFlashLoan(address[] assets, uint256[] amounts, bytes params)
-                         // Borrowed asset and amount for the minimal sim:
-                         const assetMinimal = buildResult.borrowTokenAddress; // Builder should provide this
-                         const amountMinimal = correctedMinimalSimResult.initialAmount; // This is 1n
-                         const args = [[assetMinimal], [amountMinimal], encodedArbParamsBytes]; // Pass encoded ArbParams struct
-
-                          // Use the contract interface loaded in the constructor
-                         calldata = this.flashSwapInterface.encodeFunctionData(buildResult.contractFunctionName, args);
-                         return { calldata, contractFunctionName: buildResult.contractFunctionName };
-
-                     } else if (providerType === 'AAVE') {
-                          // If builder didn't return expected ArbParams structure for Aave...
-                          const errorMsg = "Aave path builder did not return expected ArbParams structure for encoding.";
-                          logger.error(`${logPrefix} ${errorMsg}`);
-                          // Fall through to general error handling
-                          throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
-
-                     } else {
-                         // If not AAVE, then it must be the UniV3 case handled above.
-                          // This else should not be reached if providerType is handled.
-                          const errorMsg = `Unhandled providerType after builder logic: ${providerType}`;
-                          throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
-                     }
-
-                 // --- END ADJUSTMENT ---
 
             } else {
                 const errorMsg = `Invalid providerType passed to _encodeMinimalCalldataForEstimate: ${providerType}`;
-                throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR'); // Use ArbitrageError
+                throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
             }
-
-             // If encoding was successful, the relevant return was already hit inside the if/else blocks.
-             // If we reach here, something went wrong *before* the successful return.
-             const errorMsg = "Reached end of _encodeMinimalCalldataForEstimate without returning valid calldata.";
-             logger.error(`${logPrefix} ${errorMsg}`);
-             return { calldata: null, contractFunctionName: null, errorMessage: errorMsg };
 
 
         } catch (error) {
             let errorMessage = error.message;
-            // Log builder-specific errors with their type and details if available
             if (error instanceof ArbitrageError && error.type === 'PARAM_BUILD_ERROR') {
                 logger.error(`${logPrefix} Parameter build error: ${error.message}`, error.details);
-                errorMessage = `Parameter build error: ${error.message}`; // Use specific message for return
+                errorMessage = `Parameter build error: ${error.message}`;
             } else {
                  logger.error(`${logPrefix} Failed to encode minimal calldata: ${error.message}`, error);
             }
@@ -374,7 +254,7 @@ class GasEstimator {
      * @param {string} walletSignerAddress The address of the bot's signer wallet (for estimateGas 'from' field).
      * @returns {Promise<{ pathGasLimit: bigint, effectiveGasPrice: bigint, totalCostWei: bigint, estimateGasSuccess: boolean, errorMessage?: string } | null>}
      */
-    async estimateTxGasCost(opportunity, walletSignerAddress) {
+    async estimateTxGasCost(opportunity, walletSignerAddress) { // Renamed from signerAddress for clarity
         const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey}]`;
         logger.debug(`${logPrefix} Starting path-based gas estimation & validity check...`);
 
@@ -426,19 +306,23 @@ class GasEstimator {
              else if (dexKey === 'sushiswap') hopCost = BigInt(this.gasEstimates.SUSHISWAP_V2_SWAP || 0);
              else if (dexKey === 'dodo') hopCost = BigInt(this.gasEstimates.DODO_SWAP || 0);
              else { logger.warn(`${logPrefix} Unknown DEX '${step.dex}' in path gas cost calc.`); }
-             if (hopCost === 0n) logger.debug(`${logPrefix} Gas estimate missing or zero for DEX '${step.dex}'. Using 0 for hop.`); // Changed warn to debug
+             if (hopCost === 0n) logger.debug(`${logPrefix} Gas estimate missing or zero for DEX '${step.dex}'. Using 0 for hop.`);
              pathGasLimit += hopCost;
          }
 
+         // Apply buffer only if pathGasLimit is meaningful
          if (pathGasLimit > 0n) {
              const bufferPercent = BigInt(this.config.GAS_ESTIMATE_BUFFER_PERCENT || 0);
              if (bufferPercent > 0n) {
                  pathGasLimit += (pathGasLimit * bufferPercent) / 100n;
              }
-         } else {
+         }
+         // --- CORRECTED SYNTAX ERROR ---
+         else { // This else should follow directly after the closing bracket of the if block above
               logger.warn(`${logPrefix} Calculated pathGasLimit is zero or negative before buffer. Using fallback.`);
               pathGasLimit = this.fallbackGasLimit;
          }
+         // --- END CORRECTED SYNTAX ERROR ---
 
          logger.debug(`${logPrefix} Path-based limit (+buffer): ${pathGasLimit}`);
 
@@ -461,7 +345,6 @@ class GasEstimator {
         if (!encodedResult || !encodedResult.calldata) {
              const errorMsg = encodedResult?.errorMessage || "Minimal calldata encoding failed. Cannot perform estimateGas check.";
              logger.warn(`${logPrefix} ${errorMsg}. Assuming tx invalid.`);
-             // Return a failure state, but include the calculated pathGasLimit and effectiveGasPrice
              return { pathGasLimit, effectiveGasPrice, totalCostWei: pathGasLimit * effectiveGasPrice, estimateGasSuccess: false, errorMessage: errorMsg };
         }
         const { calldata: encodedData, contractFunctionName } = encodedResult;
@@ -482,10 +365,9 @@ class GasEstimator {
             });
             estimateGasSuccess = true;
 
-             // Update pathGasLimit using provider's estimate if it's higher
              if (estimatedGasLimitFromProvider > pathGasLimit) {
                   logger.debug(`${logPrefix} Provider estimateGas (${estimatedGasLimitFromProvider}) is higher than path estimate (${pathGasLimit}). Using provider estimate.`);
-                  pathGasLimit = estimatedGasLimitFromProvider; // Use provider's estimate for cost calculation
+                  pathGasLimit = estimatedGasLimitFromProvider;
              } else {
                   logger.debug(`${logPrefix} Provider estimateGas (${estimatedGasLimitFromProvider}) is lower than or equal to path estimate (${pathGasLimit}). Using path estimate.`);
              }
@@ -501,7 +383,6 @@ class GasEstimator {
              });
              estimateGasSuccess = false;
              estimateGasErrorMessage = reason;
-             // Do NOT update pathGasLimit based on a failed estimateGas call
         }
 
         // --- 5. Calculate Final Cost using the (potentially updated) Path-Based or Provider Estimate ---
@@ -513,8 +394,7 @@ class GasEstimator {
             effectiveGasPrice: effectiveGasPrice,
             totalCostWei: totalCostWei,
             estimateGasSuccess: estimateGasSuccess,
-            // Include the error message from the estimateGas check if it failed
-            errorMessage: estimateGasErrorMessage
+            errorMessage: estimateGasSuccess ? undefined : (estimateGasError?.reason || estimateGasError?.message || "EstimateGas check failed.")
         };
     }
 }
