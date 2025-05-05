@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.11 --- Added explicit overrides for specific Uniswap V3 library files (PoolAddress.sol, CallbackValidation.sol) to resolve persistent HH600/TypeError.
+// --- VERSION v1.12 --- Set hardhat network chainId to 42161 for forking.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -173,18 +173,19 @@ module.exports = {
        // Use the environment variable private key if valid, in the correct object format.
        // If not valid, hardhatAccountsConfig is empty array, Hardhat will generate defaults.
        accounts: hardhatAccountsConfig,
-       // chainId: 31337 // Default Hardhat chainId - leave commented unless needed
+       chainId: 42161 // Explicitly set Hardhat network chainId to match Arbitrum for forking
     },
     // Local Fork Network (Used with --network localFork)
-    // Configured to fork Arbitrum Mainnet at a specific block.
+    // Configured to connect to the Hardhat node's RPC endpoint (http://127.0.0.1:8545).
+    // This network config is primarily used by the bot and console to *connect* to the running node.
     localFork: {
       url: "http://127.0.0.1:8545", // Hardhat node RPC endpoint
       // NO accounts array defined here. Hardhat node provides accounts, bot uses PRIVATE_KEY from .env.
       chainId: 42161, // Match Arbitrum Mainnet chain ID
-       // Forking configuration is linked by chainId below
+       // The forking configuration is applied to the *hardhat* network when its chainId is 42161
     },
     // Forking configuration - applies to the Hardhat network *if* chainId matches OR if explicitly linked
-    // When using `--network localFork` which has chainId 42161, this forking config is picked up.
+    // Since we set the 'hardhat' network's chainId to 42161, this forking config is picked up
     forking: {
         url: ARBITRUM_RPC_URL, // Use the Arbitrum Mainnet RPC URL from .env
         // blockNumber: 123456789 // Optional: Specify a block number for consistent fork state
@@ -226,4 +227,4 @@ module.exports = {
 // This warning is specifically for the PRIVATE_KEY variable used for non-localFork networks
 if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.replace(/^0x/, "").length !== 64 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
      console.warn(`[Hardhat Config] WARNING: PRIVATE_KEY environment variable has unexpected length (${process.env.PRIVATE_KEY.replace(/^0x/, "").length} after stripping 0x). Expected 64 for live networks.`);
-      }
+}
