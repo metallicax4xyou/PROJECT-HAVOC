@@ -1,11 +1,15 @@
 // utils/priceUtils.js
 // Provides utility functions for calculating raw spot prices from different pool types
 // and defines shared price-related constants.
-// --- VERSION v2.0 --- Consolidated raw price calcs and constants from core/calculation/priceCalculation.js
+// --- VERSION v2.1 --- Fixed SyntaxError in ethers import.
 
-const { ethers } require('ethers'); // Needed for BigInt/parsing in some contexts (though mostly just BigInt used)
-const logger = require('./logger');
+// Needed for BigInt/parsing in some contexts (though mostly just BigInt used)
+// CORRECTED SYNTAX: Use '=' for destructuring assignment
+const { ethers } = require('ethers');
+
+const logger = require('./logger'); // Assuming logger is correctly imported
 const { ArbitrageError, handleError } = require('./errorHandler'); // Assuming errorHandler is in utils
+const { TOKENS } = require('../constants/tokens'); // Assuming TOKENS is needed here
 
 // --- Shared Constants for Price Calculations ---
 // Use 18 decimals as the standard scale for consistency, like ETH/WETH for price representation
