@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.14 --- Added temporary console.log to check forking config.
+// --- VERSION v1.15 --- REMOVED misplaced console.log causing SyntaxError.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -171,7 +171,7 @@ module.exports = {
     // This is the in-memory network, configured for forking Arbitrum Mainnet.
     hardhat: {
        // Use the environment variable private key if valid, in the correct object format.
-       // If not valid, hardhatAccountsConfig is empty array, Hardhat will generate defaults.
+       // If not valid, hardhatAccountsConfig is empty array, Hardhat will generate default accounts.
        accounts: hardhatAccountsConfig,
        chainId: 42161, // Explicitly set Hardhat network chainId to match Arbitrum for forking
        // --- MOVED FORKING CONFIG HERE ---
@@ -182,8 +182,6 @@ module.exports = {
        },
        // --- END MOVED FORKING CONFIG ---
     },
-
-    console.log("Hardhat network forking config:", module.exports.networks.hardhat.forking); // <--- ADDED TEMPORARY LOG HERE
 
     // Local Fork Network (Used with --network localFork)
     // Configured to connect to the Hardhat node's RPC endpoint (http://127.0.0.1:8545).
@@ -231,4 +229,4 @@ module.exports = {
 // This warning is specifically for the PRIVATE_KEY variable used for non-localFork networks
 if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.replace(/^0x/, "").length !== 64 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
      console.warn(`[Hardhat Config] WARNING: PRIVATE_KEY environment variable has unexpected length (${process.env.PRIVATE_KEY.replace(/^0x/, "").length} after stripping 0x). Expected 64 for live networks.`);
-    }
+      }
