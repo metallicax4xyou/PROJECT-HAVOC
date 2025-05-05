@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.16 --- Simplified forking config in hardhat network to use direct values.
+// --- VERSION v1.17 --- Explicitly set forking.enabled to boolean true literal.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -39,7 +39,7 @@ const accountsForLiveNetworks = (PRIVATE_KEY_RAW_ENV.length === 64) ? [`0x${PRIV
 
 
 // Access specific RPC URLs from .env
-// Keeping these defined, but the forking config below will use the direct string for testing
+// Keeping these defined, but the forking config below will use the direct string from env for testing
 const ARBITRUM_RPC_URL = process.env.ARBITRUM_RPC_URLS?.split(',')[0] || `https://arb-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY_ARBITRUM}`;
 const GOERLI_RPC_URL = process.env.GOERLI_RPC_URL || `https://eth-goerli.g.alchemy.com/v2/${INFURA_API_KEY}`; // Using Infura as fallback example
 const ARBITRUM_GOERLI_RPC_URL = process.env.ARBITRUM_GOERLI_RPC_URL || "https://goerli-rollup.arbitrum.io/rpc";
@@ -181,9 +181,9 @@ module.exports = {
        chainId: 42161, // Explicitly set Hardhat network chainId to match Arbitrum for forking
        // --- SIMPLIFIED FORKING CONFIG HERE ---
        forking: {
-           // Use the direct URL string from .env for testing
+           // Use the direct URL string from .env
            url: process.env.ARBITRUM_RPC_URLS?.split(',')[0] || `https://arb-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY_ARBITRUM}`,
-           enabled: true // Explicitly set to true regardless of env var, just to test activation
+           enabled: true // Explicitly set to true literal
        },
        // --- END SIMPLIFIED FORKING CONFIG ---
     },
