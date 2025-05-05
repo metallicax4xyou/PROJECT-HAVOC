@@ -1,11 +1,19 @@
 // core/finders/spatialFinder.js
-// --- VERSION v1.27 --- Corrected typo (tokenBorrowedOrIntermediate -> tokenIntermediate) in _createOpportunity validation.
+// Finds spatial arbitrage opportunities between pools of the same token pair across different DEXs.
+// --- VERSION v1.28 --- Corrected import path and function names for price calculation from utils/priceUtils.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
 const { getCanonicalPairKey } = require('../../utils/pairUtils');
-// Import the correct price calculation functions from priceCalculation.js
-const { calculateV3PriceT0_T1_scaled, calculateSushiPrice, calculateDodoPrice, PRICE_SCALE } = require('../calculation/priceCalculation');
+// Import the correct price calculation functions and constants from utils/priceUtils.js
+// CORRECTED PATH AND FUNCTION NAMES
+const {
+    calculateV3PriceT0_T1_scaled,
+    calculateV2PriceT0_T1_scaled, // Corrected function name for V2/SushiSwap
+    calculateDodoPriceT0_T1_scaled, // Corrected function name for DODO
+    PRICE_SCALE // Import PRICE_SCALE constant
+} = require('../../utils/priceUtils'); // CORRECTED IMPORT PATH
+
 const { TOKENS } = require('../../constants/tokens'); // Ensure TOKENS is imported
 
 const BASIS_POINTS_DENOMINATOR = 10000n; // Constant for basis points calculation
@@ -15,9 +23,8 @@ class SpatialFinder {
      * @param {object} config - The application configuration object.
      */
     constructor(config) {
-        logger.debug('[SpatialFinder v1.27] Initializing...'); // Version bump
+        logger.debug('[SpatialFinder v1.28] Initializing...'); // Version bump
 
-        // --- CORRECTED CONSTRUCTOR VALIDATION ---
         const finderSettings = config?.FINDER_SETTINGS;
         const simulationAmounts = finderSettings?.SPATIAL_SIMULATION_INPUT_AMOUNTS;
 
@@ -50,10 +57,8 @@ class SpatialFinder {
             logger.error('[SpatialFinder Init] CRITICAL ERROR:', err); // Log the critical error
             throw err; // Stop initialization if essential config is missing
         }
-        // --- END CORRECTED VALIDATION ---
 
         this.config = config; // Store the full configuration object for later use
-        // Removed `this.pairRegistry = new Map();` <-- This finder will receive the registry
         // Read and store specific config values used frequently as class properties.
 
         // Add debug logs before conversion
@@ -76,21 +81,59 @@ class SpatialFinder {
         const processedSimulationAmounts = {};
         for (const [key, value] of Object.entries(simulationAmounts)) {
             try {
-                 if (key !== 'DEFAULT' && (typeof value === 'number' || typeof value === 'string' && !isNaN(Number(value)))) {
-                      processedSimulationAmounts[key] = BigInt(value);
-                 } else {
-                      processedSimulationAmounts[key] = value; // Keep non-numeric or 'DEFAULT' as is
+                 // Check if the token key exists in the TOKENS constant and is a valid number/string that can be converted to BigInt
+                 const tokenExists = TOKENS[key] !== undefined;
+                 const isConvertible = typeof value === 'number' || (typeof value === 'string' && !isNaN(Number(value)));
+
+                 if (tokenExists && isConvertible) {
+                     // Convert to BigInt, scaling by token decimals IF the value represents standard units (e.g., 100 USDC)
+                     // NOTE: The config currently stores simulation amounts in *standard units*.
+                     // We need to convert them to *smallest units* (wei/satoshi) using token decimals *before* storing as BigInt.
+                     const token = TOKENS[key];
+                     processedSimulationAmounts[key] = ethers.parseUnits(value.toString(), token.decimals); // Convert value in standard units to smallest units (BigInt)
+                     logger.debug(`[SpatialFinder Constructor] Converted simulation amount for ${key} (${value}) to smallest units: ${processedSimulationAmounts[key].toString()} (decimals: ${token.decimals})`);
+
+                 } else if (key === 'DEFAULT' && isConvertible) {
+                      // Handle the default case - needs conversion to smallest units based on a default token (like WETH) or should it be in smallest units already?
+                      // Assuming DEFAULT is in standard units of the native currency (ETH/WETH)
+                      const nativeToken = TOKENS[config.NATIVE_CURRENCY_SYMBOL || 'WETH']; // Default to WETH if native symbol not clear
+                       if (nativeToken && nativeToken.decimals !== undefined) {
+                            processedSimulationAmounts[key] = ethers.parseUnits(value.toString(), nativeToken.decimals);
+                            logger.debug(`[SpatialFinder Constructor] Converted DEFAULT simulation amount (${value}) based on ${nativeToken.symbol} to smallest units: ${processedSimulationAmounts[key].toString()} (decimals: ${nativeToken.decimals})`);
+                       } else {
+                            logger.warn(`[SpatialFinder Constructor] Could not determine native token decimals for DEFAULT simulation amount conversion. Value: ${value}. Storing as raw BigInt.`);
+                            processedSimulationAmounts[key] = BigInt(value); // Store as raw BigInt if conversion failed
+                       }
+                 }
+                 else {
+                      // Store raw BigInt if it's already one, or if conversion logic isn't applicable
+                      processedSimulationAmounts[key] = BigInt(value); // Keep raw BigInt or attempt conversion if not already BigInt
+                      logger.debug(`[SpatialFinder Constructor] Storing simulation amount for ${key} as raw BigInt or failed conversion: ${processedSimulationAmounts[key].toString()}`);
                  }
             } catch (e) {
-                 logger.warn(`[SpatialFinder Constructor] Could not convert simulation input amount for key '${key}' to BigInt. Value: ${value}. Error: ${e.message}`);
-                 processedSimulationAmounts[key] = value; // Keep original value if conversion fails
+                 logger.warn(`[SpatialFinder Constructor] Could not process simulation input amount for key '${key}'. Value: ${value}. Error: ${e.message}`);
+                 // Decide how to handle errors: skip the token, use default, or throw?
+                 // For now, log and continue, potentially leaving it unprocessed or using a fallback.
+                 // A robust system might skip this token or use a safe fallback.
+                 // Ensure DEFAULT is handled. If the DEFAULT conversion failed above, this might leave it in a bad state.
             }
         }
+         // Double-check DEFAULT is a BigInt after processing
+         if (processedSimulationAmounts['DEFAULT'] !== undefined && typeof processedSimulationAmounts['DEFAULT'] !== 'bigint') {
+             logger.error('[SpatialFinder Constructor] CRITICAL: DEFAULT simulation input amount is not a BigInt after processing.');
+             const err = new Error('Invalid format for DEFAULT simulation input amount after processing.');
+             err.type = 'SpatialFinder: Init Failed';
+             throw err; // Stop initialization
+         }
+
         this.simulationInputAmounts = processedSimulationAmounts;
 
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.27] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length} (Filters DODO Quote Sell)`); // Updated version log
+        logger.info(`[SpatialFinder v1.28] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length}.`); // Updated version log
+        // Log simulation amounts after processing
+        logger.debug(`[SpatialFinder v1.28] Processed Simulation Input Amounts (in smallest units):`, JSON.stringify(this.simulationInputAmounts, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+
     }
 
     /**
@@ -113,21 +156,21 @@ class SpatialFinder {
         }
 
         try {
-            // Delegate price calculation to priceCalculation functions based on the DEX type
+            // Delegate price calculation to price calculation functions from utils/priceUtils based on the DEX type
             switch (dexType?.toLowerCase()) {
                 case 'uniswapv3':
-                    // Call the function that calculates T0/T1 scaled by PRICE_SCALE
-                    price0_1_scaled = calculateV3PriceT0_T1_scaled(poolState);
+                    // Call the function that calculates T0/T1 scaled by PRICE_SCALE for V3
+                    price0_1_scaled = calculateV3PriceT0_T1_scaled(poolState); // Correct name
                     break;
 
                 case 'sushiswap': // Assuming SushiSwap uses Uniswap V2 logic
-                    // calculateSushiPrice already returns T0/T1 scaled by PRICE_SCALE
-                    price0_1_scaled = calculateSushiPrice(poolState);
+                    // Call the function that calculates T0/T1 scaled by PRICE_SCALE for V2/SushiSwap
+                    price0_1_scaled = calculateV2PriceT0_T1_scaled(poolState); // Corrected function name
                     break;
 
                 case 'dodo':
-                    // calculateDodoPrice already returns T0/T1 scaled by PRICE_SCALE (assuming T0 is Base, T1 is Quote or handles inverse)
-                    price0_1_scaled = calculateDodoPrice(poolState);
+                    // Call the function that calculates T0/T1 scaled by PRICE_SCALE for DODO
+                    price0_1_scaled = calculateDodoPriceT0_T1_scaled(poolState); // Corrected function name
                     break;
 
                 // Add cases for other DEX types if needed (e.g., camelot)
@@ -146,7 +189,7 @@ class SpatialFinder {
 
         // --- ADD DEBUG LOG FOR FINAL CALCULATED PRICE ---
         // Only log if price calculation was attempted (not null/undefined)
-        if (price0_1_scaled !== null && price0_1_scaled !== undefined) {
+        if (price0_1_scaled !== null && price0_1_scaled !== undefined && price0_1_scaled > 0n) {
              // Only log if the price is positive, otherwise it's likely still an issue or zero liquidity
              if (price0_1_scaled > 0n) {
                  try {
@@ -157,13 +200,14 @@ class SpatialFinder {
 
                       // Calculate inverse price (T1/T0) scaled by 1e18 for logging clarity
                       let priceInverseFormatted_T1_T0 = 'N/A';
+                      // Ensure no division by zero for inverse calculation
                       if (price0_1_scaled > 0n) {
                           const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / price0_1_scaled;
                                // Handle potential division by zero if price0_1_scaled is unexpectedly large after filter? Unlikely but safe.
                               if (priceInverseScaled > 0n) {
                                   priceInverseFormatted_T1_T0 = ethers.formatUnits(priceInverseScaled, 18);
                               } else {
-                                  priceInverseFormatted_T1_T0 = 'Calculated 0';
+                                  priceInverseFormatted_T1_T0 = 'Calculated 0'; // Inverse results in zero (very large price)
                               }
                           }
 
@@ -269,19 +313,20 @@ class SpatialFinder {
 
                           // Calculate inverse price (T1/T0) scaled by 1e18 for logging clarity
                           let priceInverseFormatted_T1_T0 = 'N/A';
+                          // Ensure no division by zero for inverse calculation
                           if (p.price0_1_scaled > 0n) {
                               const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / p.price0_1_scaled;
                                // Handle potential division by zero if price0_1_scaled is unexpectedly large after filter? Unlikely but safe.
                               if (priceInverseScaled > 0n) {
                                   priceInverseFormatted_T1_T0 = ethers.formatUnits(priceInverseScaled, 18);
                               } else {
-                                  priceInverseFormatted_T1_T0 = 'Calculated 0';
+                                  priceInverseFormatted_T1_T0 = 'Calculated 0'; // Inverse results in zero (very large price)
                               }
                           }
 
-                          logger.debug(`  - Pool ${p.address?.substring(0,6)} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}) Price (T0/T1 scaled): ${p.price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted_T0_T1} | T1/T0 (Approx): ${priceInverseFormatted_T1_T0}. Returning price.`);
+                          logger.debug(`  - Pool ${p.address?.substring(0,6)} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}) Price (T0/T1 scaled): ${p.price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted_T0_T1} | T1/T0 (Approx): ${priceInverseFormatted_T1_T0}.`);
                      } catch (formatError) {
-                          logger.error(`Error logging price for pool ${p.address}: ${formatError.message}`);
+                          logger.error(`[SF.findArbitrage] Error logging price for pool ${p.address}: ${formatError.message}`);
                           logger.debug(`  - Pool ${p.address?.substring(0,6)} (${p.dexType} ${p.token0?.symbol}/${p.token1?.symbol}) Price (T0/T1 scaled): ${p.price0_1_scaled.toString()}`);
                      }
                  });
@@ -298,11 +343,11 @@ class SpatialFinder {
             // Now, compare every unique pair of pools for this canonical pair to find arbitrage opportunities.
             // The strategy is: Borrow T1 -> Swap T1->T0 on Pool X -> Swap T0->T1 on Pool Y -> Repay T1.
             // Profit occurs if you get back more T1 than you borrowed.
-            // To maximize T0 received for T1 spent: Swap T1->T0 on the pool where T0/T1 price is HIGH (you get more T0 per T1). NO, T1/T0 is high, meaning T0/T1 is LOW.
-            // To maximize T1 received for T0 spent: Swap T0->T1 on the pool where T0/T1 price is *High*. Sell T0 on the expensive pool.
+            // To maximize T0 received for T1 spent: Swap T1->T0 on the pool where T1/T0 price is HIGH, meaning T0/T1 price is LOW.
+            // To maximize T1 received for T0 spent: Swap T0->T1 on the pool where T0/T1 price is HIGH.
             // So, for Borrow T1 -> T1->T0 (Pool A) -> T0->T1 (Pool B) -> Repay T1:
-            // Pool A: Where price T0/T1 is LOW. (Buy T0 here)
-            // Pool B: Where price T0/T1 is HIGH. (Sell T0 here)
+            // Pool A: Where price T0/T1 is LOW. (Buy T0 here - T1 is cheap relative to T0)
+            // Pool B: Where price T0/T1 is HIGH. (Sell T0 here - T0 is expensive relative to T1)
 
             for (let i = 0; i < poolsWithPrices.length; i++) {
                 for (let j = i + 1; j < poolsWithPrices.length; j++) {
@@ -321,9 +366,9 @@ class SpatialFinder {
                     const priceB_0_per_1_scaled = poolB.price0_1_scaled; // Price T0/T1 scaled on pool B (1e18)
 
                     // Determine the Pool to BUY T0 (Sell T1) and the Pool to SELL T0 (Buy T1)
-                    // Buy T0 pool = where T0/T1 price is LOW
-                    // Sell T0 pool = where T0/T1 price is HIGH
-                    let poolBuyT0, poolSellT0; // poolBuyT0 is where you get more T0 for T1 (low T0/T1 price)
+                    // poolBuyT0: Where T0/T1 price is LOW (where you swap T1 -> T0)
+                    // poolSellT0: Where T0/T1 price is HIGH (where you swap T0 -> T1)
+                    let poolBuyT0, poolSellT0;
 
                     if (priceA_0_per_1_scaled < priceB_0_per_1_scaled) { // Pool A has lower T0/T1 price
                         poolBuyT0 = poolA; // Buy T0 on Pool A (Swap T1->T0)
@@ -338,7 +383,7 @@ class SpatialFinder {
                     }
 
                     // Sanity check the raw price difference percentage *between the buy and sell pools*
-                    // The difference is calculated relative to the 'buy' price (where T0 is cheaper, i.e., poolBuyT0).
+                    // The difference is calculated relative to the 'buy' price (where T0 is cheaper relative to T1, i.e., poolBuyT0).
                     const rawPriceDiff = poolSellT0.price0_1_scaled - poolBuyT0.price0_1_scaled; // Difference between high and low price (T0/T1)
                     const minRawPrice = poolBuyT0.price0_1_scaled; // The 'buy' price (T0/T1) is the lower one
 
@@ -351,7 +396,7 @@ class SpatialFinder {
                     // Filter out opportunities with implausibly large raw price differences (potential data errors or manipulations)
                     if (rawDiffBips > this.maxReasonablePriceDiffBips) {
                          // Use the correct variables for logging
-                         logger.debug(`[SF] Skipping implausible raw price diff > ${this.maxReasonablePriceDiffBips} BIPS between ${poolBuyT0.name || poolBuyT0.address?.substring(0,6)} (Low T0/T1) and ${poolSellT0.name || poolSellT0.address?.substring(0,6)} (High T0/T1). Diff: ${rawDiffBips}`);
+                         logger.debug(`[SF] Skipping implausible raw price diff > ${this.maxReasonablePriceDiffBips} BIPS between ${poolBuyT0.name || poolBuyT0.address?.substring(0,6)} (Low T0/T1) and ${poolSellT0.name || poolSellT0.address?.substring(0,6)} (High T0/T1). Diff: ${rawDiffBips} BIPS.`); // Added BIPS suffix
                         continue; // Skip opportunities with huge price gaps (often indicate data issues)
                     }
 
@@ -377,7 +422,7 @@ class SpatialFinder {
 
                          // Ensure tokens are loaded (safety check, should be done earlier in config/tokenUtils)
                          if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
-                             logger.error(`${logPrefix} Token objects missing or invalid for opportunity creation after price check for pair ${canonicalKey}.`);
+                             logger.error(`[SF CRITICAL] Token objects missing or invalid for opportunity creation after price check for pair ${canonicalKey}.`); // Added CRITICAL log level
                              continue; // Skip creating opportunity if token objects is invalid
                          }
 
@@ -387,8 +432,8 @@ class SpatialFinder {
                          // The first swap is T1 -> T0, which happens on the pool where T0/T1 price is LOW (poolBuyT0).
                          // The second swap is T0 -> T1, which happens on the pool where T0/T1 price is HIGH (poolSellT0).
                          const opportunity = this._createOpportunity(
-                             poolBuyT0, // This pool is used for the first swap: tokenBorrowedOrRepaid (T1) -> tokenIntermediate (T0) - Needs T1/T0 price to be high, meaning T0/T1 price is LOW
-                             poolSellT0, // This pool is used for the second swap: tokenIntermediate (T0) -> tokenBorrowedOrRepaid (T1) - Needs T0/T1 price to be high
+                             poolBuyT0, // This pool is used for the first swap: tokenBorrowedOrRepaid (T1) -> tokenIntermediate (T0) - Needs Price(T0/T1) LOW
+                             poolSellT0, // This pool is used for the second swap: tokenIntermediate (T0) -> tokenBorrowedOrRepaid (T1) - Needs Price(T0/T1) HIGH
                              canonicalKey, // Canonical key of the pair
                              tokenBorrowedOrRepaid, // The token assumed to be borrowed/repaid (T1)
                              tokenIntermediate, // The intermediate token (T0)
@@ -424,7 +469,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapBorrowedToIntermediate, poolSwapIntermediateToBorrowed, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate, rawDiffBips) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.27]`; // Updated version log
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.28]`; // Updated version log
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
@@ -445,10 +490,10 @@ class SpatialFinder {
 
         // Check poolSwapBorrowedToIntermediate (needs tokenBorrowedOrRepaid -> tokenIntermediate swap)
         const pool1InputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 :
-                                (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 : null;
-        // --- CORRECTED TYPO HERE ---
+                                (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedToIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 : null; // Fix: Compare with tokenIntermediate
+
         const pool1OutputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 :
-                                 (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 : null;
+                                 (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedToIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 : null; // Fix: Compare with tokenIntermediate
 
 
         if (!pool1InputToken || !pool1OutputToken || pool1InputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase() || pool1OutputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
@@ -458,9 +503,10 @@ class SpatialFinder {
 
         // Check poolSwapIntermediateToBorrowed (needs tokenIntermediate -> tokenBorrowedOrRepaid swap)
         const pool2InputToken = (poolSwapIntermediateToBorrowed.token0?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token0 :
-                                (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token1 : null;
+                                (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token1 : null; // Fix: Compare with tokenBorrowedOrRepaid
+
         const pool2OutputToken = (poolSwapIntermediateToBorrowed.token0?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token1 :
-                                 (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token0 : null;
+                                 (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token0 : null; // Fix: Compare with tokenBorrowedOrRepaid
 
          if (!pool2InputToken || !pool2OutputToken || pool2InputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase() || pool2OutputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase()) {
              logger.error(`${logPrefix} Critical: Second pool token mismatch with expected swap direction (${tokenIntermediate.symbol}->${tokenBorrowedOrRepaid.symbol}). Pool ${poolSwapIntermediateToBorrowed.address?.substring(0,6)} has tokens ${poolSwapIntermediateToBorrowed.token0?.symbol}/${poolSwapIntermediateToBorrowed.token1?.symbol}. Determined Input: ${pool2InputToken?.symbol}, Output: ${pool2OutputToken?.symbol}.`);
@@ -477,7 +523,7 @@ class SpatialFinder {
             // Need the DODO pool's base token address to determine if the input token for this step (tokenBorrowedOrRepaid) is the quote token.
             // Use the baseTokenSymbol stored in the poolState itself by the DodoFetcher.
             const dodoPoolBaseTokenSymbol = poolSwapBorrowedToIntermediate.baseTokenSymbol;
-            const dodoPoolBaseToken = dodoPoolBaseTokenSymbol ? this.config.TOKENS[dodoPoolBaseTokenSymbol] : null;
+            const dodoPoolBaseToken = dodoPoolBaseTokenSymbol ? TOKENS[dodoPoolBaseTokenSymbol] : null; // Use TOKENS constant
             const dodoPoolBaseTokenAddress = dodoPoolBaseToken?.address;
 
             if (!dodoPoolBaseTokenAddress) {
@@ -502,28 +548,27 @@ class SpatialFinder {
 
         // Determine the amount of the borrowed token (tokenBorrowedOrRepaid) to simulate swapping.
         // Look up the simulation amount first by the token's symbol. If not found, use the 'DEFAULT' amount.
-        // Ensure the retrieved amount is a BigInt.
-        let simulationAmountIn = this.simulationInputAmounts[tokenBorrowedOrRepaid.symbol] || this.simulationInputAmounts['DEFAULT'];
+        // Ensure the retrieved amount is a BigInt (in smallest units).
+        let simulationAmountIn = this.simulationInputAmounts[tokenBorrowedOrRepaid.symbol]; // Get the pre-calculated BigInt smallest unit amount
 
-         try {
-              // Ensure it's a BigInt
-              simulationAmountIn = BigInt(simulationAmountIn);
-         } catch (e) {
-               logger.error(`${logPrefix} Failed to convert simulation input amount for ${tokenBorrowedOrRepaid.symbol} to BigInt. Value: ${simulationAmountIn}. Error: ${e.message}`);
-               return null; // Cannot create opportunity without a valid BigInt simulation amount
+         // If specific amount not found, use DEFAULT amount.
+         if (simulationAmountIn === undefined || simulationAmountIn === null) {
+              simulationAmountIn = this.simulationInputAmounts['DEFAULT'];
+              logger.debug(`${logPrefix} Using DEFAULT simulation amount for ${tokenBorrowedOrRepaid.symbol}: ${simulationAmountIn.toString()} (smallest units).`);
+         } else {
+              logger.debug(`${logPrefix} Using specific simulation amount for ${tokenBorrowedOrRepaid.symbol}: ${simulationAmountIn.toString()} (smallest units).`);
          }
 
 
         // Validate the simulation amount
-        if (simulationAmountIn <= 0n) {
-             logger.error(`${logPrefix} Could not determine valid simulation input amount for ${tokenBorrowedOrRepaid.symbol}. Final Amount is non-positive: ${simulationAmountIn}`);
-             return null; // Cannot create opportunity without a valid, positive simulation amount
+        if (simulationAmountIn === undefined || simulationAmountIn === null || typeof simulationAmountIn !== 'bigint' || simulationAmountIn <= 0n) {
+             logger.error(`${logPrefix} Could not determine valid BigInt simulation input amount for ${tokenBorrowedOrRepaid.symbol}. Final Amount is invalid: ${simulationAmountIn}`);
+             return null; // Cannot create opportunity without a valid, positive BigInt simulation amount
         }
-         // Log the determined simulation amount
-         logger.debug(`${logPrefix} Determined simulation input amount for ${tokenBorrowedOrRepaid.symbol}: ${simulationAmountIn.toString()}`);
 
 
         // Helper function to extract essential pool state data needed for simulation and building transaction parameters.
+        // Ensure this handles all necessary fields from fetcher outputs.
         const extractSimState = (pool) => {
              if (!pool || !pool.address || pool.dexType === undefined || !pool.token0?.address || !pool.token1?.address) {
                   logger.warn(`${logPrefix} Attempted to extract state from invalid pool object.`);
@@ -543,22 +588,26 @@ class SpatialFinder {
                  state.tick = pool.tick;
                  state.tickSpacing = pool.tickSpacing;
                  state.liquidity = pool.liquidity;
-             } else if (pool.dexType?.toLowerCase() === 'sushiswap') {
+             } else if (pool.dexType?.toLowerCase() === 'sushiswap') { // V2-like pools
                  state.reserve0 = pool.reserve0;
                  state.reserve1 = pool.reserve1;
              } else if (pool.dexType?.toLowerCase() === 'dodo') {
-                 state.queryAmountOutWei = pool.queryAmountOutWei; // Result of amount out query (1 unit)
-                 state.queryBaseToken = pool.queryBaseToken; // Base token object used in query
-                 state.queryQuoteToken = pool.queryQuoteToken; // Quote token object used in query
-                 state.baseTokenSymbol = pool.baseTokenSymbol; // Base token symbol from config/pool file
                  // Include fetched PMM State object if fetcher provides it
                  state.pmmState = pool.pmmState; // Should be the { i, K, B, Q, B0, Q0, R } object
+                  // Need baseTokenSymbol for DODO price/swap calcs
+                 state.baseTokenSymbol = pool.baseTokenSymbol; // Base token symbol from config/pool file
+                  // Need queryAmountOutWei IF used directly in simulator/tx building for DODO
+                  // state.queryAmountOutWei = pool.queryAmountOutWei; // Uncomment if needed
+                  // state.queryBaseToken = pool.queryBaseToken; // Uncomment if needed
+                  // state.queryQuoteToken = pool.queryQuoteToken; // Uncomment if needed
              }
              return state;
         };
 
         // Construct the path object representation for the arbitrage opportunity.
         // Order of pools in path array matters for transaction building.
+        // The first swap is tokenBorrowedOrRepaid (T1) -> tokenIntermediate (T0) on poolSwapBorrowedToIntermediate.
+        // The second swap is tokenIntermediate (T0) -> tokenBorrowedOrRepaid (T1) on poolSwapIntermediateToBorrowed.
         const step1PoolState = extractSimState(poolSwapBorrowedToIntermediate);
         const step2PoolState = extractSimState(poolSwapIntermediateToBorrowed);
 
@@ -605,7 +654,7 @@ class SpatialFinder {
                 }
             ],
 
-            amountIn: simulationAmountIn, // Borrowed amount for simulation (BigInt)
+            amountIn: simulationAmountIn, // Borrowed amount for simulation (BigInt, in smallest units)
 
             // Placeholders for values calculated by ProfitCalculator and GasEstimator
             amountOut: 0n, // Amount of tokenOut received after simulation (BigInt)
