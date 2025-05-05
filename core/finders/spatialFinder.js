@@ -1,6 +1,6 @@
 // core/finders/spatialFinder.js
 // Finds spatial arbitrage opportunities between pools of the same token pair across different DEXs.
-// --- VERSION v1.29 --- Corrected typo (tokenBorrowedToIntermediate -> tokenIntermediate) in _createOpportunity validation.
+// --- VERSION v1.30 --- Corrected token input/output validation logic in _createOpportunity.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
@@ -22,7 +22,7 @@ class SpatialFinder {
      * @param {object} config - The application configuration object.
      */
     constructor(config) {
-        logger.debug('[SpatialFinder v1.29] Initializing...'); // Version bump
+        logger.debug('[SpatialFinder v1.30] Initializing...'); // Version bump
 
         const finderSettings = config?.FINDER_SETTINGS;
         const simulationAmounts = finderSettings?.SPATIAL_SIMULATION_INPUT_AMOUNTS;
@@ -471,7 +471,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapBorrowedToIntermediate, poolSwapIntermediateToBorrowed, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate, rawDiffBips) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.29]`; // Updated version log
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.30]`; // Updated version log
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
@@ -486,35 +486,50 @@ class SpatialFinder {
         // --- END DEBUG LOGGING ---
 
 
-        // --- CORRECTED VALIDATION: Check pool's token0/token1 match expected swap direction ---
+        // --- CORRECTED VALIDATION & SWAP DIRECTION DETERMINATION ---
         // We expect poolSwapBorrowedToIntermediate to handle tokenBorrowedOrRepaid -> tokenIntermediate swap.
         // We expect poolSwapIntermediateToBorrowed to handle tokenIntermediate -> tokenBorrowedOrRepaid swap.
 
-        // Check poolSwapBorrowedToIntermediate (needs tokenBorrowedOrRepaid -> tokenIntermediate swap)
-        const pool1InputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 :
-                                (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 : null; // Corrected typo
+        let pool1InputToken = null;
+        let pool1OutputToken = null;
 
-        const pool1OutputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 :
-                                 (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 : null; // Corrected typo
+        // Determine input and output tokens for the first pool (Borrow Token -> Intermediate Token)
+        if (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) {
+            // If token0 is the borrowed token, the swap is token0 -> token1
+            pool1InputToken = poolSwapBorrowedToIntermediate.token0;
+            pool1OutputToken = poolSwapBorrowedToIntermediate.token1;
+        } else if (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) {
+             // If token1 is the borrowed token, the swap is token1 -> token0
+             pool1InputToken = poolSwapBorrowedToIntermediate.token1;
+             pool1OutputToken = poolSwapBorrowedToIntermediate.token0;
+        }
 
-
-        if (!pool1InputToken || !pool1OutputToken || pool1InputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase() || pool1OutputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
-            logger.error(`${logPrefix} Critical: First pool token mismatch with expected swap direction (${tokenBorrowedOrRepaid.symbol}->${tokenIntermediate.symbol}). Pool ${poolSwapBorrowedToIntermediate.address?.substring(0,6)} has tokens ${poolSwapBorrowedToIntermediate.token0?.symbol}/${poolSwapBorrowedToIntermediate.token1?.symbol}. Determined Input: ${pool1InputToken?.symbol}, Output: ${pool1OutputToken?.symbol}.`);
+        // Validate that the determined output token is indeed the intermediate token
+        if (!pool1InputToken || !pool1OutputToken || pool1OutputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
+            logger.error(`${logPrefix} Critical: First pool token mismatch or unexpected swap output. Expected swap direction (${tokenBorrowedOrRepaid.symbol}->${tokenIntermediate.symbol}). Pool ${poolSwapBorrowedToIntermediate.address?.substring(0,6)} has tokens ${poolSwapBorrowedToIntermediate.token0?.symbol}/${poolSwapBorrowedToIntermediate.token1?.symbol}. Determined Input: ${pool1InputToken?.symbol}, Output: ${pool1OutputToken?.symbol}.`);
             return null;
         }
 
-        // Check poolSwapIntermediateToBorrowed (needs tokenIntermediate -> tokenBorrowedOrRepaid swap)
-        const pool2InputToken = (poolSwapIntermediateToBorrowed.token0?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token0 :
-                                (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token1 : null; // Corrected typo
+        let pool2InputToken = null;
+        let pool2OutputToken = null;
 
-        const pool2OutputToken = (poolSwapIntermediateToBorrowed.token0?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token1 :
-                                 (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token0 : null; // Corrected typo
+        // Determine input and output tokens for the second pool (Intermediate Token -> Borrow Token)
+        if (poolSwapIntermediateToBorrowed.token0?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) {
+            // If token0 is the intermediate token, the swap is token0 -> token1
+            pool2InputToken = poolSwapIntermediateToBorrowed.token0;
+            pool2OutputToken = poolSwapIntermediateToBorrowed.token1;
+        } else if (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) {
+             // If token1 is the intermediate token, the swap is token1 -> token0
+             pool2InputToken = poolSwapIntermediateToBorrowed.token1;
+             pool2OutputToken = poolSwapIntermediateToBorrowed.token0;
+        }
 
-         if (!pool2InputToken || !pool2OutputToken || pool2InputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase() || pool2OutputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase()) {
-             logger.error(`${logPrefix} Critical: Second pool token mismatch with expected swap direction (${tokenIntermediate.symbol}->${tokenBorrowedOrRepaid.symbol}). Pool ${poolSwapIntermediateToBorrowed.address?.substring(0,6)} has tokens ${poolSwapIntermediateToBorrowed.token0?.symbol}/${poolSwapIntermediateToBorrowed.token1?.symbol}. Determined Input: ${pool2InputToken?.symbol}, Output: ${pool2OutputToken?.symbol}.`);
+        // Validate that the determined output token is indeed the borrowed/repaid token
+         if (!pool2InputToken || !pool2OutputToken || pool2OutputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase()) {
+             logger.error(`${logPrefix} Critical: Second pool token mismatch or unexpected swap output. Expected swap direction (${tokenIntermediate.symbol}->${tokenBorrowedOrRepaid.symbol}). Pool ${poolSwapIntermediateToBorrowed.address?.substring(0,6)} has tokens ${poolSwapIntermediateToBorrowed.token0?.symbol}/${poolSwapIntermediateToBorrowed.token1?.symbol}. Determined Input: ${pool2InputToken?.symbol}, Output: ${pool2OutputToken?.symbol}.`);
              return null;
          }
-        // --- END CORRECTED VALIDATION ---
+        // --- END CORRECTED VALIDATION & SWAP DIRECTION DETERMINATION ---
 
 
         // --- *** ADDED DODO QUOTE SELL FILTER (First Hop Only) *** ---
