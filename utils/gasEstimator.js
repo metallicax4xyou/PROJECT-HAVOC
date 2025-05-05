@@ -1,5 +1,6 @@
 // utils/gasEstimator.js
-// --- VERSION v1.14 --- Added detailed logging for FlashSwap ABI content and function checks.
+// Provides utility functions for estimating transaction gas costs.
+// --- VERSION v1.15 --- Corrected FlashSwap ABI check to look for initiateUniswapV3FlashLoan.
 
 const { ethers } = require('ethers');
 const logger = require('./logger');
@@ -15,7 +16,7 @@ class GasEstimator {
      * @param {Array<object>} flashSwapABI - The ABI array for the FlashSwap contract.
      */
     constructor(config, provider, flashSwapABI) {
-        logger.debug('[GasEstimator v1.14] Initializing...'); // Version bump
+        logger.debug('[GasEstimator v1.15] Initializing...'); // Version bump
 
         if (!config || !provider) throw new ArbitrageError('GasEstimatorInit', 'Config/Provider required.');
         if (!config.GAS_COST_ESTIMATES?.FLASH_SWAP_BASE) logger.warn('[GasEstInit] GAS_COST_ESTIMATES incomplete.');
@@ -36,17 +37,24 @@ class GasEstimator {
                  this.flashSwapInterface = new ethers.Interface(flashSwapABI); // Use the provided ABI
 
                  // --- ADDED DETAILED FUNCTION CHECK LOGGING ---
-                 const hasInitiateFlashSwap = this.flashSwapInterface.hasFunction('initiateFlashSwap');
+                 // CORRECTED: Check for initiateUniswapV3FlashLoan instead of initiateFlashSwap
+                 const hasInitiateUniswapV3FlashLoan = this.flashSwapInterface.hasFunction('initiateUniswapV3FlashLoan'); // Corrected check
                  const hasInitiateAaveFlashLoan = this.flashSwapInterface.hasFunction('initiateAaveFlashLoan');
-                 logger.debug(`[GasEstInit] Check result: hasFunction('initiateFlashSwap'): ${hasInitiateFlashSwap}`);
+                 logger.debug(`[GasEstInit] Check result: hasFunction('initiateUniswapV3FlashLoan'): ${hasInitiateUniswapV3FlashLoan}`); // Updated log
                  logger.debug(`[GasEstInit] Check result: hasFunction('initiateAaveFlashLoan'): ${hasInitiateAaveFlashLoan}`);
                  // --- END DETAILED FUNCTION CHECK LOGGING ---
 
 
-                 // Check if initiateFlashSwap and initiateAaveFlashLoan functions exist in the interface
-                 if (!hasInitiateFlashSwap || !hasInitiateAaveFlashLoan) {
-                     logger.error('[GasEstInit] CRITICAL: Provided FlashSwap ABI is missing initiateFlashSwap or initiateAaveFlashLoan function definition.');
+                 // Check if necessary initiation functions exist in the interface
+                 // CORRECTED: Check for initiateUniswapV3FlashLoan OR initiateAaveFlashLoan
+                 if (!hasInitiateUniswapV3FlashLoan && !hasInitiateAaveFlashLoan) {
+                     // Throw critical error only if *neither* required function is found
+                     logger.error('[GasEstInit] CRITICAL: Provided FlashSwap ABI is missing *both* initiateUniswapV3FlashLoan and initiateAaveFlashLoan function definitions.');
                      this.flashSwapInterface = null; // Mark as unavailable if key functions are missing
+                 } else if (!hasInitiateUniswapV3FlashLoan) {
+                      logger.warn('[GasEstInit] WARNING: FlashSwap ABI is missing initiateUniswapV3FlashLoan definition. UniV3 estimateGas checks will fail.');
+                 } else if (!hasInitiateAaveFlashLoan) {
+                      logger.warn('[GasEstInit] WARNING: FlashSwap ABI is missing initiateAaveFlashLoan definition. Aave estimateGas checks will fail.');
                  } else {
                       logger.debug('[GasEstInit] FlashSwap Interface created successfully from provided ABI.');
                  }
@@ -57,7 +65,11 @@ class GasEstimator {
         }
 
 
-        if (!this.flashSwapInterface) { logger.error('[GasEstInit] FlashSwap Interface could not be initialized. estimateGas check will fail.'); }
+        // Update the check here as well for clarity, although the constructor check above is the critical one.
+        // If flashSwapInterface is null at this point, it means a critical function was missing.
+        if (!this.flashSwapInterface) {
+             logger.error('[GasEstInit] FlashSwap Interface could not be initialized. EstimateGas checks will fail.');
+        }
         // Add check for TITHE_WALLET_ADDRESS in config (still needed for builders)
         if (!config.TITHE_WALLET_ADDRESS || !ethers.isAddress(config.TITHE_WALLET_ADDRESS)) {
              logger.warn('[GasEstInit] WARNING: TITHE_WALLET_ADDRESS is missing or invalid in config. Parameter builders may fail.');
@@ -71,7 +83,7 @@ class GasEstimator {
         this.maxGasPriceGwei = ethers.parseUnits(String(config.MAX_GAS_GWEI || 1), 'gwei');
         this.fallbackGasLimit = BigInt(config.FALLBACK_GAS_LIMIT || 3000000);
 
-        logger.info(`[GasEstimator v1.14] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`); // Version bump
+        logger.info(`[GasEstimator v1.15] Initialized. Path-based est + Provider-specific estimateGas check. Max Gas Price: ${ethers.formatUnits(this.maxGasPriceGwei, 'gwei')} Gwei`); // Version bump
     }
 
     async getFeeData() {
@@ -118,14 +130,27 @@ class GasEstimator {
      * @private Internal helper method
      */
     async _encodeMinimalCalldataForEstimate(opportunity, providerType) {
-        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.14]`; // Version bump
+        const logPrefix = `[GasEstimator Opp ${opportunity?.pairKey} ENC v1.15]`; // Version bump
 
         // Use the interface created in the constructor
-        if (!this.flashSwapInterface) {
-             const errorMsg = "FlashSwap Interface not available. Cannot encode.";
+        // Ensure the necessary initiation function exists for the chosen providerType before proceeding
+        let requiredFunctionName = '';
+        if (providerType === 'UNIV3') {
+             requiredFunctionName = 'initiateUniswapV3FlashLoan';
+        } else if (providerType === 'AAVE') {
+             requiredFunctionName = 'initiateAaveFlashLoan';
+        } else {
+             const errorMsg = `Invalid providerType ${providerType} passed to _encodeMinimalCalldataForEstimate.`;
              logger.error(`${logPrefix} ${errorMsg}`);
              return { calldata: null, contractFunctionName: null, errorMessage: errorMsg };
         }
+
+        if (!this.flashSwapInterface || !this.flashSwapInterface.hasFunction(requiredFunctionName)) {
+             const errorMsg = `FlashSwap Interface not available or missing function "${requiredFunctionName}". Cannot encode.`;
+             logger.error(`${logPrefix} ${errorMsg}`);
+             return { calldata: null, contractFunctionName: null, errorMessage: errorMsg };
+        }
+
 
         // Retrieve titheRecipient from config
         const titheRecipient = this.config.TITHE_WALLET_ADDRESS;
@@ -140,6 +165,7 @@ class GasEstimator {
         // Import main builder index lazily inside function scope
         let TxParamBuilder;
         try {
+             // Path assumes TxParamBuilder is in ../core/tx/paramBuilder from utils/
              TxParamBuilder = require('../core/tx/paramBuilder');
         } catch (requireError) {
              const errorMsg = `Failed to require main TxParamBuilder: ${requireError.message}`;
@@ -171,7 +197,7 @@ class GasEstimator {
                      throw new ArbitrageError(errorMsg, 'PARAM_BUILD_ERROR');
                  }
                  if (!builderFunction) {
-                      const errorMsg = "UniV3 builder function not found in TxParamBuilder.";
+                      const errorMsg = "UniV3 builder function not found or not exported in TxParamBuilder.";
                      throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
                  }
 
@@ -179,37 +205,50 @@ class GasEstimator {
                  buildResult = builderFunction(opportunity, correctedMinimalSimResult, this.config, titheRecipient);
 
 
-                 // Encoding logic
-                 const encodedParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [buildResult.params]);
-                 const borrowPoolState = opportunity.path[0].poolState;
-                 if (!borrowPoolState || !borrowPoolState.token0?.address || !borrowPoolState.token1?.address) {
-                      const errorMsg = "Invalid V3 borrow pool state for estimateGas encoding.";
+                 // Encoding logic for initiateUniswapV3FlashLoan(address poolAddress, uint256 amount0, uint256 amount1, bytes params)
+                 // The builder should return { params: { swapPath: SwapStep[], titheRecipient: address }, typeString: "tuple(...)" } and contractFunctionName
+                 // Access the pool address and amounts from the builder's result or opportunity object
+                 const borrowPoolAddress = opportunity.path[0].address; // V3 Flashloan is initiated from the pool contract itself
+                 if (!borrowPoolAddress) {
+                     const errorMsg = "Invalid V3 borrow pool address for estimateGas encoding.";
                      throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
                  }
+                 const borrowTokenAddress = opportunity.path[0].tokenInAddress; // Token being borrowed (first step input)
+                 const token0Address = opportunity.path[0].poolState.token0.address; // Token0 of the pool
+                 const token1Address = opportunity.path[0].poolState.token1.address; // Token1 of the pool
+
                  let amount0 = 0n; let amount1 = 0n;
-                 const borrowAmountMinimal = correctedMinimalSimResult.initialAmount;
-                 if (buildResult.borrowTokenAddress.toLowerCase() === borrowPoolState.token0.address.toLowerCase()) amount0 = borrowAmountMinimal;
-                 else if (buildResult.borrowTokenAddress.toLowerCase() === borrowPoolState.token1.address.toLowerCase()) amount1 = borrowAmountMinimal;
+                 const borrowAmountMinimal = correctedMinimalSimResult.initialAmount; // Minimal borrow amount (1n)
+
+                 // Determine if the borrow token is token0 or token1 of the V3 pool
+                 if (borrowTokenAddress.toLowerCase() === token0Address.toLowerCase()) amount0 = borrowAmountMinimal;
+                 else if (borrowTokenAddress.toLowerCase() === token1Address.toLowerCase()) amount1 = borrowAmountMinimal;
                  else {
-                      const errorMsg = `Borrow token mismatch for UniV3 estimateGas encoding.`;
+                     const errorMsg = `Borrow token ${opportunity.path[0].tokenInSymbol} mismatch with UniV3 pool tokens for estimateGas encoding.`;
                      throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
                  }
-                 const calldata = this.flashSwapInterface.encodeFunctionData(buildResult.contractFunctionName, [borrowPoolState.address, amount0, amount1, encodedParamsBytes]);
+
+                 const encodedParamsBytes = ethers.AbiCoder.defaultAbiCoder().encode([buildResult.typeString], [buildResult.params]);
+
+                 // Args for initiateUniswapV3FlashLoan(address poolAddress, uint256 amount0, uint256 amount1, bytes params)
+                 const args = [borrowPoolAddress, amount0, amount1, encodedParamsBytes];
+
+                 const calldata = this.flashSwapInterface.encodeFunctionData(buildResult.contractFunctionName, args); // Use contractFunctionName from builder
                  return { calldata, contractFunctionName: buildResult.contractFunctionName };
+
 
             } else if (providerType === 'AAVE') {
                  builderFunction = TxParamBuilder.buildAavePathParams; // Expects 5 args: opportunity, simResult, config, flashSwapManager (temp or real), titheRecipient
                  if (!builderFunction) {
-                      const errorMsg = "Aave builder function not found in TxParamBuilder exports.";
+                      const errorMsg = "Aave builder function not found or not exported in TxParamBuilder.";
                      throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
                  }
 
                  // Pass null for FlashSwapManager as AavePathBuilder shouldn't need a real one for encoding for estimateGas
-                 const minimalFlashSwapManager = null;
+                 const minimalFlashSwapManager = null; // Represents a minimal placeholder
 
                  // Pass titheRecipient and corrected minimal sim result to the builder
                  buildResult = await builderFunction(opportunity, correctedMinimalSimResult, this.config, minimalFlashSwapManager, titheRecipient);
-
 
                  // Encoding Logic: The builder (AavePathBuilder) should return { params: { path: SwapStep[], titheRecipient: address }, typeString: "tuple(...)" }
                  // Access the path array from the builder's result params for DODO adjustment if needed.
@@ -225,7 +264,7 @@ class GasEstimator {
                  for(let i = 0; i < adjustedPath.length; i++) {
                       const step = adjustedPath[i]; // This is a SwapStep struct { dexType, pool, tokenIn, tokenOut, minOut, fee }
                       if (step.minOut === 0n) {
-                           logger.debug(`${logPrefix} Adjusting minOut from 0 to 1n for step ${i} during gas estimation encoding.`);
+                           //logger.debug(`${logPrefix} Adjusting minOut from 0 to 1n for step ${i} during gas estimation encoding.`);
                            adjustedPath[i] = { ...step, minOut: 1n };
                            needsReEncoding = true;
                       }
@@ -236,17 +275,19 @@ class GasEstimator {
 
                  // Args for initiateAaveFlashLoan(address[] assets, uint256[] amounts, bytes params)
                  // Borrowed asset and amount for the minimal sim:
+                 // Aave builder should return borrow asset/amount info in buildResult
                  const assetMinimal = buildResult.borrowTokenAddress; // Builder should provide this (first token in path[0] or specific borrow token)
                  const amountMinimal = correctedMinimalSimResult.initialAmount; // This is 1n
                  const args = [[assetMinimal], [amountMinimal], encodedArbParamsBytes]; // Pass encoded ArbParams struct
 
-                 const calldata = this.flashSwapInterface.encodeFunctionData(buildResult.contractFunctionName, args);
+                 const calldata = this.flashSwapInterface.encodeFunctionData(buildResult.contractFunctionName, args); // Use contractFunctionName from builder
                  return { calldata, contractFunctionName: buildResult.contractFunctionName };
 
 
             } else {
                 const errorMsg = `Invalid providerType passed to _encodeMinimalCalldataForEstimate: ${providerType}`;
-                throw new ArbitrageError(errorMsg, 'INTERNAL_ERROR');
+                logger.error(`${logPrefix} ${errorMsg}`);
+                return { calldata: null, contractFunctionName: null, errorMessage: errorMsg };
             }
 
 
@@ -275,8 +316,9 @@ class GasEstimator {
         logger.debug(`${logPrefix} Starting path-based gas estimation & validity check...`);
 
         if (!walletSignerAddress || !ethers.isAddress(walletSignerAddress)) {
-             logger.error(`${logPrefix} Invalid walletSignerAddress received: ${walletSignerAddress}.`);
-             return { pathGasLimit: 0n, effectiveGasPrice: 0n, totalCostWei: 0n, estimateGasSuccess: false, errorMessage: "Invalid signerAddress received" };
+             const errorMsg = `Invalid walletSignerAddress received: ${walletSignerAddress}.`;
+             logger.error(`${logPrefix} ${errorMsg}`);
+             return { pathGasLimit: 0n, effectiveGasPrice: 0n, totalCostWei: 0n, estimateGasSuccess: false, errorMessage: errorMsg };
         }
         logger.debug(`${logPrefix} Received walletSignerAddress for gas estimation: ${walletSignerAddress}`);
 
@@ -318,6 +360,7 @@ class GasEstimator {
         for (const step of opportunity.path) {
              let hopCost = 0n;
              const dexKey = step.dex?.toLowerCase();
+             // Use the specific gas estimate key for each DEX type
              if (dexKey === 'uniswapv3') hopCost = BigInt(this.gasEstimates.UNISWAP_V3_SWAP || 0);
              else if (dexKey === 'sushiswap') hopCost = BigInt(this.gasEstimates.SUSHISWAP_V2_SWAP || 0);
              else if (dexKey === 'dodo') hopCost = BigInt(this.gasEstimates.DODO_SWAP || 0);
@@ -348,9 +391,39 @@ class GasEstimator {
 
 
         // --- 3. Determine Provider Type & Encode Minimal Calldata ---
-        const providerType = (opportunity.path[0].dex?.toLowerCase() === 'uniswapv3' && opportunity.path.length === 2 && opportunity.path[1].dex?.toLowerCase() === 'uniswapv3')
-                             ? 'UNIV3'
-                             : 'AAVE';
+        // Determine the flash loan provider type based on the first step's DEX
+        const firstHopDex = opportunity.path[0].dex?.toLowerCase();
+        let providerType;
+        let borrowTokenSymbol = opportunity.path[0].tokenInSymbol; // Assume borrow is first token in first hop
+
+        if (firstHopDex === 'uniswapv3' && opportunity.path.length >= 1) { // UniV3 flash loans are initiated from the pool
+             // This logic is more complex for UniV3 as it's not a single function call on the main contract
+             // It relies on the callback mechanism. The GasEstimator should likely simulate the *entire transaction* that calls the pool's flash method.
+             // For now, let's stick to the initiateUniswapV3FlashLoan on FlashSwap if that's the design.
+             // If the path starts with V3, assume the flash loan provider is UniV3
+             providerType = 'UNIV3';
+              // For V3, the borrowed token is explicitly passed to initiateUniswapV3FlashLoan, not just the first step's tokenIn
+              // The opportunity object should perhaps explicitly state the borrow token.
+              // Based on _createOpportunity, tokenIn for the opportunity is the borrowed token
+              borrowTokenSymbol = opportunity.tokenIn.symbol; // Get borrowed token symbol from opportunity
+              logger.debug(`${logPrefix} Determined UniV3 provider. Borrow token: ${borrowTokenSymbol}`);
+
+
+        } else if (firstHopDex === 'sushiswap' || firstHopDex === 'dodo' || opportunity.path.length >= 1) {
+             // If the first hop is V2/Sushi/Dodo or a multi-hop, assume Aave flash loan
+             providerType = 'AAVE';
+             // For Aave, the borrowed asset is explicitly passed to initiateAaveFlashLoan
+             // The opportunity object should perhaps explicitly state the borrow token.
+              // Based on _createOpportunity, tokenIn for the opportunity is the borrowed token
+              borrowTokenSymbol = opportunity.tokenIn.symbol; // Get borrowed token symbol from opportunity
+             logger.debug(`${logPrefix} Determined Aave provider. Borrow token: ${borrowTokenSymbol}`);
+
+        } else {
+             const errorMsg = `Could not determine flash loan provider type for path starting with ${firstHopDex}.`;
+             logger.error(`${logPrefix} ${errorMsg}`);
+             return { pathGasLimit, effectiveGasPrice, totalCostWei: pathGasLimit * effectiveGasPrice, estimateGasSuccess: false, errorMessage: errorMsg };
+        }
+
 
         logger.debug(`${logPrefix} Encoding minimal calldata for provider type: ${providerType}`);
         const encodedResult = await this._encodeMinimalCalldataForEstimate(opportunity, providerType);
@@ -362,13 +435,21 @@ class GasEstimator {
              return { pathGasLimit, effectiveGasPrice, totalCostWei: pathGasLimit * effectiveGasPrice, estimateGasSuccess: false, errorMessage: errorMsg };
         }
         const { calldata: encodedData, contractFunctionName } = encodedResult;
-        logger.debug(`${logPrefix} Minimal calldata encoded for function: ${contractFunctionName}`);
+        logger.debug(`${logPrefix} Minimal calldata encoded for function: "${contractFunctionName}"`);
 
         // --- 4. Perform estimateGas as a Validity Check ---
         let estimateGasSuccess = false;
         let estimateGasError = null;
         let estimatedGasLimitFromProvider = 0n;
         let estimateGasErrorMessage = undefined;
+
+        // Ensure FlashSwap contract address is in config
+        if (!this.config.FLASH_SWAP_CONTRACT_ADDRESS || !ethers.isAddress(this.config.FLASH_SWAP_CONTRACT_ADDRESS)) {
+             const errorMsg = `FLASH_SWAP_CONTRACT_ADDRESS is missing or invalid in config: ${this.config.FLASH_SWAP_CONTRACT_ADDRESS}. Cannot perform estimateGas check.`;
+             logger.error(`${logPrefix} ${errorMsg}`);
+             return { pathGasLimit, effectiveGasPrice, totalCostWei: pathGasLimit * effectiveGasPrice, estimateGasSuccess: false, errorMessage: errorMsg };
+        }
+
 
         try {
             logger.debug(`${logPrefix} Performing provider.estimateGas check for ${contractFunctionName} from ${walletSignerAddress}...`);
@@ -379,29 +460,45 @@ class GasEstimator {
             });
             estimateGasSuccess = true;
 
-             if (estimatedGasLimitFromProvider > pathGasLimit) {
-                  logger.debug(`${logPrefix} Provider estimateGas (${estimatedGasLimitFromProvider}) is higher than path estimate (${pathGasLimit}). Using provider estimate.`);
-                  pathGasLimit = estimatedGasLimitFromProvider;
-             } else {
-                  logger.debug(`${logPrefix} Provider estimateGas (${estimatedGasLimitFromProvider}) is lower than or equal to path estimate (${pathGasLimit}). Using path estimate.`);
-             }
+             // Decide which gas limit to use: Provider estimate or heuristic + buffer
+             // Provider estimate is more accurate for the *minimal* tx. If it succeeds, use it,
+             // but add the buffer back as the minimal tx is smaller than the real one.
+             // Or, use the Provider estimate as a minimum threshold for the heuristic + buffer.
+             // Let's refine: If estimateGas succeeds, the transaction *is likely* valid on chain (reverts aside).
+             // The returned value is the *actual gas used* by the minimal tx *on the fork*.
+             // We should probably use `estimatedGasLimitFromProvider` as the base for our final gas limit,
+             // adding the buffer to it. The heuristic could serve as a very rough fallback or sanity check.
 
-            logger.debug(`${logPrefix} estimateGas check PASSED. Estimated gas limit by provider: ${estimatedGasLimitFromProvider}`);
+             const bufferPercent = BigInt(this.config.GAS_ESTIMATE_BUFFER_PERCENT || 0);
+             const finalGasLimit = estimatedGasLimitFromProvider + (estimatedGasLimitFromProvider * bufferPercent) / 100n;
+
+             // Use the provider estimate as the final gas limit after adding buffer
+             pathGasLimit = finalGasLimit;
+
+            logger.debug(`${logPrefix} estimateGas check PASSED. Provider Estimated Gas Used: ${estimatedGasLimitFromProvider}. Final gas limit (with buffer): ${pathGasLimit}`);
         } catch (error) {
              estimateGasError = error;
              let reason = error.reason || error.code || error.message;
              logger.warn(`${logPrefix} estimateGas check FAILED for ${contractFunctionName} (TX likely reverts): ${reason}. Marking opportunity invalid.`);
              ErrorHandler.handleError(error, `GasEstimator estimateGas Check (${contractFunctionName})`, {
                  opportunity: { pairKey: opportunity?.pairKey, type: opportunity?.type },
-                 encodedData: encodedData?.substring(0, 100) + '...' // Log snippet
+                 contractFunction: contractFunctionName,
+                 encodedData: encodedData?.substring(0, 200) + '...' // Log snippet
              });
              estimateGasSuccess = false;
              estimateGasErrorMessage = reason;
+
+              // If estimateGas fails, the transaction WILL revert. Set totalCostWei to 0
+              // as there's no profit, but maybe return the pathGasLimit for debug context.
+             return { pathGasLimit, effectiveGasPrice: 0n, totalCostWei: 0n, estimateGasSuccess: false, errorMessage: estimateGasErrorMessage };
         }
 
-        // --- 5. Calculate Final Cost using the (potentially updated) Path-Based or Provider Estimate ---
-        const totalCostWei = pathGasLimit * effectiveGasPrice;
-        logger.info(`${logPrefix} Final Estimated Gas: Limit=${pathGasLimit}, Price=${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei, Cost=${ethers.formatEther(totalCostWei)} ${this.nativeSymbol}. estimateGas check: ${estimateGasSuccess ? 'OK' : 'FAIL'}`);
+        // --- 5. Calculate Final Cost ---
+        // Only calculate cost if estimateGas check passed
+        const totalCostWei = estimateGasSuccess ? pathGasLimit * effectiveGasPrice : 0n;
+
+        logger.info(`${logPrefix} Final Estimated Gas: Limit=${pathGasLimit}, Price=${ethers.formatUnits(effectiveGasPrice, 'gwei')} Gwei, Cost=${ethers.formatEther(totalCostWei)} ${this.config.NATIVE_CURRENCY_SYMBOL}. estimateGas check: ${estimateGasSuccess ? 'OK' : 'FAIL'}`); // Use config native symbol
+
 
         return {
             pathGasLimit: pathGasLimit,
@@ -411,6 +508,11 @@ class GasEstimator {
             errorMessage: estimateGasSuccess ? undefined : (estimateGasError?.reason || estimateGasError?.message || "EstimateGas check failed.")
         };
     }
+     // Add a helper method to get the native currency symbol
+     get nativeSymbol() {
+          // Use WETH as fallback if NATIVE_CURRENCY_SYMBOL is not explicitly defined in config
+          return this.config.NATIVE_CURRENCY_SYMBOL || 'WETH';
+     }
 }
 
 module.exports = GasEstimator;
