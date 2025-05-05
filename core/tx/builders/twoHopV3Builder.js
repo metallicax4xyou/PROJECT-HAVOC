@@ -2,7 +2,7 @@
 // Builds parameters for the initiateFlashSwap (V3 -> V3 two-hop) function.
 // Includes the titheRecipient address.
 // Adjusts validation to handle zero minimum output during GasEstimator's minimal calldata encoding.
-// --- VERSION v1.4 --- Corrected simulationResult property names (hop1AmountOutSimulated, finalAmountSimulated).
+// --- VERSION v1.5 --- Corrected simulationResult property names check in validation.
 
 const { ethers } = require('ethers');
 const logger = require('../../../utils/logger'); // Adjust path
@@ -12,8 +12,7 @@ const { calculateMinAmountOut } = require('../../profitCalcUtils'); // Import fr
 /**
  * Builds parameters for the initiateFlashSwap (V3 -> V3 two-hop) function.
  * Includes the titheRecipient address.
- * Adjusts validation to handle minimal simulation results (where amounts are 0n)
- * when called by the GasEstimator for `estimateGas` check encoding.
+ * Adjusts validation to handle minimal simulation results (where amounts are 0n or 1n for estimateGas).
  * @param {object} opportunity The opportunity object.
  * @param {object} simulationResult The result from the SwapSimulator ({ initialAmount: bigint, hop1AmountOutSimulated: bigint, finalAmountSimulated: bigint }).
  * @param {object} config The application configuration object.
@@ -22,7 +21,7 @@ const { calculateMinAmountOut } = require('../../profitCalcUtils'); // Import fr
  * @throws {ArbitrageError}
  */
 function buildTwoHopParams(opportunity, simulationResult, config, titheRecipient) {
-    const functionSig = `[Builder TwoHopV3 v1.4]`; // Updated version
+    const functionSig = `[Builder TwoHopV3 v1.5]`; // Updated version
     logger.debug(`${functionSig} Building parameters...`);
 
     // Validation (remains unchanged)
@@ -78,7 +77,7 @@ function buildTwoHopParams(opportunity, simulationResult, config, titheRecipient
     // This pattern (1n initial, 0n intermediates/final) is characteristic of the minimal sim result used by the GasEstimator.
     // In this specific case, we should NOT throw an error if min amounts out are zero.
     // CORRECTED: Use finalAmountSimulated in the check
-    const isMinimalGasEstimateSim = (simulationResult.initialAmount === 1n && simulationResult.finalAmountSimulated === 0n);
+    const isMinimalGasEstimateSim = (simulationResult.initialAmount === 1n && simulationResult.finalAmountSimulated === 0n); // Corrected property name
 
     if (!isMinimalGasEstimateSim) {
         // This is a real simulation result (not the minimal gas estimate one).
@@ -91,20 +90,31 @@ function buildTwoHopParams(opportunity, simulationResult, config, titheRecipient
         // This is the minimal sim result used by the GasEstimator.
         // We explicitly allow min amounts to be 0n here.
         logger.debug(`${functionSig} Using minimal simulation result for gas estimation encoding. minAmountOut validation skipped.`);
+         // For minimal simulation, ensure minOuts are at least 1n if the sim result was > 0n, to avoid issues with estimateGas on some providers/contracts
+         // If hop amounts were 1n in minimal sim, minOut should also be 1n.
+         // If hop amounts were 0n in minimal sim, minOut should be 0n.
+         // This ensures minOuts match the minimal simulation outputs provided.
+         // Re-calculate minOuts using 0% slippage for the minimal sim inputs (1n or 0n)
+         const minAmountOut1_minimal = calculateMinAmountOut(hop1AmountOutSimulated, 0); // 0% slippage
+         const minAmountOut2_minimal = calculateMinAmountOut(hop2AmountOutSimulated, 0); // 0% slippage
+         logger.debug(`${functionSig} For minimal sim, setting minAmountOut1 to ${minAmountOut1_minimal} and minAmountOut2 to ${minAmountOut2_minimal}.`);
+         // Override the min amounts calculated with slippage for the minimal sim case
+         // We need to return the params object with these specific minimal minOuts
+         // The params object is constructed below, so we'll use these minimal values there.
+         // Keep the original minAmountOut1/2 variables for non-minimal sim cases.
     }
     // --- END MODIFIED VALIDATION LOGIC ---
 
 
     // Prepare parameters object matching the Solidity struct `TwoHopParams`
-    // Note: FlashSwap.sol uses `amount0Out` and `amount1Out` in `uniswapV3SwapCallback`,
-    // but the params struct here describes the path *logic*. The contract
-    // figures out the exact amounts from the swap results using minAmountOuts.
     const params = {
         tokenIntermediate: tokenIntermediate.address, // Address of the intermediate token (T0)
         feeA: feeA, // Fee tier for the first hop (T1->T0)
         feeB: feeB, // Fee tier for the second hop (T0->T1)
-        amountOutMinimum1: minAmountOut1, // Minimum amount of tokenIntermediate expected from first hop
-        amountOutMinimum2: minAmountOut2, // Minimum amount of tokenBorrowed expected from second hop
+        // --- Use minimal minOuts for the minimal sim case, otherwise use slippage-adjusted ones ---
+        amountOutMinimum1: isMinimalGasEstimateSim ? calculateMinAmountOut(hop1AmountOutSimulated, 0) : minAmountOut1,
+        amountOutMinimum2: isMinimalGasEstimateSim ? calculateMinAmountOut(hop2AmountOutSimulated, 0) : minAmountOut2,
+        // --- End use of minimal minOuts ---
         titheRecipient: titheRecipient // Wallet address to send the tithe to
     };
 
