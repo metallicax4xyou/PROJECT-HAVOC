@@ -1,12 +1,11 @@
 // core/finders/spatialFinder.js
 // Finds spatial arbitrage opportunities between pools of the same token pair across different DEXs.
-// --- VERSION v1.28 --- Corrected import path and function names for price calculation from utils/priceUtils.
+// --- VERSION v1.29 --- Corrected typo (tokenBorrowedToIntermediate -> tokenIntermediate) in _createOpportunity validation.
 
 const { ethers, formatUnits } = require('ethers');
 const logger = require('../../utils/logger');
 const { getCanonicalPairKey } = require('../../utils/pairUtils');
 // Import the correct price calculation functions and constants from utils/priceUtils.js
-// CORRECTED PATH AND FUNCTION NAMES
 const {
     calculateV3PriceT0_T1_scaled,
     calculateV2PriceT0_T1_scaled, // Corrected function name for V2/SushiSwap
@@ -23,7 +22,7 @@ class SpatialFinder {
      * @param {object} config - The application configuration object.
      */
     constructor(config) {
-        logger.debug('[SpatialFinder v1.28] Initializing...'); // Version bump
+        logger.debug('[SpatialFinder v1.29] Initializing...'); // Version bump
 
         const finderSettings = config?.FINDER_SETTINGS;
         const simulationAmounts = finderSettings?.SPATIAL_SIMULATION_INPUT_AMOUNTS;
@@ -91,7 +90,7 @@ class SpatialFinder {
                      // We need to convert them to *smallest units* (wei/satoshi) using token decimals *before* storing as BigInt.
                      const token = TOKENS[key];
                      processedSimulationAmounts[key] = ethers.parseUnits(value.toString(), token.decimals); // Convert value in standard units to smallest units (BigInt)
-                     logger.debug(`[SpatialFinder Constructor] Converted simulation amount for ${key} (${value}) to smallest units: ${processedSimulationAmounts[key].toString()} (decimals: ${token.decimals})`);
+                     logger.debug(`[SpatialFinder Constructor] Converted simulation amount for ${key} (${ethers.formatUnits(value, token.decimals)}) to smallest units: ${processedSimulationAmounts[key].toString()} (decimals: ${token.decimals})`); // Log formatted amount
 
                  } else if (key === 'DEFAULT' && isConvertible) {
                       // Handle the default case - needs conversion to smallest units based on a default token (like WETH) or should it be in smallest units already?
@@ -99,7 +98,7 @@ class SpatialFinder {
                       const nativeToken = TOKENS[config.NATIVE_CURRENCY_SYMBOL || 'WETH']; // Default to WETH if native symbol not clear
                        if (nativeToken && nativeToken.decimals !== undefined) {
                             processedSimulationAmounts[key] = ethers.parseUnits(value.toString(), nativeToken.decimals);
-                            logger.debug(`[SpatialFinder Constructor] Converted DEFAULT simulation amount (${value}) based on ${nativeToken.symbol} to smallest units: ${processedSimulationAmounts[key].toString()} (decimals: ${nativeToken.decimals})`);
+                            logger.debug(`[SpatialFinder Constructor] Converted DEFAULT simulation amount (${ethers.formatUnits(value, nativeToken.decimals)}) based on ${nativeToken.symbol} to smallest units: ${processedSimulationAmounts[key].toString()} (decimals: ${nativeToken.decimals})`); // Log formatted amount
                        } else {
                             logger.warn(`[SpatialFinder Constructor] Could not determine native token decimals for DEFAULT simulation amount conversion. Value: ${value}. Storing as raw BigInt.`);
                             processedSimulationAmounts[key] = BigInt(value); // Store as raw BigInt if conversion failed
@@ -107,32 +106,33 @@ class SpatialFinder {
                  }
                  else {
                       // Store raw BigInt if it's already one, or if conversion logic isn't applicable
-                      processedSimulationAmounts[key] = BigInt(value); // Keep raw BigInt or attempt conversion if not already BigInt
-                      logger.debug(`[SpatialFinder Constructor] Storing simulation amount for ${key} as raw BigInt or failed conversion: ${processedSimulationAmounts[key].toString()}`);
+                      // If the value is a number or string, attempt conversion to BigInt
+                      processedSimulationAmounts[key] = BigInt(value); // Keep raw BigInt or attempt conversion
+                      logger.debug(`[SpatialFinder Constructor] Storing simulation amount for ${key} as raw BigInt or after basic conversion: ${processedSimulationAmounts[key].toString()}`);
                  }
             } catch (e) {
                  logger.warn(`[SpatialFinder Constructor] Could not process simulation input amount for key '${key}'. Value: ${value}. Error: ${e.message}`);
                  // Decide how to handle errors: skip the token, use default, or throw?
                  // For now, log and continue, potentially leaving it unprocessed or using a fallback.
-                 // A robust system might skip this token or use a safe fallback.
                  // Ensure DEFAULT is handled. If the DEFAULT conversion failed above, this might leave it in a bad state.
             }
         }
          // Double-check DEFAULT is a BigInt after processing
-         if (processedSimulationAmounts['DEFAULT'] !== undefined && typeof processedSimulationAmounts['DEFAULT'] !== 'bigint') {
-             logger.error('[SpatialFinder Constructor] CRITICAL: DEFAULT simulation input amount is not a BigInt after processing.');
+         if (processedSimulationAmounts['DEFAULT'] === undefined || processedSimulationAmounts['DEFAULT'] === null || typeof processedSimulationAmounts['DEFAULT'] !== 'bigint') {
+             logger.error('[SpatialFinder Constructor] CRITICAL: DEFAULT simulation input amount is not a valid BigInt after processing.');
              const err = new Error('Invalid format for DEFAULT simulation input amount after processing.');
              err.type = 'SpatialFinder: Init Failed';
              throw err; // Stop initialization
          }
 
+
         this.simulationInputAmounts = processedSimulationAmounts;
 
 
         // Log successful initialization with key parameters
-        logger.info(`[SpatialFinder v1.28] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length}.`); // Updated version log
+        logger.info(`[SpatialFinder v1.29] Initialized. Min Net BIPS: ${this.minNetPriceDiffBips}, Max Diff BIPS: ${this.maxReasonablePriceDiffBips}, Sim Amounts Loaded: ${Object.keys(this.simulationInputAmounts).length}.`); // Updated version log
         // Log simulation amounts after processing
-        logger.debug(`[SpatialFinder v1.28] Processed Simulation Input Amounts (in smallest units):`, JSON.stringify(this.simulationInputAmounts, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+        logger.debug(`[SpatialFinder v1.29] Processed Simulation Input Amounts (in smallest units):`, JSON.stringify(this.simulationInputAmounts, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
 
     }
 
@@ -202,6 +202,7 @@ class SpatialFinder {
                       let priceInverseFormatted_T1_T0 = 'N/A';
                       // Ensure no division by zero for inverse calculation
                       if (price0_1_scaled > 0n) {
+                          // Using PRICE_SCALE * PRICE_SCALE and then formatUnits(..., 18) is correct for this inverse scaled price.
                           const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / price0_1_scaled;
                                // Handle potential division by zero if price0_1_scaled is unexpectedly large after filter? Unlikely but safe.
                               if (priceInverseScaled > 0n) {
@@ -211,7 +212,7 @@ class SpatialFinder {
                               }
                           }
 
-                      logger.debug(`[SF._CalcPrice] Pool ${poolState.address?.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted_T0_T1} | T1/T0 (Approx): ${priceInverseFormatted_T1_T0}. Returning price.`);
+                      logger.debug(`[SF._CalcPrice] Pool ${poolState.address?.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()} | T0/T1 (Approx): ${priceFormatted_T0_T1} | T1/T0 (Approx): ${priceInverseFormatted_T1_T0}.`);
                  } catch (formatError) {
                       logger.error(`[SF._CalcPrice] Error formatting price for log for pool ${poolState.address}: ${formatError.message}`);
                       logger.debug(`[SF._CalcPrice] Pool ${poolState.address?.substring(0,6)} (${poolState.dexType} ${poolState.token0?.symbol}/${poolState.token1?.symbol}) Price (T0/T1 scaled): ${price0_1_scaled.toString()}`);
@@ -315,6 +316,7 @@ class SpatialFinder {
                           let priceInverseFormatted_T1_T0 = 'N/A';
                           // Ensure no division by zero for inverse calculation
                           if (p.price0_1_scaled > 0n) {
+                              // Using PRICE_SCALE * PRICE_SCALE and then formatUnits(..., 18) is correct for this inverse scaled price.
                               const priceInverseScaled = (PRICE_SCALE * PRICE_SCALE) / p.price0_1_scaled;
                                // Handle potential division by zero if price0_1_scaled is unexpectedly large after filter? Unlikely but safe.
                               if (priceInverseScaled > 0n) {
@@ -469,7 +471,7 @@ class SpatialFinder {
      */
     _createOpportunity(poolSwapBorrowedToIntermediate, poolSwapIntermediateToBorrowed, canonicalKey, tokenBorrowedOrRepaid, tokenIntermediate, rawDiffBips) {
         // Log prefix for clarity, includes the canonical key and finder version
-        const logPrefix = `[SF._createOpp ${canonicalKey} v1.28]`; // Updated version log
+        const logPrefix = `[SF._createOpp ${canonicalKey} v1.29]`; // Updated version log
 
         // Ensure essential inputs are valid Token objects with addresses
         if (!tokenBorrowedOrRepaid?.address || !tokenIntermediate?.address) {
@@ -490,10 +492,10 @@ class SpatialFinder {
 
         // Check poolSwapBorrowedToIntermediate (needs tokenBorrowedOrRepaid -> tokenIntermediate swap)
         const pool1InputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 :
-                                (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedToIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 : null; // Fix: Compare with tokenIntermediate
+                                (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 : null; // Corrected typo
 
         const pool1OutputToken = (poolSwapBorrowedToIntermediate.token0?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token1 :
-                                 (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenBorrowedToIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 : null; // Fix: Compare with tokenIntermediate
+                                 (poolSwapBorrowedToIntermediate.token1?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapBorrowedToIntermediate.token0 : null; // Corrected typo
 
 
         if (!pool1InputToken || !pool1OutputToken || pool1InputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase() || pool1OutputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase()) {
@@ -503,10 +505,10 @@ class SpatialFinder {
 
         // Check poolSwapIntermediateToBorrowed (needs tokenIntermediate -> tokenBorrowedOrRepaid swap)
         const pool2InputToken = (poolSwapIntermediateToBorrowed.token0?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token0 :
-                                (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token1 : null; // Fix: Compare with tokenBorrowedOrRepaid
+                                (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token1 : null; // Corrected typo
 
         const pool2OutputToken = (poolSwapIntermediateToBorrowed.token0?.address?.toLowerCase() === tokenIntermediate.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token1 :
-                                 (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token0 : null; // Fix: Compare with tokenBorrowedOrRepaid
+                                 (poolSwapIntermediateToBorrowed.token1?.address?.toLowerCase() === tokenBorrowedOrRepaid.address.toLowerCase()) ? poolSwapIntermediateToBorrowed.token0 : null; // Corrected typo
 
          if (!pool2InputToken || !pool2OutputToken || pool2InputToken.address.toLowerCase() !== tokenIntermediate.address.toLowerCase() || pool2OutputToken.address.toLowerCase() !== tokenBorrowedOrRepaid.address.toLowerCase()) {
              logger.error(`${logPrefix} Critical: Second pool token mismatch with expected swap direction (${tokenIntermediate.symbol}->${tokenBorrowedOrRepaid.symbol}). Pool ${poolSwapIntermediateToBorrowed.address?.substring(0,6)} has tokens ${poolSwapIntermediateToBorrowed.token0?.symbol}/${poolSwapIntermediateToBorrowed.token1?.symbol}. Determined Input: ${pool2InputToken?.symbol}, Output: ${pool2OutputToken?.symbol}.`);
