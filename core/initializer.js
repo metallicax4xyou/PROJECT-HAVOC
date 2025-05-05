@@ -1,103 +1,136 @@
 // core/initializer.js
 // Handles the initialization sequence for bot components
+// --- VERSION v1.1 --- Added NonceManager initialization and passing to AE.
 
-const { ethers } = require('ethers'); // Might be needed if Provider is initialized here
-const config = require('../config'); // Needs config
-const { getProvider } = require('../utils/provider'); // Needs provider utility
-const logger = require('../utils/logger'); // Needs logger
-const { ArbitrageError } = require('../utils/errorHandler'); // Needs error types
+const { ethers } = require('ethers');
+const config = require('../config');
+const { getProvider } = require('../utils/provider');
+const logger = require('../utils/logger');
+const { ArbitrageError } = require('../utils/errorHandler');
 
 // Import component Classes needed for initialization
 const ArbitrageEngine = require('./arbitrageEngine');
 const SwapSimulator = require('./swapSimulator');
-const GasEstimator = require('../utils/gasEstimator'); // Pass CLASS
-const FlashSwapManager = require('./flashSwapManager');
-const TradeHandler = require('./tradeHandler'); // Pass CLASS
+const GasEstimator = require('../utils/gasEstimator'); // Needs FlashSwap ABI from FSM
+const FlashSwapManager = require('./flashSwapManager'); // Needs signer
+const TradeHandler = require('./tradeHandler'); // AE will create an instance of this CLASS
+// Import NonceManager Class
+const NonceManager = require('../utils/nonceManager'); // <-- NEW IMPORT
+
 
 /**
  * Initializes all necessary bot components and returns the ArbitrageEngine instance.
  * @param {object} appConfig - The application configuration object.
- * @returns {Promise<{arbitrageEngine: ArbitrageEngine, flashSwapManager: FlashSwapManager}>} - Returns the initialized engine and FSM instance.
+ * @returns {Promise<{arbitrageEngine: ArbitrageEngine, flashSwapManager: FlashSwapManager, nonceManager: NonceManager}>} - Returns initialized components.
  * @throws {ArbitrageError} - Throws an error if initialization fails.
  */
 async function initializeBot(appConfig) {
-    logger.info('[Initializer] Starting bot initialization sequence...');
+    logger.info('[Initializer v1.1] Starting bot initialization sequence...'); // Version bump
 
     let provider;
-    let flashSwapManagerInstance; // Need this instance for potential NonceManager cleanup in main bot.js
+    let flashSwapManagerInstance;
+    let nonceManagerInstance;
+    let swapSimulatorInstance;
+    let gasEstimatorInstance;
+
 
     try {
         // Step 1: Get Provider instance
-        logger.info('[Initializer] Step 1: Getting Provider instance...');
+        logger.info('[Initializer v1.1] Step 1: Getting Provider instance...'); // Version bump
         provider = getProvider(appConfig);
-        logger.debug('[Initializer] Step 1a: Provider instance obtained. Fetching network...');
+        logger.debug('[Initializer v1.1] Step 1a: Provider instance obtained. Fetching network...'); // Version bump
 
         const network = await provider.getNetwork();
-        logger.info(`[Initializer] Step 1b: Provider connected to ${network.name} (ID: ${network.chainId})`);
+        logger.info(`[Initializer v1.1] Step 1b: Provider connected to ${network.name} (ID: ${network.chainId})`); // Version bump
         const currentBlock = await provider.getBlockNumber();
-        logger.info(`[Initializer] Provider Current Block: ${currentBlock}`);
+        logger.info(`[Initializer v1.1] Provider Current Block: ${currentBlock}`); // Version bump
+
 
         // Step 2: Initializing Swap Simulator
-        logger.info('[Initializer] Step 2: Initializing Swap Simulator...');
-        logger.debug('[Initializer] Step 2a: Calling SwapSimulator constructor...');
-        const swapSimulator = new SwapSimulator(appConfig, provider);
-        logger.debug('[Initializer] Step 2b: SwapSimulator constructor returned.');
-         if (!swapSimulator?.simulateSwap) {
-              const errorMsg = 'Swap Simulator failed to initialize correctly.';
-              logger.error(`[Initializer] CRITICAL: ${errorMsg}`);
+        logger.info('[Initializer v1.1] Step 2: Initializing Swap Simulator...'); // Version bump
+        swapSimulatorInstance = new SwapSimulator(appConfig, provider);
+         if (typeof swapSimulatorInstance.simulateSwap !== 'function') { // Basic check
+              const errorMsg = 'Swap Simulator failed to initialize correctly or is missing simulateSwap method.';
+              logger.error(`[Initializer v1.1] CRITICAL: ${errorMsg}`); // Version bump
               throw new ArbitrageError('InitializationError', errorMsg);
          }
-        logger.info('[Initializer] Step 2: Swap Simulator initialized.');
+        logger.info('[Initializer v1.1] Step 2: Swap Simulator initialized.'); // Version bump
 
 
-        // Step 3: Initializing Flash Swap Manager
-        logger.info('[Initializer] Step 3: Initializing Flash Swap Manager...');
-        logger.debug('[Initializer] Step 3a: Calling FlashSwapManager constructor...');
-        flashSwapManagerInstance = new FlashSwapManager(appConfig, provider); // Needs config and provider
-        logger.debug('[Initializer] Step 3b: FlashSwapManager constructor returned.');
-         // Basic checks + need getFlashSwapABI for GasEstimator initialization later in AE
-         if (!(flashSwapManagerInstance?.getFlashSwapContract && flashSwapManagerInstance?.getSignerAddress && flashSwapManagerInstance?.getFlashSwapABI)) {
-             const errorMsg = 'Flash Swap Manager failed to initialize correctly or is missing necessary methods.';
-              logger.error(`[Initializer] CRITICAL: ${errorMsg}`);
+        // Step 3: Initializing Flash Swap Manager (Needs config, provider)
+        // FSM should internally handle signer creation (using provider and PK from config)
+        logger.info('[Initializer v1.1] Step 3: Initializing Flash Swap Manager...'); // Version bump
+        flashSwapManagerInstance = new FlashSwapManager(appConfig, provider);
+         // Basic checks + need getFlashSwapABI for GasEstimator and signer for NonceManager
+         if (typeof flashSwapManagerInstance.getFlashSwapContract !== 'function' || typeof flashSwapManagerInstance.getSignerAddress !== 'function' || typeof flashSwapManagerInstance.getFlashSwapABI !== 'function' || !flashSwapManagerInstance.signer) {
+             const errorMsg = 'Flash Swap Manager failed to initialize correctly or is missing necessary properties/methods.';
+              logger.error(`[Initializer v1.1] CRITICAL: ${errorMsg}`); // Version bump
               throw new ArbitrageError('InitializationError', errorMsg);
          }
-        logger.debug('[Initializer] Step 3c: Instance validity check passed.');
-        logger.info(`[Initializer] Step 3: Flash Swap Manager initialized. Signer: ${await flashSwapManagerInstance.getSignerAddress()}`);
-         logger.info(`[Initializer] Using FlashSwap contract at: ${flashSwapManagerInstance.getFlashSwapContract()?.address || 'N/A'}`);
+        logger.info(`[Initializer v1.1] Step 3: Flash Swap Manager initialized. Signer: ${await flashSwapManagerInstance.getSignerAddress()}`); // Version bump
+         logger.info(`[Initializer v1.1] Using FlashSwap contract at: ${flashSwapManagerInstance.getFlashSwapContract()?.target || 'N/A'}`); // Version bump
 
-        // Step 4: Initializing Arbitrage Engine
-        logger.info('[Initializer] Step 4: Initializing Arbitrage Engine...');
-        logger.debug('[Initializer] Step 4a: Validating dependencies before passing to AE...');
-         const isFsmValidForAE = flashSwapManagerInstance && typeof flashSwapManagerInstance.getSignerAddress === 'function' && typeof flashSwapManagerInstance.getFlashSwapABI === 'function';
-         if (!isFsmValidForAE) { // Re-check validity just before AE init
-             const errorMsg = 'FlashSwapManager instance is invalid for ArbitrageEngine initialization (pre-check failed).';
-             logger.error(`[Initializer] CRITICAL: ${errorMsg}`);
+
+        // Step 4: Initializing Nonce Manager (Needs config, provider, and the signer from FSM)
+        logger.info('[Initializer v1.1] Step 4: Initializing Nonce Manager...'); // Version bump
+        const signer = flashSwapManagerInstance.signer; // Get signer instance from FSM
+        nonceManagerInstance = new NonceManager(appConfig, provider, signer); // <-- Initialize here
+         // Basic check
+         if (typeof nonceManagerInstance.sendTransaction !== 'function' || typeof nonceManagerInstance.getAddress !== 'function') {
+             const errorMsg = 'Nonce Manager failed to initialize correctly or is missing necessary methods.';
+              logger.error(`[Initializer v1.1] CRITICAL: ${errorMsg}`); // Version bump
+              throw new ArbitrageError('InitializationError', errorMsg);
+         }
+        await nonceManagerInstance.init(); // Initialize nonce tracking (fetches initial nonce)
+        logger.info('[Initializer v1.1] Step 4: Nonce Manager initialized and synced.'); // Version bump
+
+
+         // Step 5: Initializing Gas Estimator (Needs config, provider, and FlashSwap ABI from FSM)
+         logger.info('[Initializer v1.1] Step 5: Initializing Gas Estimator...'); // Version bump
+         const flashSwapABI = flashSwapManagerInstance.getFlashSwapABI(); // Get ABI from FSM
+         if (!flashSwapABI) {
+             const errorMsg = "Failed to get FlashSwap ABI from FlashSwapManager for GasEstimator.";
+             logger.error(`[Initializer v1.1] CRITICAL: ${errorMsg}`); // Version bump
              throw new ArbitrageError('InitializationError', errorMsg);
          }
-        logger.debug('[Initializer] Step 4b: Calling ArbitrageEngine constructor...');
+         gasEstimatorInstance = new GasEstimator(appConfig, provider, flashSwapABI); // <-- Initialize here
+         // Basic check
+          if (typeof gasEstimatorInstance.estimateTxGasCost !== 'function' || typeof gasEstimatorInstance.getFeeData !== 'function') {
+              const errorMsg = 'Gas Estimator failed to initialize correctly or is missing necessary methods.';
+               logger.error(`[Initializer v1.1] CRITICAL: ${errorMsg}`); // Version bump
+               throw new ArbitrageError('InitializationError', errorMsg);
+          }
+         logger.info('[Initializer v1.1] Step 5: Gas Estimator initialized.'); // Version bump
+
+
+        // Step 6: Initializing Arbitrage Engine with all necessary INSTANCES
+        // AE needs INSTANCES of SwapSimulator, GasEstimator, FlashSwapManager, NONCEManager
+        // It takes TradeHandler CLASS because AE creates the TradeHandler instance inside its constructor.
+        logger.info('[Initializer v1.1] Step 6: Initializing Arbitrage Engine...'); // Version bump
 
         const arbitrageEngine = new ArbitrageEngine(
             appConfig,
             provider,
-            swapSimulator,
-            GasEstimator, // Pass the GasEstimator CLASS here
-            flashSwapManagerInstance, // Pass the FlashSwapManager instance
-            TradeHandler // Pass the TradeHandler CLASS here
+            swapSimulatorInstance, // Pass Instance
+            gasEstimatorInstance, // Pass Instance
+            flashSwapManagerInstance, // Pass Instance
+            nonceManagerInstance, // <-- Pass NonceManager Instance
+            TradeHandler // Pass TradeHandler CLASS
         );
-        logger.debug('[Initializer] Step 4c: ArbitrageEngine constructor returned.');
-         if (!(arbitrageEngine?.start && arbitrageEngine?.stop && arbitrageEngine?.runCycle)) { // Basic checks
-              const errorMsg = 'Arbitrage Engine failed to initialize correctly.';
-              logger.error(`[Initializer] CRITICAL: ${errorMsg}`);
+         // Basic check
+         if (typeof arbitrageEngine.start !== 'function' || typeof arbitrageEngine.stop !== 'function' || typeof arbitrageEngine.runCycle !== 'function') {
+             const errorMsg = 'Arbitrage Engine failed to initialize correctly or is missing necessary methods.';
+              logger.error(`[Initializer v1.1] CRITICAL: ${errorMsg}`); // Version bump
               throw new ArbitrageError('InitializationError', errorMsg);
          }
-        logger.info('[Initializer] Step 4: Arbitrage Engine initialized.');
+        logger.info('[Initializer v1.1] Step 6: Arbitrage Engine initialized.'); // Version bump
 
         // Initialization complete. Return the main components.
-        logger.info('[Initializer] Bot components initialized successfully.');
-        return { arbitrageEngine, flashSwapManager: flashSwapManagerInstance };
+        logger.info('[Initializer v1.1] Bot components initialized successfully.'); // Version bump
+        return { arbitrageEngine: arbitrageEngine, flashSwapManager: flashSwapManagerInstance, nonceManager: nonceManagerInstance };
 
     } catch (error) {
-        logger.error('[Initializer] Error during initialization sequence:', error);
+        logger.error('[Initializer v1.1] Error during initialization sequence:', error); // Version bump
         // Re-throw the error so bot.js can catch, handle, and exit.
         throw error;
     }
