@@ -1,6 +1,6 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.13 --- Moved forking config directly into hardhat network definition to force activation.
+// --- VERSION v1.14 --- Added temporary console.log to check forking config.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
@@ -182,6 +182,9 @@ module.exports = {
        },
        // --- END MOVED FORKING CONFIG ---
     },
+
+    console.log("Hardhat network forking config:", module.exports.networks.hardhat.forking); // <--- ADDED TEMPORARY LOG HERE
+
     // Local Fork Network (Used with --network localFork)
     // Configured to connect to the Hardhat node's RPC endpoint (http://127.0.0.1:8545).
     // This network config is primarily used by the bot and console to *connect* to the running node.
@@ -191,8 +194,6 @@ module.exports = {
       // NO accounts array defined here. Hardhat node provides accounts, bot uses PRIVATE_KEY from .env.
       chainId: 42161, // Match Arbitrum Mainnet chain ID
     },
-    // The global forking section is removed in this version (v1.13)
-    // forking: { ... } // REMOVED
 
     // Arbitrum Mainnet (Used with --network arbitrum)
     arbitrum: {
