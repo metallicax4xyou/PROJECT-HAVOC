@@ -1,14 +1,15 @@
 // hardhat.config.js
 // Hardhat Configuration File
-// --- VERSION v1.15 --- REMOVED misplaced console.log causing SyntaxError.
+// --- VERSION v1.16 --- Simplified forking config in hardhat network to use direct values.
 
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
 require("hardhat-gas-reporter");
 require("dotenv").config(); // Ensure .env variables are loaded at the very top
 
-console.log("[DEBUG_ENV] FORKING:", process.env.FORKING); // <--- ADD THIS LINE
-console.log("[DEBUG_ENV] ARBITRUM_RPC_URLS:", process.env.ARBITRUM_RPC_URLS); // <--- ADD THIS LINE
+console.log("[DEBUG_ENV] FORKING:", process.env.FORKING); // <--- KEEP THIS TEMPORARY LOG
+console.log("[DEBUG_ENV] ARBITRUM_RPC_URLS:", process.env.ARBITRUM_RPC_URLS); // <--- KEEP THIS TEMPORARY LOG
+
 
 // --- Environment Variables (Accessed within the config scope) ---
 // Access these using process.env directly where needed, or assign to local consts *inside* the object
@@ -38,6 +39,7 @@ const accountsForLiveNetworks = (PRIVATE_KEY_RAW_ENV.length === 64) ? [`0x${PRIV
 
 
 // Access specific RPC URLs from .env
+// Keeping these defined, but the forking config below will use the direct string for testing
 const ARBITRUM_RPC_URL = process.env.ARBITRUM_RPC_URLS?.split(',')[0] || `https://arb-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY_ARBITRUM}`;
 const GOERLI_RPC_URL = process.env.GOERLI_RPC_URL || `https://eth-goerli.g.alchemy.com/v2/${INFURA_API_KEY}`; // Using Infura as fallback example
 const ARBITRUM_GOERLI_RPC_URL = process.env.ARBITRUM_GOERLI_RPC_URL || "https://goerli-rollup.arbitrum.io/rpc";
@@ -174,16 +176,16 @@ module.exports = {
     // This is the in-memory network, configured for forking Arbitrum Mainnet.
     hardhat: {
        // Use the environment variable private key if valid, in the correct object format.
-       // If not valid, hardhatAccountsConfig is empty array, Hardhat will generate default accounts.
+       // If not valid, hardhatAccountsConfig is empty array, Hardhat will generate defaults.
        accounts: hardhatAccountsConfig,
        chainId: 42161, // Explicitly set Hardhat network chainId to match Arbitrum for forking
-       // --- MOVED FORKING CONFIG HERE ---
+       // --- SIMPLIFIED FORKING CONFIG HERE ---
        forking: {
-           url: ARBITRUM_RPC_URL, // Use the Arbitrum Mainnet RPC URL from .env
-           // blockNumber: 123456789 // Optional: Specify a block number for consistent fork state
-           enabled: process.env.FORKING === 'true' // Only enable forking if FORKING=true in .env
+           // Use the direct URL string from .env for testing
+           url: process.env.ARBITRUM_RPC_URLS?.split(',')[0] || `https://arb-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY_ARBITRUM}`,
+           enabled: true // Explicitly set to true regardless of env var, just to test activation
        },
-       // --- END MOVED FORKING CONFIG ---
+       // --- END SIMPLIFIED FORKING CONFIG ---
     },
 
     // Local Fork Network (Used with --network localFork)
@@ -232,4 +234,4 @@ module.exports = {
 // This warning is specifically for the PRIVATE_KEY variable used for non-localFork networks
 if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY.replace(/^0x/, "").length !== 64 && process.env.NETWORK !== 'localFork' && process.env.NETWORK !== 'hardhat') {
      console.warn(`[Hardhat Config] WARNING: PRIVATE_KEY environment variable has unexpected length (${process.env.PRIVATE_KEY.replace(/^0x/, "").length} after stripping 0x). Expected 64 for live networks.`);
-      }
+}
