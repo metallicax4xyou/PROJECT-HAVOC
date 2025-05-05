@@ -120,7 +120,8 @@ class TxExecutor {
         logger.debug(`${logPrefix} Tx Nonce: ${txResponse.nonce}`);
 
 
-        // Wait for the transaction to be mined and confirmed
+        // Wait for the transaction to be mined (e.g., 1 block confirmation)
+        // You can configure the number of confirmations needed in config if desired.
         logger.info(`${logPrefix} Waiting for ${this.numConfirmations} confirmation(s) for Tx: ${txResponse.hash}`);
 
         let receipt = null;
@@ -230,7 +231,16 @@ class TxExecutor {
         logger.info(`${logPrefix} Preparing transaction for execution...`);
 
         // Pass estimatedGasLimit, but derive gas price/fees from feeData within the tx object
-        this._validateExecutionInputs(estimatedGasLimit, feeData.gasPrice || feeData.maxFeePerGas, logPrefix); // Validate at least one fee type
+        // Use getEffectiveGasPrice from the GasEstimator instance if available, or fallback.
+        // Assuming TradeHandler passes feeData, validate based on that.
+        // Validate at least one fee type (gasPrice or maxFeePerGas) exists in feeData.
+        if (!feeData || (!feeData.gasPrice && !feeData.maxFeePerGas)) {
+             const errorMsg = `Invalid or incomplete feeData received for execution.`;
+             logger.error(`${logPrefix} ${errorMsg}`, { feeData });
+             throw new ArbitrageError('TxExecutionError:InvalidInput', errorMsg);
+        }
+         this._validateExecutionInputs(estimatedGasLimit, feeData.gasPrice || feeData.maxFeePerGas, logPrefix); // Validate estimatedGasLimit and at least one fee
+
 
         if (isDryRun) {
             // Pass relevant fee data for dry run logging
@@ -288,4 +298,4 @@ class TxExecutor {
 }
 
 // Export the class
-module.exports = TxExecutor;
+module.exports = TxExecutor;l
