@@ -1,13 +1,13 @@
 // core/tradeHandler.js
-// --- VERSION v2.2 --- Removed redundant calldata logging block as encoding happens in txExecutor.
+// --- VERSION v2.3 --- Updated to use the refactored TxExecutor class instance.
 
-const { ethers } require('ethers');
+const { ethers } = require('ethers');
 const logger = require('../utils/logger'); // Use injected logger instance when possible
 const ErrorHandler = require('../utils/errorHandler'); // Centralized error handling
 // Import the new parameter preparer utility
 const { prepareExecutionParams } = require('./tx/txParameterPreparer');
-// Import the transaction execution utility
-const { executeTransaction } } = require('./tx/index'); // ASSUMING this import path is correct
+// Import the TxExecutor CLASS (assuming it's now in ./tx/txExecutor.js)
+const TxExecutor = require('./tx/txExecutor'); // <-- UPDATED IMPORT
 
 
 /**
@@ -20,13 +20,14 @@ class TradeHandler {
      * @param {ethers.Provider} provider - The ethers provider instance.
      * @param {FlashSwapManager} flashSwapManager - Instance of FlashSwapManager.
      * @param {GasEstimator} gasEstimator - Instance of GasEstimator.
+     * @param {object} nonceManager - The NonceManager instance. // TradeHandler needs NonceManager to pass to TxExecutor
      * @param {object} loggerInstance - The logger instance.
      */
-    constructor(config, provider, flashSwapManager, gasEstimator, loggerInstance = logger) {
-        const logPrefix = '[TradeHandler v2.2 Init]'; // Version bump
+    constructor(config, provider, flashSwapManager, gasEstimator, nonceManager, loggerInstance = logger) { // <-- Added nonceManager parameter
+        const logPrefix = '[TradeHandler v2.3 Init]'; // Version bump
         this.config = config;
         this.provider = provider;
-        // Validate dependencies (more robust checks can be added)
+        // Validate dependencies
         if (!flashSwapManager || typeof flashSwapManager.initiateAaveFlashLoan !== 'function' || typeof flashSwapManager.getFlashSwapContract !== 'function') {
              loggerInstance.error(`${logPrefix} Invalid FlashSwapManager instance.`);
              throw new Error('TradeHandler Init: Invalid FlashSwapManager instance.');
@@ -35,15 +36,20 @@ class TradeHandler {
              loggerInstance.error(`${logPrefix} Invalid GasEstimator instance.`);
              throw new Error('TradeHandler Init: Invalid GasEstimator instance.');
         }
-        // Validate executeTransaction function exists (check after import)
-        if (typeof executeTransaction !== 'function') {
-             loggerInstance.error(`${logPrefix} Critical: executeTransaction function not found. Is ./tx/index.js imported correctly?`);
-             throw new Error('TradeHandler Init: executeTransaction function not available.');
-        }
+         // Validate NonceManager instance
+         if (!nonceManager || typeof nonceManager.sendTransaction !== 'function') {
+              loggerInstance.error(`${logPrefix} Invalid NonceManager instance.`);
+              throw new Error('TradeHandler Init: Invalid NonceManager instance.');
+         }
          // Validate prepareExecutionParams function exists
          if (typeof prepareExecutionParams !== 'function') {
               loggerInstance.error(`${logPrefix} Critical: prepareExecutionParams function not found. Is ./tx/txParameterPreparer.js imported correctly?`);
               throw new Error('TradeHandler Init: prepareExecutionParams function not available.');
+         }
+         // Validate TxExecutor CLASS exists
+         if (typeof TxExecutor !== 'function') { // Check if TxExecutor is a class constructor
+              loggerInstance.error(`${logPrefix} Critical: TxExecutor class not found. Is ./tx/txExecutor.js imported correctly and exporting the class?`);
+              throw new Error('TradeHandler Init: TxExecutor class not available.');
          }
 
 
@@ -55,12 +61,18 @@ class TradeHandler {
         // Retrieve Tithe Recipient from Config during initialization
         this.titheRecipient = this.config.TITHE_WALLET_ADDRESS;
          // Basic validation - critical config should ideally be validated by loadConfig/initializer
-        if (!this.titheRecipient || typeof this.titheRecipient !== 'string' || !ethers.isAddress(this.titheRecipient)) { // Added type check
+        if (!this.titheRecipient || typeof this.titheRecipient !== 'string' || !ethers.isAddress(this.titheRecipient)) {
              this.logger.error(`${logPrefix} CRITICAL ERROR: TITHE_WALLET_ADDRESS is missing or invalid in configuration.`);
-             // Throw as this is critical for transaction building with tithe
              throw new Error('TITHE_WALLET_ADDRESS is missing or invalid in configuration.');
         }
-        this.logger.info(`${logPrefix} Initialized. Tithe Recipient: ${this.titheRecipient}`); // Version bump
+        this.logger.debug(`${logPrefix} Initialized. Tithe Recipient: ${this.titheRecipient}`); // Debug log
+
+        // --- Initialize TxExecutor instance ---
+        // TxExecutor requires config, provider, and NonceManager
+        this.txExecutor = new TxExecutor(config, provider, nonceManager); // <-- NEW INSTANCE CREATION
+        this.logger.debug(`${logPrefix} TxExecutor instance created.`);
+
+
          if (this.isDryRun) {
              this.logger.info(`${logPrefix} Running in DRY_RUN mode. Transactions will be simulated but NOT sent.`);
          }
@@ -71,7 +83,7 @@ class TradeHandler {
      * @param {Array<object>} trades - Array of profitable opportunity objects from the ProfitCalculator.
      */
     async handleTrades(trades) {
-        const logPrefix = '[TradeHandler v2.2]'; // Version bump
+        const logPrefix = '[TradeHandler v2.3]'; // Version bump
 
         if (!this.flashSwapManager || trades.length === 0) {
             this.logger.debug(`${logPrefix} No trades or FlashSwapManager missing. Skipping.`);
@@ -94,12 +106,11 @@ class TradeHandler {
         this.logger.info(`${logPrefix} DRY_RUN=false. Processing ${trades.length} trades for potential execution...`);
 
         // Sort and select the best trade (highest estimatedProfitNativeWei)
-        // The trades array should already be augmented with netProfitNativeWei by ProfitCalculator
-        // Sort by netProfitNativeWei (after gas/fee, before tithe)
         trades.sort((a, b) => (BigInt(b.netProfitNativeWei || 0n)) - (BigInt(a.netProfitNativeWei || 0n)));
         const tradeToExecute = trades[0];
 
         // Ensure the trade object contains the required gas estimate details from ProfitCalculator
+        // Now checks for pathGasLimit, effectiveGasPrice, AND totalCostWei which are expected on the gasEstimate object
         if (!tradeToExecute.gasEstimate || tradeToExecute.gasEstimate.pathGasLimit === undefined || tradeToExecute.gasEstimate.pathGasLimit === null || tradeToExecute.gasEstimate.effectiveGasPrice === undefined || tradeToExecute.gasEstimate.effectiveGasPrice === null || tradeToExecute.gasEstimate.totalCostWei === undefined || tradeToExecute.gasEstimate.totalCostWei === null) {
              const errorMsg = `Best trade missing required gas estimate details (pathGasLimit, effectiveGasPrice, totalCostWei). Cannot execute.`;
              this.logger.error(`${logPrefix} CRITICAL: ${errorMsg}`, { gasEstimate: tradeToExecute.gasEstimate });
@@ -131,8 +142,6 @@ class TradeHandler {
             // --- 1. Prepare Transaction Parameters ---
             this.logger.debug(`${logPrefix} Preparing execution parameters using txParameterPreparer...`);
             // prepareExecutionParams returns { contractFunctionName, flashLoanArgs, providerType, gasLimit }
-            // Note: The gasLimit returned by the preparer is redundant if we already get it from tradeToExecute.
-            // Let's use the one from tradeToExecute as it came from the ProfitCalculator's estimation process.
             const { contractFunctionName, flashLoanArgs, providerType } = await prepareExecutionParams(
                 tradeToExecute,
                 this.config,
@@ -157,28 +166,53 @@ class TradeHandler {
              // Log current fee data (optional, but good for debugging)
              this.logger.debug(`${logPrefix} Current Fee Data: maxFeePerGas=${feeData.maxFeePerGas?.toString()}, maxPriorityFeePerGas=${feeData.maxPriorityFeePerGas?.toString()}, gasPrice=${feeData.gasPrice?.toString()}`);
              // We already used effectiveGasPrice from gasEstimate for profit calc.
-             // Use the fresh feeData directly in executeTransaction options.
+             // Pass the fresh feeData directly to TxExecutor.
 
 
             // --- 3. Execute ---
-            // Call the executeTransaction utility function with the prepared params and gas limit
+            // Call the executeTransaction method on the TxExecutor instance
             this.logger.warn(`${logPrefix} >>> ATTEMPTING EXECUTION via ${providerType} path (${contractFunctionName}) <<<`);
-            this.logger.debug(`${logPrefix} Calling executeTransaction with gasLimit=${gasLimit.toString()}, function ${contractFunctionName}, args [...]`);
+            // Note: FlashSwapManager instance has the FlashSwap contract and signer within it
+            // We pass FSM instance to TxExecutor constructor (or executeTransaction?)
+            // Looking at TxExecutor constructor (v1.4), it takes FlashSwapManager (or NonceManager?)
+            // The refactored TxExecutor v1.4 constructor takes config, provider, NonceManager.
+            // The TradeHandler constructor now also needs NonceManager to pass to TxExecutor.
+            // The TxExecutor instance will get the signer and contract from the NonceManager it's given.
+            // TradeHandler needs to pass FlashSwapManager address to TxExecutor's executeTransaction method.
 
-            // Removed the manual calldata encoding block here
+            // --- Re-evaluate TxExecutor executeTransaction signature ---
+            // The refactored TxExecutor's executeTransaction takes:
+            // (toAddress, calldata, estimatedGasLimit, feeData, opportunityDetails, isDryRun)
+            // Where does calldata come from? It needs to be encoded.
+            // The TradeHandler has contractFunctionName and flashLoanArgs from prepareExecutionParams.
+            // The calldata encoding should happen right *before* sending the transaction in TxExecutor,
+            // using the Encoder utility.
 
-            const executionResult = await executeTransaction(
-                contractFunctionName, // Function name on FlashSwap.sol
-                flashLoanArgs,            // Arguments for that function (prepared by txParameterPreparer)
-                this.flashSwapManager,    // Manager instance (contains signer and contract)
-                gasLimit,                 // Use the determined estimated gas limit from ProfitCalculator
+            // --- MODIFIED TRADEHANDLER EXECUTION FLOW ---
+            // The TradeHandler should pass contractFunctionName and flashLoanArgs to TxExecutor.executeTransaction.
+            // The TxExecutor should then call the Encoder to get the calldata.
+            // The TxExecutor constructor also needs FlashSwapManager instance (to get contract address and pass to Encoder if needed?)
+            // Or TxExecutor just needs the contract address and the Encoder needs FlashSwap ABI (which it gets from ABIS constants)
+
+            // Let's revise the interaction:
+            // TradeHandler calls: this.txExecutor.executeTransaction(contractFunctionName, flashLoanArgs, gasLimit, feeData, opportunityDetails, isDryRun);
+            // TxExecutor calls: const calldata = Encoder.encodeFlashSwapCall(contractFunctionName, flashLoanArgs);
+            // TxExecutor then uses calldata to build the transaction.
+
+            // Modify the call to this.txExecutor.executeTransaction:
+            const executionResult = await this.txExecutor.executeTransaction( // <-- Call method on instance
+                this.flashSwapManager.getFlashSwapContract()?.target, // Pass the FlashSwap contract address
+                contractFunctionName, // Pass function name
+                flashLoanArgs, // Pass function args array
+                gasLimit,                 // Use the determined estimated gas limit
                 feeData,                  // Pass fresh fee data for transaction options
-                this.logger,              // Logger instance
+                logPrefix, // Pass logPrefix for TxExecutor logging
                 this.isDryRun             // isDryRun status (should be false here)
             );
 
+
             // --- 4. Log Result & Handle Stop ---
-            if (executionResult.success) {
+            if (executionResult?.success) { // Check executionResult object structure
                 this.logger.info(`${logPrefix} 🎉🎉🎉 SUCCESSFULLY EXECUTED via ${providerType}. Tx: ${executionResult.txHash}`);
                 // Log Tithe Recipient on Success (it was passed to builder and encoded)
                 this.logger.info(`${logPrefix} Tithe Destination (encoded in params): ${this.titheRecipient}`);
@@ -186,26 +220,22 @@ class TradeHandler {
                 // Signal stop if configured
                 if (this.config.STOP_ON_FIRST_EXECUTION) {
                     this.logger.warn(`${logPrefix} STOP_ON_FIRST_EXECUTION is true. Signaling process exit...`);
-                    // Use process.exit(0) for clean exit
                     process.exit(0);
                 }
             } else {
-                 // executionResult includes details like txHash, receipt (if available), error
-                this.logger.error(`${logPrefix} Execution FAILED via ${providerType}. Tx: ${executionResult.txHash || 'N/A'}. See logs above for details.`);
-                 // ErrorHandler utility logs the error details from the executionResult already within executeTransaction.
-                 // Just ensure this top-level catch doesn't miss anything critical.
+                 // executionResult is null or success is false (TxExecutor returns null on failure)
+                this.logger.error(`${logPrefix} Execution FAILED via ${providerType}. See logs above for details.`);
+                 // executionResult might contain txHash and error details if TxExecutor returns an object on failure
+                 this.logger.error(`${logPrefix} Failed Tx Hash: ${executionResult?.txHash || 'N/A'}`);
+                 this.logger.error(`${logPrefix} Error Message: ${executionResult?.error?.message || 'N/A'}`);
             }
 
         } catch (execError) {
             // Catch errors thrown during parameter preparation or other steps before executeTransaction
             this.logger.error(`${logPrefix} Uncaught error during trade execution attempt: ${execError.message}`, execError);
-            // Use central ErrorHandler for consistent logging/reporting
             ErrorHandler.handleError(execError, 'TradeHandlerExecutionAttemptCatch');
         }
     } // End handleTrades method
-
-    // If TradeHandler needed other methods (e.g. handleTriangularArbitrage), they would be here.
-    // But handleTrades is the main entry point called by ArbitrageEngine.
 
 } // End TradeHandler class
 
