@@ -1,5 +1,8 @@
 // core/tx/builders/twoHopV3Builder.js
-// --- VERSION v1.3 --- Modified validation to allow zero minimum output during GasEstimator's minimal calldata encoding.
+// Builds parameters for the initiateFlashSwap (V3 -> V3 two-hop) function.
+// Includes the titheRecipient address.
+// Adjusts validation to handle zero minimum output during GasEstimator's minimal calldata encoding.
+// --- VERSION v1.4 --- Corrected simulationResult property names (hop1AmountOutSimulated, finalAmountSimulated).
 
 const { ethers } = require('ethers');
 const logger = require('../../../utils/logger'); // Adjust path
@@ -11,20 +14,30 @@ const { calculateMinAmountOut } = require('../../profitCalcUtils'); // Import fr
  * Includes the titheRecipient address.
  * Adjusts validation to handle minimal simulation results (where amounts are 0n)
  * when called by the GasEstimator for `estimateGas` check encoding.
+ * @param {object} opportunity The opportunity object.
+ * @param {object} simulationResult The result from the SwapSimulator ({ initialAmount: bigint, hop1AmountOutSimulated: bigint, finalAmountSimulated: bigint }).
+ * @param {object} config The application configuration object.
+ * @param {string} titheRecipient The wallet address to send the tithe to.
+ * @returns {{ params: object, borrowTokenAddress: string, borrowAmount: bigint, typeString: string, contractFunctionName: string }}
+ * @throws {ArbitrageError}
  */
 function buildTwoHopParams(opportunity, simulationResult, config, titheRecipient) {
-    const functionSig = `[Builder TwoHopV3 v1.3]`; // Updated version
+    const functionSig = `[Builder TwoHopV3 v1.4]`; // Updated version
     logger.debug(`${functionSig} Building parameters...`);
 
     // Validation (remains unchanged)
     if (!opportunity || opportunity.type !== 'spatial' || !opportunity.path || opportunity.path.length !== 2) { throw new ArbitrageError('Invalid spatial opportunity for V3->V3 param build.', 'PARAM_BUILD_ERROR'); }
     if (opportunity.path[0].dex !== 'uniswapV3' || opportunity.path[1].dex !== 'uniswapV3') { throw new ArbitrageError('Opportunity path is not V3->V3.', 'PARAM_BUILD_ERROR'); }
-    // simulationResult is expected to be { initialAmount: bigint, hop1AmountOut: bigint, finalAmount: bigint }
-    if (!simulationResult || typeof simulationResult.initialAmount !== 'bigint' || typeof simulationResult.hop1AmountOut !== 'bigint' || typeof simulationResult.finalAmount !== 'bigint') {
+    if (!opportunity.tokenIn || !opportunity.tokenIntermediate) { throw new ArbitrageError('Missing tokenIn or tokenIntermediate in V3->V3 opportunity.', 'PARAM_BUILD_ERROR'); }
+
+    // --- Corrected simulationResult structure check ---
+    // Check for the corrected property names used by SwapSimulator/ProfitCalculator
+    if (!simulationResult || typeof simulationResult.initialAmount !== 'bigint' || typeof simulationResult.hop1AmountOutSimulated !== 'bigint' || typeof simulationResult.finalAmountSimulated !== 'bigint') {
         logger.error(`${functionSig} Invalid simulationResult structure:`, simulationResult);
         throw new ArbitrageError('Invalid simulationResult structure for V3->V3 param build.', 'PARAM_BUILD_ERROR');
     }
-    if (!opportunity.tokenIn || !opportunity.tokenIntermediate) { throw new ArbitrageError('Missing tokenIn or tokenIntermediate in V3->V3 opportunity.', 'PARAM_BUILD_ERROR'); }
+    // --- End corrected check ---
+
     // --- Tithe Recipient Validation ---
     if (!titheRecipient || typeof titheRecipient !== 'string' || !ethers.isAddress(titheRecipient)) {
         logger.error(`${functionSig} Invalid titheRecipient address: "${titheRecipient}"`);
@@ -44,8 +57,12 @@ function buildTwoHopParams(opportunity, simulationResult, config, titheRecipient
     if (isNaN(feeA) || isNaN(feeB) || feeA < 0 || feeB < 0 || feeA > 1000000 || feeB > 1000000) { throw new ArbitrageError(`Invalid V3 fees found: feeA=${feeA}, feeB=${feeB}`, 'CONFIG_ERROR'); }
 
     const borrowAmount = simulationResult.initialAmount; // Amount borrowed for the flash loan
-    const hop1AmountOutSimulated = simulationResult.hop1AmountOut; // Amount of tokenIntermediate received after first hop
-    const hop2AmountOutSimulated = simulationResult.finalAmount; // Amount of tokenBorrowed received after second hop
+
+    // --- Corrected property names when pulling from simulationResult ---
+    const hop1AmountOutSimulated = simulationResult.hop1AmountOutSimulated; // Amount of tokenIntermediate received after first hop
+    const hop2AmountOutSimulated = simulationResult.finalAmountSimulated; // Amount of tokenBorrowed received after second hop
+    // --- End corrected property names ---
+
 
     // Calculate minimum amounts out for slippage
     // These are used in the FlashSwap contract to ensure transaction doesn't result in too little output.
@@ -57,10 +74,11 @@ function buildTwoHopParams(opportunity, simulationResult, config, titheRecipient
 
 
     // --- MODIFIED VALIDATION LOGIC ---
-    // Check if simulationResult.finalAmount is 0n AND initialAmount is 1n.
+    // Check if simulationResult.finalAmountSimulated is 0n AND initialAmount is 1n.
     // This pattern (1n initial, 0n intermediates/final) is characteristic of the minimal sim result used by the GasEstimator.
     // In this specific case, we should NOT throw an error if min amounts out are zero.
-    const isMinimalGasEstimateSim = (simulationResult.initialAmount === 1n && simulationResult.finalAmount === 0n);
+    // CORRECTED: Use finalAmountSimulated in the check
+    const isMinimalGasEstimateSim = (simulationResult.initialAmount === 1n && simulationResult.finalAmountSimulated === 0n);
 
     if (!isMinimalGasEstimateSim) {
         // This is a real simulation result (not the minimal gas estimate one).
@@ -92,7 +110,7 @@ function buildTwoHopParams(opportunity, simulationResult, config, titheRecipient
 
     // Define the struct type string for encoding. Must exactly match the struct in FlashSwap.sol
     const typeString = "tuple(address tokenIntermediate, uint24 feeA, uint24 feeB, uint256 amountOutMinimum1, uint256 amountOutMinimum2, address titheRecipient)";
-    const contractFunctionName = 'initiateFlashSwap'; // The function in FlashSwap.sol that handles V3->V3 two-hops
+    const contractFunctionName = 'initiateUniswapV3FlashLoan'; // CORRECTED: Use the actual function name
 
     logger.debug(`${functionSig} Parameters built successfully.`);
     // Return the structured parameters, the borrowed token address, the total borrowed amount,
