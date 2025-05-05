@@ -7,6 +7,9 @@ require("@nomicfoundation/hardhat-ethers");
 require("hardhat-gas-reporter");
 require("dotenv").config(); // Ensure .env variables are loaded at the very top
 
+console.log("[DEBUG_ENV] FORKING:", process.env.FORKING); // <--- ADD THIS LINE
+console.log("[DEBUG_ENV] ARBITRUM_RPC_URLS:", process.env.ARBITRUM_RPC_URLS); // <--- ADD THIS LINE
+
 // --- Environment Variables (Accessed within the config scope) ---
 // Access these using process.env directly where needed, or assign to local consts *inside* the object
 const INFURA_API_KEY = process.env.INFURA_API_KEY || "";
