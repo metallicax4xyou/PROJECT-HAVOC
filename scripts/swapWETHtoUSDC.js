@@ -5,12 +5,12 @@
 // and provides access to standard ethers.js utilities (parseEther, formatUnits, constants)
 // Note: This script uses Ethers v6 syntax.
 const { ethers } = require("hardhat");
-// We'll use the Interface class to validate ABIs before using getContractAt
-const { Interface } = require("ethers");
+// No longer need to import Interface here if not using it with getContractAt
+// const { Interface } = require("ethers");
 
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Detailed Debugging)...");
+  console.log("Running swapWETHtoUSDC.js script (Passing ABI arrays directly)...");
 
   // Get the deployer account (funded in your deploy script)
   const [deployer] = await ethers.getSigners();
@@ -99,28 +99,20 @@ async function main() {
   console.log("-------------------------------\n");
 
 
-  // Get contract instances using Hardhat's ethers.getContractAt with validated ABIs
-  console.log("Attempting to get contract instances with validated ABIs...");
+  // Get contract instances using Hardhat's ethers.getContractAt with appropriate ABIs
+  console.log("Attempting to get contract instances with validated ABIs (Passing ABI Arrays directly)...");
   let weth, usdcE, sushiRouter;
 
   try {
-      // Create Interface instances - this will throw if the ABI array is invalid
-      console.log("Creating Interface instances from ABIs...");
-      const wethIface = new Interface(WETH_MINIMAL_ABI);
-      console.log("Created WETH Interface successfully.");
-      const usdcEIface = new Interface(ERC20_ABI);
-      console.log("Created USDC.e Interface successfully.");
-      const sushiRouterIface = new Interface(SUSHI_ROUTER_ABI);
-      console.log("Created Sushi Router Interface successfully.");
+      // Use getContractAt with the ABI arrays directly and correct addresses/signer
 
-      // Now use getContractAt with the Interface instances and correct addresses/signer
-      weth = await ethers.getContractAt(wethIface, WETH_ADDRESS, deployer);
+      weth = await ethers.getContractAt(WETH_MINIMAL_ABI, WETH_ADDRESS, deployer);
       console.log(`Got WETH contract instance at ${weth.address || 'undefined'}`);
 
-      usdcE = await ethers.getContractAt(usdcEIface, USDCE_ADDRESS, deployer); // USDC.e also uses ERC20 ABI
+      usdcE = await ethers.getContractAt(ERC20_ABI, USDCE_ADDRESS, deployer); // USDC.e also uses ERC20 ABI
       console.log(`Got USDC.e contract instance at ${usdcE.address || 'undefined'}`);
 
-      sushiRouter = await ethers.getContractAt(sushiRouterIface, SUSHISWAP_ROUTER_ADDRESS, deployer);
+      sushiRouter = await ethers.getContractAt(SUSHI_ROUTER_ABI, SUSHISWAP_ROUTER_ADDRESS, deployer);
       console.log(`Got Sushi Router contract instance at ${sushiRouter.address || 'undefined'}`);
 
       console.log("Finished attempting to get contract instances.");
@@ -132,10 +124,7 @@ async function main() {
 
   } catch (error) {
       console.error("\nError during contract instantiation:", error);
-      // Additional logging to help diagnose failure
-      if (error.message.includes("Invalid ABI format") || error.message.includes("abi is not iterable")) {
-          console.error("Hint: Check the JSON structure of your ABI files. They should contain an array of ABI fragments.");
-      }
+      // Additional logging to help diagnose failure (Keeping relevant hints)
        if (error.message.includes("resolveName not implemented")) {
            console.error("Hint: Could be an issue with the signer or provider setup, or addresses.");
        }
@@ -150,9 +139,10 @@ async function main() {
   const amountToWrap = ethers.parseEther("1.0"); // Ethers v6 syntax
   console.log(`Wrapping ${ethers.formatEther(amountToWrap)} ETH to WETH...`); // Ethers v6 syntax
   // Note: WETH contract often has a 'deposit' function that accepts ETH
-  // Ethers v6 fix: Call payable function via .functions when using getContractAt with raw ABI
-  // This call is now inside the try block that checks for valid instances
-  let tx = await weth.functions.deposit({ value: amountToWrap }); // <-- This line previously failed
+  // Ethers v6 fix: Call payable function via .functions when using getContractAt with raw ABI is not needed when passing array directly
+  // It seems using the ABI array directly allows the standard call syntax. Let's try this.
+  let tx = await weth.deposit({ value: amountToWrap }); // <-- Trying direct call with ABI array
+
   console.log(`Transaction sent: ${tx.hash}`);
   await tx.wait();
   console.log("Wrapped ETH to WETH.");
