@@ -6,7 +6,7 @@ const { ethers } = require("ethers");
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Correcting USDT address checksum)...");
+  console.log("Running swapWETHtoUSDC.js script (Reverting to direct WETH -> USDC.e path)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -54,15 +54,15 @@ async function main() {
 
   // Get contract addresses (these remain the same)
   const WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"; // WETH on Arbitrum
-  const USDC_ADDRESS = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"; // Correct USDC (not .e) if needed for path? Reverting to USDC.e as per config.
+  // Note: Confirming USDCE_ADDRESS vs USDC_ADDRESS - using USDCE_ADDRESS as per initial config and pool loading
   const USDCE_ADDRESS = "0xFF970A61A04b1cA1cA37447f62EAbeA514106c"; // USDC.e on Arbitrum
-  const USDT_ADDRESS = "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"; // USDT on Arbitrum - CORRECTED CHECKSUM (lowercase)
+  const USDT_ADDRESS = "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"; // USDT on Arbitrum - Correct checksum (lowercase)
   const SUSHISWAP_ROUTER_ADDRESS = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"; // SushiSwap Router V2
 
   console.log("\n--- Addresses ---");
   console.log("WETH_ADDRESS:", WETH_ADDRESS);
   console.log("USDCE_ADDRESS:", USDCE_ADDRESS);
-  console.log("USDT_ADDRESS:", USDT_ADDRESS); // Log CORRECTED USDT address
+  console.log("USDT_ADDRESS:", USDT_ADDRESS);
   console.log("SUSHISWAP_ROUTER_ADDRESS:", SUSHISWAP_ROUTER_ADDRESS);
   console.log("-----------------\n");
 
@@ -150,7 +150,7 @@ async function main() {
       usdcE = new ethers.Contract(USDCE_ADDRESS, ERC20_ABI, deployer); // Use ERC20 ABI for USDC.e
       console.log(`Instantiated USDC.e contract. Target: ${usdcE.target}`);
 
-      console.log("-> Attempting to instantiate USDT contract..."); // Instantiate USDT
+      console.log("-> Attempting to instantiate USDT contract..."); // Instantiate USDT (still instantiate even if not in path)
       usdt = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, deployer); // Use ERC20 ABI for USDT
       console.log(`Instantiated USDT contract. Target: ${usdt.target}`);
 
@@ -211,8 +211,8 @@ async function main() {
 
   // Perform the swap: Swap 0.5 WETH for USDC.e on SushiSwap
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH, Ethers v6 syntax
-  // --- CORRECTED PATH TO WETH -> USDT -> USDC.e ---
-  const path = [WETH_ADDRESS, USDT_ADDRESS, USDCE_ADDRESS]; // <-- CORRECTED LINE (USDT address updated)
+  // --- REVERTING PATH TO DIRECT WETH -> USDC.e ---
+  const path = [WETH_ADDRESS, USDCE_ADDRESS]; // <-- CORRECTED LINE (Reverted path)
   // Use deployer.address string directly for the 'to' address - Should work with standalone ethers
   const to = deployer.address; // Raw string address
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
@@ -231,11 +231,11 @@ async function main() {
       const estimatedAmountsOut = await sushiRouter.getAmountsOut(amountIn, path);
       console.log(`getAmountsOut successful.`);
       // The last token in the path determines the decimal places for the final output amount
-      // In the new path (WETH -> USDT -> USDC.e), the last token is USDC.e, which has 6 decimals.
+      // In the path (WETH -> USDC.e), the last token is USDC.e, which has 6 decimals.
       console.log(`Estimated output amount for ${path.join(' -> ')} swap: ${ethers.formatUnits(estimatedAmountsOut[estimatedAmountsOut.length - 1], 6)} USDC.e`); // USDC.e has 6 decimals
 
   } catch (error) {
-      console.error("\ngetAmountsOut failed. This path might not be supported or liquidity is too low.");
+      console.error("\ngetAmountsOut failed with path", path.join(' -> '), ". This path might not be supported or liquidity is too low."); // Log path in error
       console.error("Error Object:", error); // Log the full error object
       console.error("Error Reason:", error.reason); // Log specific revert reason if available
       console.error("Error Code:", error.code);   // Log Ethers error code
@@ -261,7 +261,7 @@ async function main() {
       console.log("callStatic Result:", callStaticResult); // Log the result if successful (usually undefined for swap fns)
 
   } catch (error) {
-      console.error("\ncallStatic swap failed. This confirms the transaction would revert on-chain.");
+      console.error("\ncallStatic swap failed with path", path.join(' -> '), ". This confirms the transaction would revert on-chain."); // Log path in error
       console.error("Error Object:", error); // Log the full error object
       console.error("Error Reason:", error.reason); // Log specific revert reason if available
       console.error("Error Code:", error.code);   // Log Ethers error code
@@ -292,7 +292,7 @@ async function main() {
         console.log("Gas used:", receipt.gasUsed.toString());
 
     } catch (error) {
-        console.error("\nActual Swap failed:");
+        console.error("\nActual Swap failed with path", path.join(' -> '), "."); // Log path in error
          console.error("Error Object:", error); // Log the full error object
         console.error("Error Reason:", error.reason); // Log specific revert reason if available
         console.error("Error Code:", error.code);   // Log Ethers error code
