@@ -3,58 +3,146 @@
 // This is the standard Hardhat way to import the ethers object
 // It includes Hardhat-specific functions (getSigners, getContractAt)
 // and provides access to standard ethers.js utilities (parseEther, formatUnits, constants)
-// Note: This script uses Ethers v6 syntax, where many utilities are directly on the ethers object,
-// and payable function calls on contract instances from getContractAt with raw ABIs
-// may require accessing via .functions.methodName(...)
+// Note: This script uses Ethers v6 syntax.
 const { ethers } = require("hardhat");
+// We'll use the Interface class to validate ABIs before using getContractAt
+const { Interface } = require("ethers");
+
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Ethers v6 deposit fix)...");
+  console.log("Running swapWETHtoUSDC.js script (Detailed Debugging)...");
 
   // Get the deployer account (funded in your deploy script)
   const [deployer] = await ethers.getSigners();
   console.log("Using account:", deployer.address);
+  console.log("Deployer address type:", typeof deployer.address);
+
 
   // Get contract addresses
   const WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"; // WETH on Arbitrum
   const USDCE_ADDRESS = "0xFF970A61A04b1cA1cA37447f62EAbeA514106c"; // USDC.e on Arbitrum
   const SUSHISWAP_ROUTER_ADDRESS = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"; // SushiSwap Router V2
-  console.log("Defined addresses.");
+
+  console.log("\n--- Addresses ---");
+  console.log("WETH_ADDRESS:", WETH_ADDRESS);
+  console.log("USDCE_ADDRESS:", USDCE_ADDRESS);
+  console.log("SUSHISWAP_ROUTER_ADDRESS:", SUSHISWAP_ROUTER_ADDRESS);
+  console.log("-----------------\n");
+
 
   // --- Define specific ABIs needed in the script ---
 
   // Minimal WETH ABI including deposit, approve, and balanceOf
-  // (We confirmed deposit() is included and payable based on the specialist's feedback)
   const WETH_MINIMAL_ABI = [
       "function deposit() payable",
       "function approve(address spender, uint amount) returns (bool)",
       "function balanceOf(address account) view returns (uint256)"
   ];
+  console.log("--- WETH ABI (Minimal) ---");
+  console.log("WETH_MINIMAL_ABI (first 3 entries):", WETH_MINIMAL_ABI.slice(0, 3)); // Log first few entries
+  console.log("Is WETH_MINIMAL_ABI an array?", Array.isArray(WETH_MINIMAL_ABI));
+  console.log("WETH_MINIMAL_ABI length:", WETH_MINIMAL_ABI.length);
+  console.log("-------------------------\n");
+
 
   // Standard ERC20 ABI for USDC.e (assuming it's just the array in abis/)
-  // If ERC20.json is an artifact, use:
-  // const ERC20_ARTIFACT = require("/workspaces/arbitrum-flash/abis/ERC20.json");
-  // const ERC20_ABI = ERC20_ARTIFACT.abi;
-  const ERC20_ABI = require("/workspaces/arbitrum-flash/abis/ERC20.json"); // Assuming this is just the ABI array
+  // We'll require the JSON and check its structure
+  let ERC20_ABI;
+   console.log("--- ERC20 ABI (from abis/ERC20.json) ---");
+  try {
+      const ERC20_LOADED = require("/workspaces/arbitrum-flash/abis/ERC20.json"); // Path to ERC20 JSON
+      console.log("Required abis/ERC20.json successfully.");
+      console.log("Type of loaded ERC20 JSON:", typeof ERC20_LOADED);
+      if (Array.isArray(ERC20_LOADED)) {
+          console.log("ERC20 JSON is directly an array.");
+          ERC20_ABI = ERC20_LOADED;
+      } else if (ERC20_LOADED && Array.isArray(ERC20_LOADED.abi)) {
+           console.log("ERC20 JSON has a .abi property which is an array.");
+          ERC20_ABI = ERC20_LOADED.abi;
+      } else {
+          console.error("ERC20 JSON is not an array and doesn't have a .abi array property.");
+          console.log("ERC20 JSON content:", ERC20_LOADED);
+          throw new Error("Invalid ERC20 ABI format");
+      }
+       console.log("Is ERC20_ABI an array?", Array.isArray(ERC20_ABI));
+       console.log("ERC20_ABI length:", ERC20_ABI.length);
+
+  } catch (error) {
+      console.error("Error requiring or processing abis/ERC20.json:", error);
+      process.exit(1); // Exit if we can't load critical ABI
+  }
+  console.log("-------------------------\n");
+
 
   // Sushi Router ABI (from artifact, extracting the 'abi' property)
-  const SUSHI_ROUTER_ARTIFACT = require("/workspaces/arbitrum-flash/artifacts/contracts/interfaces/IUniswapV2Router02.sol/IUniswapV2Router02.json"); // Path to Router Artifact JSON
-  const SUSHI_ROUTER_ABI = SUSHI_ROUTER_ARTIFACT.abi; // Extract .abi property
+  let SUSHI_ROUTER_ABI;
+  console.log("--- Sushi Router ABI (from artifacts/...) ---");
+   try {
+      const SUSHI_ROUTER_ARTIFACT = require("/workspaces/arbitrum-flash/artifacts/contracts/interfaces/IUniswapV2Router02.sol/IUniswapV2Router02.json"); // Path to Router Artifact JSON
+      console.log("Required router artifact JSON successfully.");
+      console.log("Type of loaded router artifact:", typeof SUSHI_ROUTER_ARTIFACT);
+      if (SUSHI_ROUTER_ARTIFACT && Array.isArray(SUSHI_ROUTER_ARTIFACT.abi)) {
+          console.log("Router artifact has a .abi property which is an array.");
+           SUSHI_ROUTER_ABI = SUSHI_ROUTER_ARTIFACT.abi;
+      } else {
+          console.error("Router artifact JSON does not have a .abi array property.");
+           console.log("Router artifact content:", SUSHI_ROUTER_ARTIFACT);
+          throw new Error("Invalid Router ABI artifact format");
+      }
+       console.log("Is SUSHI_ROUTER_ABI an array?", Array.isArray(SUSHI_ROUTER_ABI));
+       console.log("SUSHI_ROUTER_ABI length:", SUSHI_ROUTER_ABI.length);
 
-  // Get contract instances using Hardhat's ethers.getContractAt with appropriate ABIs
-  console.log("Getting contract instances...");
-  // Use the minimal WETH ABI for the WETH contract
-  const weth = await ethers.getContractAt(WETH_MINIMAL_ABI, WETH_ADDRESS, deployer);
-  console.log(`Got WETH contract instance at ${weth.address}`);
+   } catch (error) {
+       console.error("Error requiring or processing router artifact JSON:", error);
+       process.exit(1); // Exit if we can't load critical ABI
+   }
+  console.log("-------------------------------\n");
 
-  // Use the standard ERC20 ABI for the USDC.e contract
-  const usdcE = await ethers.getContractAt(ERC20_ABI, USDCE_ADDRESS, deployer); // USDC.e also uses ERC20 ABI
-  console.log(`Got USDC.e contract instance at ${usdcE.address}`);
 
-  // Use the Sushi Router ABI for the router contract
-  const sushiRouter = await ethers.getContractAt(SUSHI_ROUTER_ABI, SUSHISWAP_ROUTER_ADDRESS, deployer);
-  console.log(`Got Sushi Router contract instance at ${sushiRouter.address}`);
-  console.log("Finished getting contract instances.");
+  // Get contract instances using Hardhat's ethers.getContractAt with validated ABIs
+  console.log("Attempting to get contract instances with validated ABIs...");
+  let weth, usdcE, sushiRouter;
+
+  try {
+      // Create Interface instances - this will throw if the ABI array is invalid
+      console.log("Creating Interface instances from ABIs...");
+      const wethIface = new Interface(WETH_MINIMAL_ABI);
+      console.log("Created WETH Interface successfully.");
+      const usdcEIface = new Interface(ERC20_ABI);
+      console.log("Created USDC.e Interface successfully.");
+      const sushiRouterIface = new Interface(SUSHI_ROUTER_ABI);
+      console.log("Created Sushi Router Interface successfully.");
+
+      // Now use getContractAt with the Interface instances and correct addresses/signer
+      weth = await ethers.getContractAt(wethIface, WETH_ADDRESS, deployer);
+      console.log(`Got WETH contract instance at ${weth.address || 'undefined'}`);
+
+      usdcE = await ethers.getContractAt(usdcEIface, USDCE_ADDRESS, deployer); // USDC.e also uses ERC20 ABI
+      console.log(`Got USDC.e contract instance at ${usdcE.address || 'undefined'}`);
+
+      sushiRouter = await ethers.getContractAt(sushiRouterIface, SUSHISWAP_ROUTER_ADDRESS, deployer);
+      console.log(`Got Sushi Router contract instance at ${sushiRouter.address || 'undefined'}`);
+
+      console.log("Finished attempting to get contract instances.");
+
+      // Check if instances were successfully obtained before proceeding
+      if (!weth || !usdcE || !sushiRouter) {
+          throw new Error("Failed to get one or more contract instances. Check addresses and network connection.");
+      }
+
+  } catch (error) {
+      console.error("\nError during contract instantiation:", error);
+      // Additional logging to help diagnose failure
+      if (error.message.includes("Invalid ABI format") || error.message.includes("abi is not iterable")) {
+          console.error("Hint: Check the JSON structure of your ABI files. They should contain an array of ABI fragments.");
+      }
+       if (error.message.includes("resolveName not implemented")) {
+           console.error("Hint: Could be an issue with the signer or provider setup, or addresses.");
+       }
+      process.exit(1); // Exit on contract instantiation failure
+  }
+
+  console.log("\n--- Contract Instances Obtained. Proceeding with Simulation Sequence ---\n");
 
   // --- Simulation Sequence ---
 
@@ -63,7 +151,8 @@ async function main() {
   console.log(`Wrapping ${ethers.formatEther(amountToWrap)} ETH to WETH...`); // Ethers v6 syntax
   // Note: WETH contract often has a 'deposit' function that accepts ETH
   // Ethers v6 fix: Call payable function via .functions when using getContractAt with raw ABI
-  let tx = await weth.functions.deposit({ value: amountToWrap }); // <-- CORRECTED LINE
+  // This call is now inside the try block that checks for valid instances
+  let tx = await weth.functions.deposit({ value: amountToWrap }); // <-- This line previously failed
   console.log(`Transaction sent: ${tx.hash}`);
   await tx.wait();
   console.log("Wrapped ETH to WETH.");
@@ -75,7 +164,8 @@ async function main() {
   console.log("Deployer WETH balance:", ethers.formatUnits(wethBalance, 18));
 
   // Approve the Sushi Router to spend our WETH
-  const amountToApprove = ethers.MaxUint256; // Ethers v6 syntax
+  // Ethers v6: ethers.constants.MaxUint256 becomes ethers.MaxUint256
+  const amountToApprove = ethers.MaxUint256;
   console.log("Approving Sushi Router...");
   // Call the approve function on the weth instance loaded with the correct ABI (.approve should work directly)
   tx = await weth.approve(SUSHISWAP_ROUTER_ADDRESS, amountToApprove); // Approve is not payable, direct call should be fine
@@ -93,8 +183,7 @@ async function main() {
 
   try {
       // Call swapExactTokensForTokens on the sushiRouter instance
-      // Check if this also needs .functions based on the Router ABI and if it's payable
-      // Assuming for now that direct call works for the router, as the specialist's fix targeted deposit
+      // Assuming direct call works for the router
       tx = await sushiRouter.swapExactTokensForTokens(
           amountIn,
           0, // amountOutMin = 0 for simplicity in testing
@@ -136,7 +225,7 @@ async function main() {
 main()
   .then(() => process.exit(0))
   .catch((error) => {
-    console.error("Script encountered an error:");
+    console.error("Script encountered a critical error:");
     console.error(error);
     process.exit(1);
   });
