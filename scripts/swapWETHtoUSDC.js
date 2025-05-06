@@ -6,7 +6,7 @@ const { ethers } = require("ethers");
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Attempting swap with Uniswap V3 WETH/USDC.e)...");
+  console.log("Running swapWETHtoUSDC.js script (Diagnosing callStatic issue)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -49,7 +49,6 @@ async function main() {
   // Get contract addresses
   const WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"; // WETH on Arbitrum
   const USDCE_ADDRESS = "0xFF970A61A04b1cA1cA37447f62EAbeA514106c"; // USDC.e on Arbitrum
-  // --- UPDATING TO UNISWAP V3 ROUTER AND QUOTER ---
   const UNISWAP_V3_ROUTER_ADDRESS = "0xE592427A0AEce92De3Edee1F18E0157C05861564"; // Uniswap V3 Router 2
   const UNISWAP_V3_QUOTER_ADDRESS = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"; // Uniswap V3 Quoter V2
   const USDC_WETH_V3_POOL_ADDRESS = "0x6f38e884725a116C9C7fBF208e79FE8828a2595F"; // Example WETH/USDC.e 100bps pool from your config
@@ -99,7 +98,6 @@ async function main() {
   let UNISWAP_V3_ROUTER_ABI;
   console.log("--- Uniswap V3 Router ABI (from artifacts/...) ---");
   try {
-    // Assuming the artifact path for Uniswap V3 Router 2
     const UNISWAP_V3_ROUTER_ARTIFACT = require("/workspaces/arbitrum-flash/artifacts/@uniswap/v3-periphery/contracts/SwapRouter.sol/SwapRouter.json"); // COMMON V3 Router path
     console.log("Required V3 Router artifact JSON successfully.");
     if (UNISWAP_V3_ROUTER_ARTIFACT && Array.isArray(UNISWAP_V3_ROUTER_ARTIFACT.abi)) {
@@ -111,7 +109,6 @@ async function main() {
     console.log("UNISWAP_V3_ROUTER_ABI length:", UNISWAP_V3_ROUTER_ABI.length);
   } catch (error) {
     console.error("Error requiring or processing V3 Router artifact JSON:", error);
-     // Fallback to a known V3 Router ABI if artifact path is wrong
      console.warn("Attempting to load V3 Router ABI from a common hardcoded path...");
      try {
         const FALLBACK_ROUTER_ARTIFACT = require("@uniswap/v3-periphery/artifacts/contracts/SwapRouter.sol/SwapRouter.json");
@@ -123,7 +120,7 @@ async function main() {
          }
      } catch(fallbackError) {
           console.error("Fallback V3 Router ABI loading failed:", fallbackError);
-          process.exit(1); // Exit if we can't load critical ABI
+          process.exit(1);
      }
   }
   console.log("-------------------------------\n");
@@ -132,7 +129,6 @@ async function main() {
    let UNISWAP_V3_QUOTER_ABI;
    console.log("--- Uniswap V3 Quoter V2 ABI (from artifacts/...) ---");
    try {
-     // Assuming the artifact path for Uniswap V3 Quoter V2
      const UNISWAP_V3_QUOTER_ARTIFACT = require("/workspaces/arbitrum-flash/artifacts/@uniswap/v3-periphery/contracts/lens/QuoterV2.sol/QuoterV2.json"); // COMMON V3 Quoter path
      console.log("Required V3 Quoter artifact JSON successfully.");
      if (UNISWAP_V3_QUOTER_ARTIFACT && Array.isArray(UNISWAP_V3_QUOTER_ARTIFACT.abi)) {
@@ -144,7 +140,6 @@ async function main() {
      console.log("UNISWAP_V3_QUOTER_ABI length:", UNISWAP_V3_QUOTER_ABI.length);
    } catch (error) {
      console.error("Error requiring or processing V3 Quoter artifact JSON:", error);
-      // Fallback to a known V3 Quoter ABI if artifact path is wrong
       console.warn("Attempting to load V3 Quoter ABI from a common hardcoded path...");
       try {
          const FALLBACK_QUOTER_ARTIFACT = require("@uniswap/v3-periphery/artifacts/contracts/lens/QuoterV2.sol/QuoterV2.json");
@@ -156,7 +151,7 @@ async function main() {
           }
       } catch(fallbackError) {
            console.error("Fallback V3 Quoter ABI loading failed:", fallbackError);
-           process.exit(1); // Exit if we can't load critical ABI
+           process.exit(1);
       }
    }
    console.log("--------------------------------\n");
@@ -164,7 +159,7 @@ async function main() {
 
   // Get contract instances using standard Ethers v6 constructor, connected to the standalone Wallet
   console.log("Attempting to get contract instances using new ethers.Contract() with standalone Wallet...");
-  let weth, usdcE, uniswapRouter, uniswapQuoter; // Changed from sushiRouter to uniswapRouter/Quoter
+  let weth, usdcE, uniswapRouter, uniswapQuoter;
 
   try {
       console.log("-> Attempting to instantiate WETH contract...");
@@ -172,17 +167,16 @@ async function main() {
       console.log(`Instantiated WETH contract. Target: ${weth.target}`);
 
       console.log("-> Attempting to instantiate USDC.e contract...");
-      usdcE = new ethers.Contract(USDCE_ADDRESS, ERC20_ABI, deployer); // Use ERC20 ABI for USDC.e
+      usdcE = new ethers.Contract(USDCE_ADDRESS, ERC20_ABI, deployer);
       console.log(`Instantiated USDC.e contract. Target: ${usdcE.target}`);
 
       console.log("-> Attempting to instantiate Uniswap V3 Router contract...");
-      uniswapRouter = new ethers.Contract(UNISWAP_V3_ROUTER_ADDRESS, UNISWAP_V3_ROUTER_ABI, deployer); // <-- Using V3 Router
+      uniswapRouter = new ethers.Contract(UNISWAP_V3_ROUTER_ADDRESS, UNISWAP_V3_ROUTER_ABI, deployer);
       console.log(`Instantiated Uniswap V3 Router contract. Target: ${uniswapRouter.target}`);
 
-       console.log("-> Attempting to instantiate Uniswap V3 Quoter contract..."); // <-- Instantiating Quoter
+      console.log("-> Attempting to instantiate Uniswap V3 Quoter contract...");
       uniswapQuoter = new ethers.Contract(UNISWAP_V3_QUOTER_ADDRESS, UNISWAP_V3_QUOTER_ABI, deployer);
       console.log(`Instantiated Uniswap V3 Quoter contract. Target: ${uniswapQuoter.target}`);
-
 
       console.log("Finished attempting to get contract instances.");
 
@@ -215,9 +209,8 @@ async function main() {
 
   // Approve the Uniswap V3 Router to spend our WETH
   const amountToApprove = ethers.MaxUint256;
-  console.log("Approving Uniswap V3 Router..."); // <-- Updated Log
-  // Approve the V3 Router address
-  tx = await weth.approve(UNISWAP_V3_ROUTER_ADDRESS, amountToApprove); // <-- Approving V3 Router
+  console.log("Approving Uniswap V3 Router...");
+  tx = await weth.approve(UNISWAP_V3_ROUTER_ADDRESS, amountToApprove);
   console.log(`Approval Transaction sent: ${tx.hash}`);
   await tx.wait();
   console.log("Approved Uniswap V3 Router.");
@@ -225,7 +218,7 @@ async function main() {
 
   // Perform the swap: Swap 0.5 WETH for USDC.e on Uniswap V3
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH
-  // Uniswap V3 exactInputSingle uses a struct parameter
+  // Uniswap V3 exactInputSingle is for single hops
   const poolFee = 100; // WETH/USDC.e 100bps pool Fee (0.01%)
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
   const amountOutMinimum = 0; // Minimum amount expected out (0 for testing simplicity)
@@ -236,46 +229,42 @@ async function main() {
       tokenIn: WETH_ADDRESS,
       tokenOut: USDCE_ADDRESS,
       fee: poolFee,
-      recipient: deployer.address,
+      recipient: deployer.address, // The recipient address
       deadline: deadline,
       amountIn: amountIn,
       amountOutMinimum: amountOutMinimum,
-      sqrtPriceLimitX96: sqrtPriceLimitX96, // Need to use BigInt(0) or similar if not 0
-      // sqrtPriceLimitX96: ethers.getBigInt(0), // Example for BigInt conversion
+      sqrtPriceLimitX96: sqrtPriceLimitX96,
   };
 
 
-  console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Uniswap V3 Router...`); // <-- Updated Log
-  console.log("Swap Parameters:", params); // Log the parameters struct
+  console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Uniswap V3 Router (exactInputSingle)...`); // <-- Updated Log
+  console.log("Swap Parameters:", params);
 
 
-  // --- Diagnosing Swap Revert (Adapted for Uniswap V3 Quoter) ---
+  // --- Diagnosing Swap Revert (Using V3 Quoter & callStatic) ---
 
   // 1. Check expected output using Quoter.quoteExactInputSingle (view call)
   console.log("\n--- Diagnosing Swap: Checking Quoter.quoteExactInputSingle ---");
   try {
-      // Quoter V2 uses a struct as well, but simpler than the router swap params
       const quoteParams = {
            tokenIn: WETH_ADDRESS,
            tokenOut: USDCE_ADDRESS,
            amountIn: amountIn,
            fee: poolFee,
            sqrtPriceLimitX96: 0 // Use 0 for Quoter as well
-           // sqrtPriceLimitX96: ethers.getBigInt(0), // Example for BigInt conversion
       };
-      const quoteResult = await uniswapQuoter.quoteExactInputSingle(quoteParams);
+      const quoteResult = await uniswapQuoter.quoteExactInputSingle(quoteParams); // Use uniswapQuoter instance
       console.log(`Quoter.quoteExactInputSingle successful.`);
-      // Quote result is an object containing amountOut and sqrtPriceX96After
-      console.log(`Estimated output amount for WETH -> USDC.e (${poolFee} bps) swap: ${ethers.formatUnits(quoteResult.amountOut, 6)} USDC.e`); // USDC.e has 6 decimals
+      console.log(`Estimated output amount for WETH -> USDC.e (${poolFee} bps) swap: ${ethers.formatUnits(quoteResult.amountOut, 6)} USDC.e`);
 
   } catch (error) {
-      console.error("\nQuoter.quoteExactInputSingle failed. This pool might not be supported or liquidity is too low in the forked state."); // <-- Updated Log
+      console.error("\nQuoter.quoteExactInputSingle failed. This pool might not be supported or liquidity is too low in the forked state.");
       console.error("Error Object:", error);
       console.error("Error Reason:", error.reason);
       console.error("Error Code:", error.code);
       console.error("Error Data:", error.data);
       console.error("Error Message:", error.message);
-      // Do NOT exit here, callStatic might still work or provide a better error
+      // Keep going to callStatic, it might provide a different error
   }
    console.log("------------------------------------------\n");
 
@@ -283,13 +272,13 @@ async function main() {
   // 2. Perform a dry-run using callStatic on Router.exactInputSingle (simulates the transaction)
   console.log("\n--- Diagnosing Swap: Performing callStatic dry-run on Router.exactInputSingle ---");
   try {
-      // Call callStatic.exactInputSingle with the swap parameters
-      const callStaticResult = await uniswapRouter.callStatic.exactInputSingle(params); // <-- Using V3 Router callStatic
+      // Call callStatic.exactInputSingle with the swap parameters on uniswapRouter
+      const callStaticResult = await uniswapRouter.callStatic.exactInputSingle(params); // <-- Call on uniswapRouter
       console.log("callStatic exactInputSingle successful.");
-      console.log("callStatic Result (amountOut):", ethers.formatUnits(callStaticResult, 6)); // callStatic returns amountOut directly for this method
+      console.log("callStatic Result (amountOut):", ethers.formatUnits(callStaticResult, 6));
 
   } catch (error) {
-      console.error("\ncallStatic exactInputSingle failed. This confirms the transaction would revert on-chain."); // <-- Updated Log
+      console.error("\ncallStatic exactInputSingle failed. This confirms the transaction would revert on-chain.");
       console.error("Error Object:", error);
       console.error("Error Reason:", error.reason);
       console.error("Error Code:", error.code);
@@ -308,41 +297,39 @@ async function main() {
     let actualSwapTx;
     try {
         // Call exactInputSingle on the uniswapRouter instance
-        actualSwapTx = await uniswapRouter.exactInputSingle(params); // <-- Using V3 Router
+        actualSwapTx = await uniswapRouter.exactInputSingle(params);
         console.log(`Swap Transaction sent: ${actualSwapTx.hash}`);
-        const receipt = await actualSwapTx.wait(); // Wait for tx to be mined
+        const receipt = await actualSwapTx.wait();
         console.log("Swap successful. Transaction hash:", receipt.transactionHash);
         console.log("Gas used:", receipt.gasUsed.toString());
 
     } catch (error) {
-        console.error("\nActual Uniswap V3 Swap failed:"); // <-- Updated Log
+        console.error("\nActual Uniswap V3 Swap failed:");
          console.error("Error Object:", error);
         console.error("Error Reason:", error.reason);
         console.error("Error Code:", error.code);
         console.error("Error Data:", error.data);
         console.error("Error Message:", error.message);
-        process.exit(1); // Exit on actual swap failure
+        process.exit(1);
     }
      console.log("-----------------------------\n");
 
 
   // Check final balances
   console.log("Checking final balances...");
-  // Use the wallet instance for static calls like balanceOf
-  const deployerAddress = deployer.address; // Raw string address
+  const deployerAddress = deployer.address;
 
   wethBalance = await weth.balanceOf(deployerAddress);
   let usdcEBalance = await usdcE.balanceOf(deployerAddress);
 
   console.log("Final WETH balance:", ethers.formatUnits(wethBalance, 18));
-  console.log("Final USDC.e balance:", ethers.formatUnits(usdcEBalance, 6)); // USDC.e has 6 decimals
+  console.log("Final USDC.e balance:", ethers.formatUnits(usdcEBalance, 6));
   console.log("Finished checking balances.");
 
 
   console.log("\nSwap script finished successfully.");
 }
 
-// Standard script runner pattern
 main()
   .then(() => process.exit(0))
   .catch((error) => {
