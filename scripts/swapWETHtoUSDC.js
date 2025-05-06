@@ -1,12 +1,13 @@
 // scripts/swapWETHtoUSDC.js
 
 // Use the standalone ethers library for direct provider and wallet control
-const { ethers, BigInt } = require("ethers"); // Import BigInt
+// We will check for global BigInt availability below if needed
+const { ethers } = require("ethers"); // Removed BigInt from destructuring as it's global or handled explicitly below
 // Import dotenv to load environment variables from .env
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Fixing V3 Router/Quoter ABI signatures)...");
+  console.log("Running swapWETHtoUSDC.js script (Diagnosing BigInt usage - Phase 2)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -187,9 +188,13 @@ async function main() {
   // Ethers v6: Use BigInt string constructor or ethers.getBigInt
   const sqrtPriceLimitX96 = BigInt("0"); // Used for limiting price movement (0 for no limit)
 
-
   // Uniswap V3 exactInputSingle parameters struct for Router
   // https://docs.uniswap.org/contracts/v3/reference/periphery/interfaces/ISwapRouter#exactinputsingle
+
+  console.log("Debugging BigInt usage..."); // <-- DEBUG LINE
+  console.log("Type of BigInt:", typeof BigInt); // <-- DEBUG LINE
+  console.log("Type of amountIn:", typeof amountIn, "Value:", amountIn); // <-- DEBUG LINE
+
   const routerParams = {
       tokenIn: WETH_ADDRESS,
       tokenOut: USDCE_ADDRESS,
