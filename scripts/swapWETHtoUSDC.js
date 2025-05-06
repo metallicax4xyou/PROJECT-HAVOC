@@ -6,7 +6,7 @@ const { ethers } = require("ethers");
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Diagnosing swap revert with getAmountsOut & callStatic)...");
+  console.log("Running swapWETHtoUSDC.js script (Trying WETH -> USDT -> USDC.e path)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -54,12 +54,15 @@ async function main() {
 
   // Get contract addresses (these remain the same)
   const WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"; // WETH on Arbitrum
+  const USDC_ADDRESS = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"; // Correct USDC (not .e) if needed for path? Reverting to USDC.e as per config.
   const USDCE_ADDRESS = "0xFF970A61A04b1cA1cA37447f62EAbeA514106c"; // USDC.e on Arbitrum
+  const USDT_ADDRESS = "0xFd086bC7cD5C481DCC9C85EBe478A1C0B69FCbb9"; // USDT on Arbitrum
   const SUSHISWAP_ROUTER_ADDRESS = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"; // SushiSwap Router V2
 
   console.log("\n--- Addresses ---");
   console.log("WETH_ADDRESS:", WETH_ADDRESS);
   console.log("USDCE_ADDRESS:", USDCE_ADDRESS);
+  console.log("USDT_ADDRESS:", USDT_ADDRESS); // Log USDT address
   console.log("SUSHISWAP_ROUTER_ADDRESS:", SUSHISWAP_ROUTER_ADDRESS);
   console.log("-----------------\n");
 
@@ -81,7 +84,7 @@ async function main() {
 
   // Standard ERC20 ABI for USDC.e (assuming it's just the array in abis/)
   // We'll require the JSON and check its structure
-  let ERC20_ABI;
+  let ERC20_ABI; // Will be used for USDC.e AND USDT
    console.log("--- ERC20 ABI (from abis/ERC20.json) ---");
   try {
       const ERC20_LOADED = require("/workspaces/arbitrum-flash/abis/ERC20.json"); // Path to ERC20 JSON
@@ -135,7 +138,7 @@ async function main() {
 
   // Get contract instances using standard Ethers v6 constructor, connected to the standalone Wallet
   console.log("Attempting to get contract instances using new ethers.Contract() with standalone Wallet...");
-  let weth, usdcE, sushiRouter;
+  let weth, usdcE, usdt, sushiRouter; // Added usdt instance
 
   try {
       // Use new ethers.Contract(address, abi, signer)
@@ -144,8 +147,13 @@ async function main() {
       console.log(`Instantiated WETH contract. Target: ${weth.target}`);
 
       console.log("-> Attempting to instantiate USDC.e contract...");
-      usdcE = new ethers.Contract(USDCE_ADDRESS, ERC20_ABI, deployer);
+      usdcE = new ethers.Contract(USDCE_ADDRESS, ERC20_ABI, deployer); // Use ERC20 ABI for USDC.e
       console.log(`Instantiated USDC.e contract. Target: ${usdcE.target}`);
+
+      console.log("-> Attempting to instantiate USDT contract..."); // Instantiate USDT
+      usdt = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, deployer); // Use ERC20 ABI for USDT
+      console.log(`Instantiated USDT contract. Target: ${usdt.target}`);
+
 
       console.log("-> Attempting to instantiate Sushi Router contract...");
       sushiRouter = new ethers.Contract(SUSHISWAP_ROUTER_ADDRESS, SUSHI_ROUTER_ABI, deployer);
@@ -155,7 +163,7 @@ async function main() {
       console.log("Finished attempting to get contract instances.");
 
       // Check if instances were successfully obtained
-      if (!weth || !usdcE || !sushiRouter || !weth.target || !usdcE.target || !sushiRouter.target) {
+      if (!weth || !usdcE || !usdt || !sushiRouter || !weth.target || !usdcE.target || !usdt.target || !sushiRouter.target) {
            throw new Error("Failed to get one or more contract instances with valid targets.");
       }
        console.log("\nAll contract instances obtained and have valid targets. Proceeding with Simulation Sequence ---\n");
@@ -203,14 +211,15 @@ async function main() {
 
   // Perform the swap: Swap 0.5 WETH for USDC.e on SushiSwap
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH, Ethers v6 syntax
-  const path = [WETH_ADDRESS, USDCE_ADDRESS]; // These are constants, fine as is
+  // --- CORRECTED PATH TO WETH -> USDT -> USDC.e ---
+  const path = [WETH_ADDRESS, USDT_ADDRESS, USDCE_ADDRESS]; // <-- CORRECTED LINE
   // Use deployer.address string directly for the 'to' address - Should work with standalone ethers
   const to = deployer.address; // Raw string address
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
 
   console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Sushi Router...`); // Ethers v6 syntax
   console.log(`Swap input amount (WETH): ${ethers.formatEther(amountIn)}`);
-  console.log(`Swap path: ${path.join(' -> ')}`);
+  console.log(`Swap path: ${path.join(' -> ')}`); // Log the new path
   console.log(`Swap 'to' address: ${to}`);
 
 
@@ -221,7 +230,9 @@ async function main() {
   try {
       const estimatedAmountsOut = await sushiRouter.getAmountsOut(amountIn, path);
       console.log(`getAmountsOut successful.`);
-      console.log(`Estimated output amount for ${path.join(' -> ')} swap: ${ethers.formatUnits(estimatedAmountsOut[1], 6)} USDC.e`); // USDC.e has 6 decimals
+      // The last token in the path determines the decimal places for the final output amount
+      // In the new path (WETH -> USDT -> USDC.e), the last token is USDC.e, which has 6 decimals.
+      console.log(`Estimated output amount for ${path.join(' -> ')} swap: ${ethers.formatUnits(estimatedAmountsOut[estimatedAmountsOut.length - 1], 6)} USDC.e`); // USDC.e has 6 decimals
 
   } catch (error) {
       console.error("\ngetAmountsOut failed. This path might not be supported or liquidity is too low.");
