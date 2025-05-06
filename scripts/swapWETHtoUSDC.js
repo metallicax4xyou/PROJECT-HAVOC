@@ -3,10 +3,11 @@
 // This is the standard Hardhat way to import the ethers object
 // It includes Hardhat-specific functions (getSigners, getContractAt)
 // and provides access to standard ethers.js utilities (utils, constants)
+// Note: This script uses Ethers v6 syntax, where many utilities are directly on the ethers object.
 const { ethers } = require("hardhat");
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script...");
+  console.log("Running swapWETHtoUSDC.js script (Ethers v6 syntax)...");
 
   // Get the deployer account (funded in your deploy script)
   const [deployer] = await ethers.getSigners();
@@ -39,8 +40,10 @@ async function main() {
   // --- Simulation Sequence ---
 
   // Wrap 1 ETH into WETH
-  const amountToWrap = ethers.utils.parseEther("1.0"); // ethers.utils should be defined here
-  console.log(`Wrapping ${ethers.utils.formatEther(amountToWrap)} ETH to WETH...`);
+  // Ethers v6: ethers.utils.parseEther becomes ethers.parseEther
+  const amountToWrap = ethers.parseEther("1.0");
+  // Ethers v6: ethers.utils.formatEther becomes ethers.formatEther
+  console.log(`Wrapping ${ethers.formatEther(amountToWrap)} ETH to WETH...`);
   // Note: WETH contract often has a 'deposit' function that accepts ETH
   let tx = await weth.deposit({ value: amountToWrap });
   console.log(`Transaction sent: ${tx.hash}`);
@@ -49,10 +52,12 @@ async function main() {
 
   // Check WETH balance after wrapping
   let wethBalance = await weth.balanceOf(deployer.address);
-  console.log("Deployer WETH balance:", ethers.utils.formatUnits(wethBalance, 18)); // ethers.utils should be defined here
+  // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
+  console.log("Deployer WETH balance:", ethers.formatUnits(wethBalance, 18));
 
   // Approve the Sushi Router to spend our WETH
-  const amountToApprove = ethers.constants.MaxUint256; // ethers.constants should be defined here
+  // Ethers v6: ethers.constants.MaxUint256 becomes ethers.MaxUint256
+  const amountToApprove = ethers.MaxUint256;
   console.log("Approving Sushi Router...");
   tx = await weth.approve(SUSHISWAP_ROUTER_ADDRESS, amountToApprove);
    console.log(`Approval Transaction sent: ${tx.hash}`);
@@ -60,12 +65,14 @@ async function main() {
   console.log("Approved Sushi Router.");
 
   // Perform the swap: Swap 0.5 WETH for USDC.e on SushiSwap
-  const amountIn = ethers.utils.parseEther("0.5"); // Swap 0.5 WETH, ethers.utils should be defined here
+  // Ethers v6: ethers.utils.parseEther becomes ethers.parseEther
+  const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH
   const path = [WETH_ADDRESS, USDCE_ADDRESS];
   const to = deployer.address;
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
 
-  console.log(`Swapping ${ethers.utils.formatEther(amountIn)} WETH for USDC.e via Sushi Router...`); // ethers.utils should be defined here
+  // Ethers v6: ethers.utils.formatEther becomes ethers.formatEther
+  console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Sushi Router...`);
 
   try {
       tx = await sushiRouter.swapExactTokensForTokens( // Use sushiRouter instance
@@ -94,8 +101,10 @@ async function main() {
   console.log("Checking final balances...");
   wethBalance = await weth.balanceOf(deployer.address);
   let usdcEBalance = await usdcE.balanceOf(deployer.address);
-  console.log("Final WETH balance:", ethers.utils.formatUnits(wethBalance, 18)); // ethers.utils should be defined here
-  console.log("Final USDC.e balance:", ethers.utils.formatUnits(usdcEBalance, 6)); // USDC.e has 6 decimals, ethers.utils should be defined here
+  // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
+  console.log("Final WETH balance:", ethers.formatUnits(wethBalance, 18));
+  // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
+  console.log("Final USDC.e balance:", ethers.formatUnits(usdcEBalance, 6)); // USDC.e has 6 decimals
   console.log("Finished checking balances.");
 
 
