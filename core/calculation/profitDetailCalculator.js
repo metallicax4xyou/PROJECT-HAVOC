@@ -1,11 +1,13 @@
 // core/calculation/profitDetailCalculator.js
 // Calculates detailed profit/cost figures, applies thresholds, and determines final profitability.
+// --- VERSION v2.13 --- Corrected import path for PRICE_SCALE and TEN_THOUSAND constants.
 
 const { ethers } = require('ethers');
 const logger = require('../../utils/logger');
 const { ArbitrageError } = require('../../utils/errorHandler');
 const priceConverter = require('../../utils/priceConverter'); // Needs price converter
-const { TEN_THOUSAND } = require('./priceCalculation'); // Needs constant
+// Corrected import path for constants PRICE_SCALE and TEN_THOUSAND
+const { PRICE_SCALE, TEN_THOUSAND } = require('../../utils/priceUtils'); // Import constants from utils/priceUtils
 
 /**
  * Calculates detailed profit, fee, and cost metrics for a single opportunity,
@@ -49,10 +51,12 @@ async function calculateDetailedProfit(opportunity, simulationResults, gasEstima
 
     // --- 2. Calculate Flash Loan Fee ---
     // Fee = BorrowedAmount * FeeBps / 10000
-    const flashLoanFeeBorrowedTokenWei = (BigInt(opportunity.amountIn || 0n) * aaveFlashLoanFeeBps) / TEN_THOUSAND; // Use provided feeBps
+    // Ensure opportunity.amountIn is BigInt for safety, although finder should provide BigInt
+    const borrowedAmountBigInt = BigInt(opportunity.amountIn || 0n);
+    const flashLoanFeeBorrowedTokenWei = (borrowedAmountBigInt * aaveFlashLoanFeeBps) / TEN_THOUSAND; // Use provided feeBps
     opportunity.flashLoanDetails = { // Add details to opportunity for logging
         token: opportunity.tokenIn, // Borrowed token object
-        amount: BigInt(opportunity.amountIn || 0n), // Borrowed amount
+        amount: borrowedAmountBigInt, // Borrowed amount
         feeBps: aaveFlashLoanFeeBps, // Store the BPS used
         feeBorrowedTokenWei: flashLoanFeeBorrowedTokenWei, // Store Fee in borrowed token wei
         feeNativeWei: 0n // Placeholder, calculated below
@@ -101,13 +105,14 @@ async function calculateDetailedProfit(opportunity, simulationResults, gasEstima
     let minProfitThresholdNativeWei = 0n;
     if (thresholdInNativeStandardUnits !== undefined && thresholdInNativeStandardUnits !== null) {
         try {
-            minProfitThresholdNativeWei = ethers.parseUnits(thresholdInNativeStandardUnits.toString(), nativeCurrencyToken.decimals);
+             // Use ethers.parseUnits to convert standard units (number/string) to native wei (BigInt)
+            minProfitThresholdNativeWei = ethers.parseUnits(String(thresholdInNativeStandardUnits), nativeCurrencyToken.decimals);
         } catch (e) {
-            logger.error(`${logPrefix} Error converting min profit threshold (${thresholdInNativeStandardUnits}) to native wei: ${e.message}. Using threshold 0.`);
+            logger.error(`${logPrefix} Error converting min profit threshold (${thresholdInNativeStandardUnits}) to native wei: ${e.message}. Using threshold 0n.`, e); // Log error object
             minProfitThresholdNativeWei = 0n; // Fallback to 0 threshold on error
         }
     } else {
-        logger.warn(`${logPrefix} Min profit threshold not found for token ${opportunity.borrowTokenSymbol || '?'} or DEFAULT. Using threshold 0.`);
+        logger.warn(`${logPrefix} Min profit threshold not found for token ${opportunity.borrowTokenSymbol || '?'} or DEFAULT. Using threshold 0n.`); // Log 0n
         minProfitThresholdNativeWei = 0n;
     }
     opportunity.thresholdNativeWei = minProfitThresholdNativeWei; // Store threshold in native wei
@@ -120,31 +125,44 @@ async function calculateDetailedProfit(opportunity, simulationResults, gasEstima
 
 
     // --- 7. Calculate Tithe ---
-    const titheBpsConfig = BigInt(config.TITHE_BPS || 0); // Default to 0 if not in config
+    // Safely read TITHE_BPS from config, default to 0 if missing/invalid, use 3000n (30%) if config > 0.
+    const titheBpsConfig = BigInt(config.TITHE_BPS || 0n); // Default to 0n if missing
     const titheBps = titheBpsConfig > 0n ? titheBpsConfig : 3000n; // Use config if > 0, else use hardcoded 30% (3000 BPS)
-    if (titheBpsConfig > 0n) logger.debug(`${logPrefix} Using configured tithe BPS: ${titheBpsConfig}`);
+    if (titheBpsConfig > 0n) logger.debug(`${logPrefix} Using configured tithe BPS: ${titheBpsConfig.toString()}`); // Log as string
 
-    const titheAmountNativeWei = (netProfitAfterGasNativeWei * titheBps) / TEN_THOUSAND; // Tithe calculated in Native Wei
+
+    // Ensure netProfitAfterGasNativeWei is BigInt for calculation
+    const netProfitAfterGasNativeWeiBigInt = BigInt(netProfitAfterGasNativeWei || 0n);
+
+    const titheAmountNativeWei = (netProfitAfterGasNativeWeiBigInt * titheBps) / TEN_THOUSAND; // Tithe calculated in Native Wei
     opportunity.titheAmountNativeWei = titheAmountNativeWei; // Augment opportunity object
-    logger.debug(`${logPrefix} Tithe Amount (Native): ${ethers.formatEther(titheAmountNativeWei)} wei (${titheBps * 100n / TEN_THOUSAND}% of ${ethers.formatEther(netProfitAfterGasNativeWei)})`);
+    logger.debug(`${logPrefix} Tithe Amount (Native): ${ethers.formatEther(titheAmountNativeWei)} wei (${(titheBps * 10000n / TEN_THOUSAND)/100n}% of ${ethers.formatEther(netProfitAfterGasNativeWeiBigInt)}). Raw Tithe: ${titheAmountNativeWei.toString()}`); // Log raw tithe and percentage check
 
 
     // --- 8. Calculate Profit Percentage ---
     let profitPercentage = 0;
     let borrowedAmountNativeWei_ForPercent = 0n;
     try {
+        // Ensure opportunity.amountIn is BigInt before passing
         borrowedAmountNativeWei_ForPercent = await priceConverter.convertToNativeWei(BigInt(opportunity.amountIn || 0n), opportunity.tokenIn, config, nativeCurrencyToken);
     } catch (conversionError) {
-         logger.warn(`${logPrefix} Error converting borrowed amount to Native for percent calc: ${conversionError.message}`);
+         logger.warn(`${logPrefix} Error converting borrowed amount to Native for percent calc: ${conversionError.message}`, conversionError);
          // Continue, just profitPercentage will remain 0
     }
 
     if (borrowedAmountNativeWei_ForPercent > 0n) {
         try {
-            const profitBpsVsBorrowed = (netProfitAfterGasNativeWei * 10000n) / borrowedAmountNativeWei_ForPercent;
-            profitPercentage = Number(profitBpsVsBorrowed) / 100;
+             // Calculation: (netProfitAfterGasNativeWei / borrowedAmountNativeWei_ForPercent) * 100
+             // Need BigInt arithmetic: (netProfitAfterGasNativeWei * 10000n) / borrowedAmountNativeWei_ForPercent * (100/10000) = * 100 / 10000
+             // Percentage = (netProfitAfterGasNativeWei * 100n) / borrowedAmountNativeWei_ForPercent --- No, percentage is (profit/borrowed)*100
+             // (netProfitAfterGasNativeWei * 100n) / borrowedAmountNativeWei_ForPercent this gives the percentage as a BigInt scaled by some factor.
+             // To get a float percentage: Number(netProfitAfterGasNativeWei * 100n) / Number(borrowedAmountNativeWei_ForPercent)
+             // Or, to keep BigInt precision and convert later:
+             const profitRatioScaledBy10000 = (netProfitAfterGasNativeWeiBigInt * TEN_THOUSAND) / borrowedAmountNativeWei_ForPercent; // Ratio scaled by 10000 (BPS)
+             profitPercentage = Number(profitRatioScaledBy10000) / 100; // Convert BPS to percentage as a Number
+
         } catch (divError) {
-             logger.warn(`${logPrefix} Error calculating profit percentage: ${divError.message}`);
+             logger.warn(`${logPrefix} Error calculating profit percentage: ${divError.message}`, divError);
              profitPercentage = 0; // Fallback on error
         }
     }
@@ -152,19 +170,21 @@ async function calculateDetailedProfit(opportunity, simulationResults, gasEstima
     logger.debug(`${logPrefix} Estimated Profit Percentage: ${profitPercentage}%`);
 
     // --- 9. Calculate Estimated Profit for Executor ---
-    const estimatedProfitForExecutorNativeWei = netProfitAfterGasNativeWei - titheAmountNativeWei;
+    // Ensure both operands are BigInt for subtraction
+    const estimatedProfitForExecutorNativeWei = netProfitAfterGasNativeWeiBigInt - titheAmountNativeWei;
     opportunity.estimatedProfitForExecutorNativeWei = estimatedProfitForExecutorNativeWei; // Profit left for bot after tithe transfer
-    logger.debug(`${logPrefix} Estimated Profit for Executor (After Tithe, Native): ${ethers.formatEther(estimatedProfitForExecutorNativeWei)} wei`);
+    logger.debug(`${logPrefix} Estimated Profit for Executor (After Tithe, Native): ${ethers.formatEther(estimatedProfitForExecutorNativeWei)} wei. Raw Executor Profit: ${estimatedProfitForExecutorNativeWei.toString()}`); // Log raw executor profit
+
 
     // --- Final Check: Is it truly profitable based on all criteria? ---
     // We already checked netProfitAfterGasNativeWei > minProfitThresholdNativeWei
     // and simulationSuccess and gasEstimationResult.estimateGasSuccess were checked before calling this function.
     // Just confirm here for clarity, although redundant if called correctly.
-    if (netProfitAfterGasNativeWei > minProfitThresholdNativeWei && gasEstimationResult.estimateGasSuccess) {
+    if (netProfitAfterGasNativeWeiBigInt > minProfitThresholdNativeWei && gasEstimationResult.estimateGasSuccess) {
          logger.debug(`${logPrefix} Opportunity is profitable after all calculations and checks.`);
          return true;
     } else {
-         logger.debug(`${logPrefix} Opportunity failed final profitability check (Profit > Threshold: ${netProfitAfterGasNativeWei > minProfitThresholdNativeWei}, Gas Estimate Success: ${gasEstimationResult.estimateGasSuccess}).`);
+         logger.debug(`${logPrefix} Opportunity failed final profitability check (Profit > Threshold: ${netProfitAfterGasNativeWeiBigInt > minProfitThresholdNativeWei}, Gas Estimate Success: ${gasEstimationResult.estimateGasSuccess}).`);
          return false;
     }
 }
