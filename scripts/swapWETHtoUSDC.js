@@ -6,7 +6,7 @@ const { ethers } = require("ethers");
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Using standalone ethers.Wallet + JsonRpcProvider)...");
+  console.log("Running swapWETHtoUSDC.js script (Adding detailed swap error logging)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -14,6 +14,8 @@ async function main() {
 
   if (!rpcUrl || !privateKey) {
       console.error("Error: LOCAL_FORK_RPC_URL and LOCAL_FORK_PRIVATE_KEY must be set in your .env file.");
+      // Log the process environment to help diagnose missing keys if needed
+      console.error("Process Environment Keys:", Object.keys(process.env));
       process.exit(1);
   }
 
@@ -25,8 +27,8 @@ async function main() {
     provider = new ethers.JsonRpcProvider(rpcUrl);
     console.log("JsonRpcProvider created.");
     // Optional: Check connection
-    await provider.getBlockNumber();
-     console.log("Provider successfully connected.");
+    const blockNumber = await provider.getBlockNumber();
+     console.log(`Provider successfully connected. Current block: ${blockNumber}`);
 
   } catch (error) {
       console.error("Error creating JsonRpcProvider or connecting:", error);
@@ -44,7 +46,7 @@ async function main() {
   } catch (error) {
       console.error("Error creating Ethers Wallet:", error);
        if (error.message.includes("invalid mnemonic") || error.message.includes("invalid private key")) {
-            console.error("Hint: Ensure LOCAL_FORK_PRIVATE_KEY is a valid private key string (starts with 0x).");
+            console.error("Hint: Ensure LOCAL_FORK_PRIVATE_KEY is a valid private key string (starts with 0x) and corresponds to a funded account on the local fork.");
        }
       process.exit(1);
   }
@@ -168,7 +170,6 @@ async function main() {
        if (error.message.includes("abi is not iterable") || error.message.includes("Invalid ABI format")) {
             console.error("Hint: An ABI might not be in the expected array format.");
        }
-       // Note: resolveName errors should NOT happen during instantiation with new Contract unless provider is involved strangely
       process.exit(1); // Exit on contract instantiation failure
   }
 
@@ -218,6 +219,7 @@ async function main() {
   console.log(`Swap 'to' address (raw string): ${to}`); // Debug log for the 'to' address - should be raw string
 
 
+  // --- ADDED DETAILED ERROR LOGGING FOR SWAP ---
   try {
       // Call swapExactTokensForTokens on the sushiRouter instance using the wallet
       // Pass the raw 'to' address string
@@ -234,18 +236,28 @@ async function main() {
       console.log("Gas used:", receipt.gasUsed.toString());
 
   } catch (error) {
-      console.error("Swap failed:", error);
-      // Add more specific error logging if possible
-      if (error.error && error.error.message) {
-          console.error("Swap failure message:", error.error.message);
-      } else if (error.data && error.data.message) {
-           console.error("Swap failure message:", error.data.message);
-      }
+      console.error("\nSwap failed:");
+      console.error("Error Object:", error); // Log the full error object
+      console.error("Error Reason:", error.reason); // Log specific revert reason if available
+      console.error("Error Code:", error.code);   // Log Ethers error code
+      console.error("Error Data:", error.data);   // Log revert data if available
+      console.error("Error Message:", error.message); // Log the standard error message
+
        // With standalone ethers, resolveName should be implemented (or not attempted with raw strings)
        if (error.message.includes("resolveName not implemented")) {
            console.error("Hint: Still getting resolveName error on swap with standalone ethers. This is highly unexpected. Verify Ethers version or look for other environment issues.");
        }
+       if (error.code === 'CALL_EXCEPTION' || error.code === 'UNPREDICTABLE_GAS_LIMIT') {
+            console.error("Hint: This often indicates an on-chain revert. Check logs or transaction data for specific revert reasons.");
+       }
+       if (error.code === 'BUFFER_OVERRUN') {
+           console.error("Hint: This usually means the contract call reverted without returning error data, and Ethers tried to decode nothing.");
+       }
+
+      process.exit(1); // Exit on swap failure
   }
+    // --- END ADDED ERROR LOGGING ---
+
 
   // Check final balances
   console.log("Checking final balances...");
@@ -270,7 +282,7 @@ async function main() {
 main()
   .then(() => process.exit(0))
   .catch((error) => {
-    console.error("Script encountered a critical error:");
+    console.error("Script encountered a critical error outside of swap catch:");
     console.error(error);
     process.exit(1);
   });
