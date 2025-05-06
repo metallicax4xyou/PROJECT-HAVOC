@@ -3,19 +3,19 @@
 // This is the standard Hardhat way to import the ethers object
 // It includes Hardhat-specific functions (getSigners)
 // and provides access to standard ethers.js utilities (parseEther, formatUnits, constants)
-// Note: This script uses Ethers v6 syntax, and applies the confirmed fix for Hardhat's resolveName error
-// by using ethers.getAddress() for address arguments passed to contract methods.
+// Note: This script uses Ethers v6 syntax, and applies the definitive fix for Hardhat's resolveName error
+// by passing raw address strings directly to contract method arguments.
 const { ethers } = require("hardhat");
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Applying confirmed getAddress fix)...");
+  console.log("Running swapWETHtoUSDC.js script (Applying definitive address fix - Raw Strings)...");
 
   // Get the deployer account (funded in your deploy script)
   const [deployer] = await ethers.getSigners(); // Use Hardhat's ethers.getSigners
   console.log("Using account:", deployer.address);
   console.log("Deployer address type:", typeof deployer.address);
-  // Log deployer address formatted with getAddress for confirmation
-  console.log("Deployer address (ethers.getAddress):", ethers.getAddress(deployer.address));
+  // Log deployer address directly for debugging
+  console.log("Deployer address string:", deployer.address);
 
 
   // Get contract addresses
@@ -158,9 +158,8 @@ async function main() {
 
   // Check WETH balance after wrapping
   // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
-  // Use ethers.getAddress() for balanceOf input - Confirmed fix
-  const deployerFormattedAddressForBalance = ethers.getAddress(deployer.address); // <-- Applying confirmed fix
-  let wethBalance = await weth.balanceOf(deployerFormattedAddressForBalance); // <-- Use formatted address
+  // Use deployer.address string directly for balanceOf input
+  let wethBalance = await weth.balanceOf(deployer.address); // <-- Reverted to raw string
   console.log("Deployer WETH balance:", ethers.formatUnits(wethBalance, 18));
 
 
@@ -168,9 +167,9 @@ async function main() {
   // Ethers v6: ethers.constants.MaxUint256 becomes ethers.MaxUint256
   const amountToApprove = ethers.MaxUint256;
   console.log("Approving Sushi Router...");
-  // Use ethers.getAddress() for spender address in approve input - Confirmed fix
-  const routerFormattedAddressForApprove = ethers.getAddress(SUSHISWAP_ROUTER_ADDRESS); // <-- Applying confirmed fix
-  tx = await weth.approve(routerFormattedAddressForApprove, amountToApprove); // <-- Use formatted address (Approving Router)
+  // Call the approve function on the weth instance loaded with the correct ABI (.approve should work directly)
+  // Use SUSHISWAP_ROUTER_ADDRESS string directly
+  tx = await weth.approve(SUSHISWAP_ROUTER_ADDRESS, amountToApprove); // <-- Reverted to raw string (Approving Router)
   console.log(`Approval Transaction sent: ${tx.hash}`);
   await tx.wait();
   console.log("Approved Sushi Router.");
@@ -178,23 +177,23 @@ async function main() {
 
   // Perform the swap: Swap 0.5 WETH for USDC.e on SushiSwap
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH, Ethers v6 syntax
-  const path = [WETH_ADDRESS, USDCE_ADDRESS]; // These are constants, fine as is (unless they represent names, which they don't)
-  // Use ethers.getAddress() for the 'to' address - Confirmed fix
-  const to = ethers.getAddress(deployer.address); // <-- Applying confirmed fix
+  const path = [WETH_ADDRESS, USDCE_ADDRESS]; // These are constants, fine as is
+  // Use deployer.address string directly for the 'to' address
+  const to = deployer.address; // <-- Reverted to raw string
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
 
   console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Sushi Router...`); // Ethers v6 syntax
-  console.log(`Swap 'to' address (ethers.getAddress): ${to}`); // Debug log for the 'to' address - should be formatted string
+  console.log(`Swap 'to' address (raw string): ${to}`); // Debug log for the 'to' address - should be raw string
 
 
   try {
       // Call swapExactTokensForTokens on the sushiRouter instance
-      // Pass the formatted 'to' address
+      // Pass the raw 'to' address string
       tx = await sushiRouter.swapExactTokensForTokens(
           amountIn,
           0, // amountOutMin = 0 for simplicity in testing
           path,
-          to, // Pass the formatted 'to' address (string from getAddress)
+          to, // Pass the raw 'to' address string
           deadline
       );
       console.log(`Swap Transaction sent: ${tx.hash}`);
@@ -211,17 +210,19 @@ async function main() {
            console.error("Swap failure message:", error.data.message);
       }
        if (error.message.includes("resolveName not implemented")) {
-           console.error("Hint: Still getting resolveName error on swap. This is highly unexpected with new ethers.Contract() and ethers.getAddress(). Verify Hardhat/Ethers versions or environment specifics.");
+           console.error("Hint: Still getting resolveName error on swap. This is highly unexpected with new ethers.Contract() and raw hex strings. Might indicate a deeper Hardhat/Ethers v6 compatibility issue or environment problem. Consider Hardhat/Ethers versioning or environment specifics.");
        }
   }
 
   // Check final balances
   console.log("Checking final balances...");
   // Use weth.balanceOf and usdcE.balanceOf loaded with appropriate ABIs (view calls)
-  // Use ethers.getAddress() for deployer address for balance checks - Confirmed fix
-  // We already defined deployerFormattedAddressForBalance above
-  wethBalance = await weth.balanceOf(deployerFormattedAddressForBalance); // <-- Use formatted address
-  let usdcEBalance = await usdcE.balanceOf(deployerFormattedAddressForBalance); // <-- Use formatted address
+  // Use deployer.address string directly for balance checks
+  const deployerRawAddress = deployer.address; // Raw deployer address for balance checks
+
+  // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
+  wethBalance = await weth.balanceOf(deployerRawAddress); // <-- Use raw address
+  let usdcEBalance = await usdcE.balanceOf(deployerRawAddress); // <-- Use raw address
 
   console.log("Final WETH balance:", ethers.formatUnits(wethBalance, 18));
   // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
