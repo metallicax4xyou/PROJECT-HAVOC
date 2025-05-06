@@ -1,12 +1,13 @@
 // scripts/swapWETHtoUSDC.js
 
 // Use the standalone ethers library for direct provider and wallet control
-const { ethers, BigInt } = require("ethers"); // Import BigInt
+// We will check for global BigInt availability below if needed
+const { ethers } = require("ethers");
 // Import dotenv to load environment variables from .env
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Fixing Quoter & Router ABI issues)...");
+  console.log("Running swapWETHtoUSDC.js script (Diagnosing BigInt availability)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -98,7 +99,6 @@ async function main() {
   console.log("-------------------------\n");
 
   // Uniswap V3 Router 2 ABI - Use a known minimal ABI with exactInputSingle
-   // It's likely the artifact path is causing issues or the fallback is incomplete.
    const UNISWAP_V3_ROUTER_MINIMAL_ABI = [
        "function exactInputSingle(tuple(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)"
    ];
@@ -109,7 +109,6 @@ async function main() {
 
 
    // Uniswap V3 Quoter V2 ABI - Use a known minimal ABI with quoteExactInputSingle
-   // It's likely the artifact path is causing issues or the fallback is incomplete.
    const UNISWAP_V3_QUOTER_MINIMAL_ABI = [
        "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) view returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)"
    ];
@@ -182,10 +181,16 @@ async function main() {
   // Prepare Uniswap V3 Swap parameters
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH (in WETH decimals, 18)
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
+  // Ethers v6: Use BigInt string constructor or ethers.getBigInt
   const amountOutMinimum = BigInt("0"); // Minimum amount expected out (0 for testing simplicity) - In tokenOut decimals (6)
+  // Ethers v6: Use BigInt string constructor or ethers.getBigInt
   const sqrtPriceLimitX96 = BigInt("0"); // Used for limiting price movement (0 for no limit)
 
+
   // Uniswap V3 exactInputSingle parameters struct for Router
+  // https://docs.uniswap.org/contracts/v3/reference/periphery/interfaces/ISwapRouter#exactinputsingle
+  console.log("Type of BigInt:", typeof BigInt); // <-- ADDED DEBUG LINE
+
   const routerParams = {
       tokenIn: WETH_ADDRESS,
       tokenOut: USDCE_ADDRESS,
@@ -198,6 +203,7 @@ async function main() {
   };
 
    // Uniswap V3 exactInputSingle parameters struct for Quoter
+   // https://docs.uniswap.org/contracts/v3/reference/periphery/lens/QuoterV2#quoteexactinputsingle
    const quoterParams = {
         tokenIn: WETH_ADDRESS,
         tokenOut: USDCE_ADDRESS,
