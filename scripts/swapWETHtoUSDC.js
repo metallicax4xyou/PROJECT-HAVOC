@@ -1,12 +1,12 @@
 // scripts/swapWETHtoUSDC.js
 
-// Use the standalone ethers library
+// Use the standalone ethers library for direct provider and wallet control
 const { ethers } = require("ethers");
-// Import dotenv to load environment variables
+// Import dotenv to load environment variables from .env
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Using standalone ethers)...");
+  console.log("Running swapWETHtoUSDC.js script (Using standalone ethers.Wallet + JsonRpcProvider)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -19,12 +19,35 @@ async function main() {
 
   console.log(`Connecting to RPC: ${rpcUrl}`);
 
-  // Set up a standalone JsonRpcProvider and Wallet
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
-  const deployer = new ethers.Wallet(privateKey, provider); // The signer instance
+  // Set up a standalone JsonRpcProvider and Wallet (Signer)
+  let provider;
+  try {
+    provider = new ethers.JsonRpcProvider(rpcUrl);
+    console.log("JsonRpcProvider created.");
+    // Optional: Check connection
+    await provider.getBlockNumber();
+     console.log("Provider successfully connected.");
 
-  console.log("Using account:", deployer.address);
-  console.log("Deployer address type:", typeof deployer.address);
+  } catch (error) {
+      console.error("Error creating JsonRpcProvider or connecting:", error);
+      process.exit(1);
+  }
+
+
+  let deployer;
+  try {
+    deployer = new ethers.Wallet(privateKey, provider); // The signer instance
+    console.log("Ethers Wallet created.");
+    console.log("Using account:", deployer.address);
+    console.log("Deployer address type:", typeof deployer.address);
+
+  } catch (error) {
+      console.error("Error creating Ethers Wallet:", error);
+       if (error.message.includes("invalid mnemonic") || error.message.includes("invalid private key")) {
+            console.error("Hint: Ensure LOCAL_FORK_PRIVATE_KEY is a valid private key string (starts with 0x).");
+       }
+      process.exit(1);
+  }
 
 
   // Get contract addresses (these remain the same)
@@ -108,7 +131,7 @@ async function main() {
   console.log("-------------------------------\n");
 
 
-  // Get contract instances using standard Ethers v6 constructor, connected to the Wallet
+  // Get contract instances using standard Ethers v6 constructor, connected to the standalone Wallet
   console.log("Attempting to get contract instances using new ethers.Contract() with standalone Wallet...");
   let weth, usdcE, sushiRouter;
 
