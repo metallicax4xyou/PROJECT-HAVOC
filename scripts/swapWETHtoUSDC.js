@@ -6,7 +6,7 @@ const { ethers } = require("ethers");
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Adding detailed swap error logging)...");
+  console.log("Running swapWETHtoUSDC.js script (Diagnosing swap revert with getAmountsOut & callStatic)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -163,13 +163,6 @@ async function main() {
 
   } catch (error) {
       console.error("\nError during contract instantiation with new ethers.Contract():", error);
-      // Additional logging to help diagnose failure
-       if (error.message.includes("invalid address")) {
-           console.error("Hint: An address might be formatted incorrectly.");
-       }
-       if (error.message.includes("abi is not iterable") || error.message.includes("Invalid ABI format")) {
-            console.error("Hint: An ABI might not be in the expected array format.");
-       }
       process.exit(1); // Exit on contract instantiation failure
   }
 
@@ -216,47 +209,87 @@ async function main() {
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
 
   console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Sushi Router...`); // Ethers v6 syntax
-  console.log(`Swap 'to' address (raw string): ${to}`); // Debug log for the 'to' address - should be raw string
+  console.log(`Swap input amount (WETH): ${ethers.formatEther(amountIn)}`);
+  console.log(`Swap path: ${path.join(' -> ')}`);
+  console.log(`Swap 'to' address: ${to}`);
 
 
-  // --- ADDED DETAILED ERROR LOGGING FOR SWAP ---
+  // --- Diagnosing Swap Revert ---
+
+  // 1. Check expected output using getAmountsOut (view call)
+  console.log("\n--- Diagnosing Swap: Checking getAmountsOut ---");
   try {
-      // Call swapExactTokensForTokens on the sushiRouter instance using the wallet
-      // Pass the raw 'to' address string
-      tx = await sushiRouter.swapExactTokensForTokens(
-          amountIn,
-          0, // amountOutMin = 0 for simplicity in testing
-          path,
-          to, // Pass the raw 'to' address string
-          deadline
-      );
-      console.log(`Swap Transaction sent: ${tx.hash}`);
-      const receipt = await tx.wait(); // Wait for tx to be mined
-      console.log("Swap successful. Transaction hash:", receipt.transactionHash);
-      console.log("Gas used:", receipt.gasUsed.toString());
+      const estimatedAmountsOut = await sushiRouter.getAmountsOut(amountIn, path);
+      console.log(`getAmountsOut successful.`);
+      console.log(`Estimated output amount for ${path.join(' -> ')} swap: ${ethers.formatUnits(estimatedAmountsOut[1], 6)} USDC.e`); // USDC.e has 6 decimals
 
   } catch (error) {
-      console.error("\nSwap failed:");
+      console.error("\ngetAmountsOut failed. This path might not be supported or liquidity is too low.");
       console.error("Error Object:", error); // Log the full error object
       console.error("Error Reason:", error.reason); // Log specific revert reason if available
       console.error("Error Code:", error.code);   // Log Ethers error code
-      console.error("Error Data:", error.data);   // Log revert data if available
+      console.error("Error Data:", error.data);   // Log revert data if available (often empty for simple reverts)
       console.error("Error Message:", error.message); // Log the standard error message
-
-       // With standalone ethers, resolveName should be implemented (or not attempted with raw strings)
-       if (error.message.includes("resolveName not implemented")) {
-           console.error("Hint: Still getting resolveName error on swap with standalone ethers. This is highly unexpected. Verify Ethers version or look for other environment issues.");
-       }
-       if (error.code === 'CALL_EXCEPTION' || error.code === 'UNPREDICTABLE_GAS_LIMIT') {
-            console.error("Hint: This often indicates an on-chain revert. Check logs or transaction data for specific revert reasons.");
-       }
-       if (error.code === 'BUFFER_OVERRUN') {
-           console.error("Hint: This usually means the contract call reverted without returning error data, and Ethers tried to decode nothing.");
-       }
-
-      process.exit(1); // Exit on swap failure
+      process.exit(1); // Exit if getAmountsOut fails, no need to proceed with swap attempt
   }
-    // --- END ADDED ERROR LOGGING ---
+   console.log("------------------------------\n");
+
+
+  // 2. Perform a dry-run using callStatic (simulates the transaction)
+  console.log("\n--- Diagnosing Swap: Performing callStatic dry-run ---");
+  try {
+      // Call callStatic.swapExactTokensForTokens
+      const callStaticResult = await sushiRouter.callStatic.swapExactTokensForTokens(
+          amountIn,
+          0, // amountOutMin = 0 for testing simplicity
+          path,
+          to,
+          deadline // Deadline might not matter much for callStatic, but good to include
+      );
+      console.log("callStatic swap successful.");
+      console.log("callStatic Result:", callStaticResult); // Log the result if successful (usually undefined for swap fns)
+
+  } catch (error) {
+      console.error("\ncallStatic swap failed. This confirms the transaction would revert on-chain.");
+      console.error("Error Object:", error); // Log the full error object
+      console.error("Error Reason:", error.reason); // Log specific revert reason if available
+      console.error("Error Code:", error.code);   // Log Ethers error code
+      console.error("Error Data:", error.data);   // Log revert data if available (often empty for simple reverts)
+      console.error("Error Message:", error.message); // Log the standard error message
+       if (error.code === 'CALL_EXCEPTION') {
+            console.error("Hint: CALL_EXCEPTION from callStatic often means the specific on-chain revert reason was not returned.");
+       }
+      process.exit(1); // Exit if callStatic fails
+  }
+   console.log("-----------------------------------\n");
+
+
+    // --- If getAmountsOut and callStatic succeeded, attempt the actual transaction ---
+    console.log("\n--- Diagnosis passed. Attempting actual swap transaction ---");
+    let actualSwapTx;
+    try {
+        actualSwapTx = await sushiRouter.swapExactTokensForTokens(
+            amountIn,
+            0, // amountOutMin = 0 for testing simplicity
+            path,
+            to,
+            deadline
+        );
+        console.log(`Swap Transaction sent: ${actualSwapTx.hash}`);
+        const receipt = await actualSwapTx.wait(); // Wait for tx to be mined
+        console.log("Swap successful. Transaction hash:", receipt.transactionHash);
+        console.log("Gas used:", receipt.gasUsed.toString());
+
+    } catch (error) {
+        console.error("\nActual Swap failed:");
+         console.error("Error Object:", error); // Log the full error object
+        console.error("Error Reason:", error.reason); // Log specific revert reason if available
+        console.error("Error Code:", error.code);   // Log Ethers error code
+        console.error("Error Data:", error.data);   // Log revert data if available
+        console.error("Error Message:", error.message); // Log the standard error message
+        process.exit(1); // Exit on actual swap failure
+    }
+     console.log("-----------------------------\n");
 
 
   // Check final balances
@@ -275,14 +308,14 @@ async function main() {
   console.log("Finished checking balances.");
 
 
-  console.log("Swap script finished successfully.");
+  console.log("\nSwap script finished successfully.");
 }
 
 // Standard script runner pattern
 main()
   .then(() => process.exit(0))
   .catch((error) => {
-    console.error("Script encountered a critical error outside of swap catch:");
+    console.error("\nScript encountered a critical error outside of main execution flow:");
     console.error(error);
     process.exit(1);
   });
