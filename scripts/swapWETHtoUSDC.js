@@ -1,12 +1,13 @@
 // scripts/swapWETHtoUSDC.js
 
 // Use the standalone ethers library for direct provider and wallet control
-const { ethers, BigInt } = require("ethers"); // Import ethers and BigInt
+// We will use the global BigInt literal 'n' for zero values
+const { ethers } = require("ethers");
 // Import dotenv to load environment variables from .env
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Fixing V3 Router/Quoter ABI signatures - Final Attempt)...");
+  console.log("Running swapWETHtoUSDC.js script (Fixing BigInt zero literal usage)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -183,13 +184,23 @@ async function main() {
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH (in WETH decimals, 18)
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
   // Ethers v6: Use BigInt string constructor or ethers.getBigInt
-  const amountOutMinimum = BigInt("0"); // Minimum amount expected out (0 for testing simplicity) - In tokenOut decimals (6)
+  // CORRECTED BigInt usage - use 0n literal
+  const amountOutMinimum = 0n; // Minimum amount expected out (0 for testing simplicity) - In tokenOut decimals (6)
   // Ethers v6: Use BigInt string constructor or ethers.getBigInt
-  const sqrtPriceLimitX96 = BigInt("0"); // Used for limiting price movement (0 for no limit)
+  // CORRECTED BigInt usage - use 0n literal
+  const sqrtPriceLimitX96 = 0n; // Used for limiting price movement (0 for no limit)
 
 
   // Uniswap V3 exactInputSingle parameters struct for Router
   // https://docs.uniswap.org/contracts/v3/reference/periphery/interfaces/ISwapRouter#exactinputsingle
+
+  console.log("Debugging BigInt usage...");
+  console.log("Type of BigInt:", typeof BigInt);
+  console.log("Type of amountIn:", typeof amountIn, "Value:", amountIn);
+   console.log("Type of amountOutMinimum:", typeof amountOutMinimum, "Value:", amountOutMinimum); // Debug BigInt
+   console.log("Type of sqrtPriceLimitX96:", typeof sqrtPriceLimitX96, "Value:", sqrtPriceLimitX96); // Debug BigInt
+
+
   const routerParams = {
       tokenIn: WETH_ADDRESS,
       tokenOut: USDCE_ADDRESS,
@@ -208,7 +219,7 @@ async function main() {
         tokenOut: USDCE_ADDRESS,
         amountIn: amountIn, // Amount of tokenIn
         fee: poolFee,
-        sqrtPriceLimitX96: sqrtPriceLimitX96 // Use BigInt("0") for Quoter as well
+        sqrtPriceLimitX96: sqrtPriceLimitX96 // Use 0n for Quoter as well
    };
 
 
