@@ -5,12 +5,11 @@
 // and provides access to standard ethers.js utilities (parseEther, formatUnits, constants)
 // Note: This script uses Ethers v6 syntax.
 const { ethers } = require("hardhat");
-// No longer need to import Interface here if not using it with getContractAt
-// const { Interface } = require("ethers");
-
+// We'll use the Interface class to validate ABIs before using getContractAt
+// const { Interface } = require("ethers"); // Removed import as we are not using Interface with getContractAt
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Passing ABI arrays directly)...");
+  console.log("Running swapWETHtoUSDC.js script (Adding resolveName fix)...");
 
   // Get the deployer account (funded in your deploy script)
   const [deployer] = await ethers.getSigners();
@@ -99,7 +98,7 @@ async function main() {
   console.log("-------------------------------\n");
 
 
-  // Get contract instances using Hardhat's ethers.getContractAt with appropriate ABIs
+  // Get contract instances using Hardhat's ethers.getContractAt with appropriate ABIs (Passing ABI Arrays directly)
   console.log("Attempting to get contract instances with validated ABIs (Passing ABI Arrays directly)...");
   let weth, usdcE, sushiRouter;
 
@@ -119,6 +118,8 @@ async function main() {
 
       // Check if instances were successfully obtained before proceeding
       if (!weth || !usdcE || !sushiRouter) {
+          // This block should theoretically not be hit if the above logs show valid addresses,
+          // but keeping as a safeguard.
           throw new Error("Failed to get one or more contract instances. Check addresses and network connection.");
       }
 
@@ -139,9 +140,8 @@ async function main() {
   const amountToWrap = ethers.parseEther("1.0"); // Ethers v6 syntax
   console.log(`Wrapping ${ethers.formatEther(amountToWrap)} ETH to WETH...`); // Ethers v6 syntax
   // Note: WETH contract often has a 'deposit' function that accepts ETH
-  // Ethers v6 fix: Call payable function via .functions when using getContractAt with raw ABI is not needed when passing array directly
-  // It seems using the ABI array directly allows the standard call syntax. Let's try this.
-  let tx = await weth.deposit({ value: amountToWrap }); // <-- Trying direct call with ABI array
+  // Calling deposit directly with ABI array should work in Ethers v6
+  let tx = await weth.deposit({ value: amountToWrap });
 
   console.log(`Transaction sent: ${tx.hash}`);
   await tx.wait();
@@ -166,19 +166,21 @@ async function main() {
   // Perform the swap: Swap 0.5 WETH for USDC.e on SushiSwap
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH, Ethers v6 syntax
   const path = [WETH_ADDRESS, USDCE_ADDRESS];
-  const to = deployer.address;
+  // Ethers v6 fix: Explicitly lowercase the 'to' address to avoid resolveName error
+  const to = deployer.address.toLowerCase(); // <-- CORRECTED LINE
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
 
   console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Sushi Router...`); // Ethers v6 syntax
+  console.log(`Swap 'to' address (lowercase): ${to}`); // Debug log for the 'to' address
 
   try {
       // Call swapExactTokensForTokens on the sushiRouter instance
-      // Assuming direct call works for the router
+      // Assuming direct call works for the router, now with the 'to' address formatted correctly
       tx = await sushiRouter.swapExactTokensForTokens(
           amountIn,
           0, // amountOutMin = 0 for simplicity in testing
           path,
-          to,
+          to, // Pass the lowercase 'to' address
           deadline
       );
       console.log(`Swap Transaction sent: ${tx.hash}`);
@@ -194,14 +196,22 @@ async function main() {
       } else if (error.data && error.data.message) {
            console.error("Swap failure message:", error.data.message);
       }
+       if (error.message.includes("resolveName not implemented")) {
+           console.error("Hint: Still getting resolveName error. Double check all addresses being passed are lowercase strings.");
+       }
   }
 
   // Check final balances
   console.log("Checking final balances...");
   // Use weth.balanceOf and usdcE.balanceOf loaded with appropriate ABIs (view calls)
+  // The address passed to balanceOf might also need to be lowercase for Ethers v6 depending on context.
+  // Let's explicitly format the deployer address here too for safety.
+  const deployerLowercaseAddress = deployer.address.toLowerCase(); // <-- Format deployer address for balance checks
+
   // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
-  wethBalance = await weth.balanceOf(deployer.address);
-  let usdcEBalance = await usdcE.balanceOf(deployer.address);
+  wethBalance = await weth.balanceOf(deployerLowercaseAddress); // <-- Use lowercase address
+  let usdcEBalance = await usdcE.balanceOf(deployerLowercaseAddress); // <-- Use lowercase address
+
   console.log("Final WETH balance:", ethers.formatUnits(wethBalance, 18));
   // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
   console.log("Final USDC.e balance:", ethers.formatUnits(usdcEBalance, 6)); // USDC.e has 6 decimals
