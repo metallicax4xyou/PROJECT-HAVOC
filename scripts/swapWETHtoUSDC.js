@@ -1,13 +1,12 @@
 // scripts/swapWETHtoUSDC.js
 
 // Use the standalone ethers library for direct provider and wallet control
-// We will check for global BigInt availability below if needed
-const { ethers } = require("ethers"); // Removed BigInt from destructuring as it's global or handled explicitly below
+const { ethers, BigInt } = require("ethers"); // Import ethers and BigInt
 // Import dotenv to load environment variables from .env
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Diagnosing BigInt usage - Phase 2)...");
+  console.log("Running swapWETHtoUSDC.js script (Fixing V3 Router/Quoter ABI signatures - Final Attempt)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -99,9 +98,9 @@ async function main() {
   console.log("-------------------------\n");
 
   // Uniswap V3 Router 2 ABI - Minimal, with exactInputSingle
-  // This signature includes the params struct definition as a tuple
+  // Use precise signature including parameter names and keywords
    const UNISWAP_V3_ROUTER_MINIMAL_ABI = [
-       "function exactInputSingle(tuple(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)"
+       "function exactInputSingle(tuple(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) external payable returns (uint256 amountOut)"
    ];
   console.log("--- Uniswap V3 Router ABI (Minimal, with exactInputSingle) ---");
   console.log("Is UNISWAP_V3_ROUTER_MINIMAL_ABI an array?", Array.isArray(UNISWAP_V3_ROUTER_MINIMAL_ABI));
@@ -110,9 +109,9 @@ async function main() {
 
 
    // Uniswap V3 Quoter V2 ABI - Minimal, with quoteExactInputSingle
-   // This signature includes the params struct definition as a tuple for QuoterV2
+   // Use precise signature including parameter names and keywords for QuoterV2
    const UNISWAP_V3_QUOTER_MINIMAL_ABI = [
-       "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) view returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)"
+       "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external view returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)"
    ];
    console.log("--- Uniswap V3 Quoter V2 ABI (Minimal, with quoteExactInputSingle) ---");
    console.log("Is UNISWAP_V3_QUOTER_MINIMAL_ABI an array?", Array.isArray(UNISWAP_V3_QUOTER_MINIMAL_ABI));
@@ -188,13 +187,9 @@ async function main() {
   // Ethers v6: Use BigInt string constructor or ethers.getBigInt
   const sqrtPriceLimitX96 = BigInt("0"); // Used for limiting price movement (0 for no limit)
 
+
   // Uniswap V3 exactInputSingle parameters struct for Router
   // https://docs.uniswap.org/contracts/v3/reference/periphery/interfaces/ISwapRouter#exactinputsingle
-
-  console.log("Debugging BigInt usage..."); // <-- DEBUG LINE
-  console.log("Type of BigInt:", typeof BigInt); // <-- DEBUG LINE
-  console.log("Type of amountIn:", typeof amountIn, "Value:", amountIn); // <-- DEBUG LINE
-
   const routerParams = {
       tokenIn: WETH_ADDRESS,
       tokenOut: USDCE_ADDRESS,
