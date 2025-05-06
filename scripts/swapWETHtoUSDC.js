@@ -1,24 +1,33 @@
 // scripts/swapWETHtoUSDC.js
 
-// This is the standard Hardhat way to import the ethers object
-// It includes Hardhat-specific functions (getSigners)
-// and provides access to standard ethers.js utilities (parseEther, formatUnits, constants)
-// Note: This script uses Ethers v6 syntax, and applies the definitive fix for Hardhat's resolveName error
-// by passing raw address strings directly to contract method arguments.
-const { ethers } = require("hardhat");
+// Use the standalone ethers library
+const { ethers } = require("ethers");
+// Import dotenv to load environment variables
+require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Applying definitive address fix - Raw Strings)...");
+  console.log("Running swapWETHtoUSDC.js script (Using standalone ethers)...");
 
-  // Get the deployer account (funded in your deploy script)
-  const [deployer] = await ethers.getSigners(); // Use Hardhat's ethers.getSigners
+  // Get RPC URL and Private Key from environment variables
+  const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
+  const privateKey = process.env.LOCAL_FORK_PRIVATE_KEY;
+
+  if (!rpcUrl || !privateKey) {
+      console.error("Error: LOCAL_FORK_RPC_URL and LOCAL_FORK_PRIVATE_KEY must be set in your .env file.");
+      process.exit(1);
+  }
+
+  console.log(`Connecting to RPC: ${rpcUrl}`);
+
+  // Set up a standalone JsonRpcProvider and Wallet
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const deployer = new ethers.Wallet(privateKey, provider); // The signer instance
+
   console.log("Using account:", deployer.address);
   console.log("Deployer address type:", typeof deployer.address);
-  // Log deployer address directly for debugging
-  console.log("Deployer address string:", deployer.address);
 
 
-  // Get contract addresses
+  // Get contract addresses (these remain the same)
   const WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"; // WETH on Arbitrum
   const USDCE_ADDRESS = "0xFF970A61A04b1cA1cA37447f62EAbeA514106c"; // USDC.e on Arbitrum
   const SUSHISWAP_ROUTER_ADDRESS = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"; // SushiSwap Router V2
@@ -38,7 +47,7 @@ async function main() {
       "function approve(address spender, uint amount) returns (bool)",
       "function balanceOf(address account) view returns (uint256)"
   ];
-  console.log("--- WETH ABI (Minimal) ---");
+   console.log("--- WETH ABI (Minimal) ---");
   console.log("WETH_MINIMAL_ABI (first 3 entries):", WETH_MINIMAL_ABI.slice(0, 3)); // Log first few entries
   console.log("Is WETH_MINIMAL_ABI an array?", Array.isArray(WETH_MINIMAL_ABI));
   console.log("WETH_MINIMAL_ABI length:", WETH_MINIMAL_ABI.length);
@@ -99,8 +108,8 @@ async function main() {
   console.log("-------------------------------\n");
 
 
-  // Get contract instances using standard Ethers v6 constructor
-  console.log("Attempting to get contract instances using new ethers.Contract()...");
+  // Get contract instances using standard Ethers v6 constructor, connected to the Wallet
+  console.log("Attempting to get contract instances using new ethers.Contract() with standalone Wallet...");
   let weth, usdcE, sushiRouter;
 
   try {
@@ -136,9 +145,7 @@ async function main() {
        if (error.message.includes("abi is not iterable") || error.message.includes("Invalid ABI format")) {
             console.error("Hint: An ABI might not be in the expected array format.");
        }
-       if (error.message.includes("resolveName not implemented")) {
-           console.error("Hint: resolveName error during instantiation might indicate an issue with signer or provider.");
-       }
+       // Note: resolveName errors should NOT happen during instantiation with new Contract unless provider is involved strangely
       process.exit(1); // Exit on contract instantiation failure
   }
 
@@ -150,6 +157,7 @@ async function main() {
   const amountToWrap = ethers.parseEther("1.0"); // Ethers v6 syntax
   console.log(`Wrapping ${ethers.formatEther(amountToWrap)} ETH to WETH...`); // Ethers v6 syntax
   // Note: WETH contract often has a 'deposit' function that accepts ETH
+  // Use the wallet instance to send the transaction
   let tx = await weth.deposit({ value: amountToWrap });
 
   console.log(`Transaction sent: ${tx.hash}`);
@@ -157,9 +165,10 @@ async function main() {
   console.log("Wrapped ETH to WETH.");
 
   // Check WETH balance after wrapping
+  // Use the wallet instance for static calls like balanceOf
   // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
-  // Use deployer.address string directly for balanceOf input
-  let wethBalance = await weth.balanceOf(deployer.address); // <-- Reverted to raw string
+  // Use deployer.address string directly for balanceOf input - Should work with standalone ethers
+  let wethBalance = await weth.balanceOf(deployer.address); // Raw string address
   console.log("Deployer WETH balance:", ethers.formatUnits(wethBalance, 18));
 
 
@@ -167,9 +176,9 @@ async function main() {
   // Ethers v6: ethers.constants.MaxUint256 becomes ethers.MaxUint256
   const amountToApprove = ethers.MaxUint256;
   console.log("Approving Sushi Router...");
-  // Call the approve function on the weth instance loaded with the correct ABI (.approve should work directly)
-  // Use SUSHISWAP_ROUTER_ADDRESS string directly
-  tx = await weth.approve(SUSHISWAP_ROUTER_ADDRESS, amountToApprove); // <-- Reverted to raw string (Approving Router)
+  // Use the wallet instance to send the transaction
+  // Use SUSHISWAP_ROUTER_ADDRESS string directly - Should work with standalone ethers
+  tx = await weth.approve(SUSHISWAP_ROUTER_ADDRESS, amountToApprove); // Raw string address (Approving Router)
   console.log(`Approval Transaction sent: ${tx.hash}`);
   await tx.wait();
   console.log("Approved Sushi Router.");
@@ -178,8 +187,8 @@ async function main() {
   // Perform the swap: Swap 0.5 WETH for USDC.e on SushiSwap
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH, Ethers v6 syntax
   const path = [WETH_ADDRESS, USDCE_ADDRESS]; // These are constants, fine as is
-  // Use deployer.address string directly for the 'to' address
-  const to = deployer.address; // <-- Reverted to raw string
+  // Use deployer.address string directly for the 'to' address - Should work with standalone ethers
+  const to = deployer.address; // Raw string address
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
 
   console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Sushi Router...`); // Ethers v6 syntax
@@ -187,7 +196,7 @@ async function main() {
 
 
   try {
-      // Call swapExactTokensForTokens on the sushiRouter instance
+      // Call swapExactTokensForTokens on the sushiRouter instance using the wallet
       // Pass the raw 'to' address string
       tx = await sushiRouter.swapExactTokensForTokens(
           amountIn,
@@ -209,15 +218,16 @@ async function main() {
       } else if (error.data && error.data.message) {
            console.error("Swap failure message:", error.data.message);
       }
+       // With standalone ethers, resolveName should be implemented (or not attempted with raw strings)
        if (error.message.includes("resolveName not implemented")) {
-           console.error("Hint: Still getting resolveName error on swap. This is highly unexpected with new ethers.Contract() and raw hex strings. Might indicate a deeper Hardhat/Ethers v6 compatibility issue or environment problem. Consider Hardhat/Ethers versioning or environment specifics.");
+           console.error("Hint: Still getting resolveName error on swap with standalone ethers. This is highly unexpected. Verify Ethers version or look for other environment issues.");
        }
   }
 
   // Check final balances
   console.log("Checking final balances...");
-  // Use weth.balanceOf and usdcE.balanceOf loaded with appropriate ABIs (view calls)
-  // Use deployer.address string directly for balance checks
+  // Use the wallet instance for static calls like balanceOf
+  // Use deployer.address string directly for balance checks - Should work with standalone ethers
   const deployerRawAddress = deployer.address; // Raw deployer address for balance checks
 
   // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
@@ -233,7 +243,7 @@ async function main() {
   console.log("Swap script finished successfully.");
 }
 
-// Standard Hardhat script runner pattern
+// Standard script runner pattern
 main()
   .then(() => process.exit(0))
   .catch((error) => {
