@@ -6,7 +6,7 @@ const { ethers } = require("ethers");
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Trying WETH -> USDT -> USDC.e path)...");
+  console.log("Running swapWETHtoUSDC.js script (Correcting USDT address checksum)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -56,13 +56,13 @@ async function main() {
   const WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"; // WETH on Arbitrum
   const USDC_ADDRESS = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"; // Correct USDC (not .e) if needed for path? Reverting to USDC.e as per config.
   const USDCE_ADDRESS = "0xFF970A61A04b1cA1cA37447f62EAbeA514106c"; // USDC.e on Arbitrum
-  const USDT_ADDRESS = "0xFd086bC7cD5C481DCC9C85EBe478A1C0B69FCbb9"; // USDT on Arbitrum
+  const USDT_ADDRESS = "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"; // USDT on Arbitrum - CORRECTED CHECKSUM (lowercase)
   const SUSHISWAP_ROUTER_ADDRESS = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"; // SushiSwap Router V2
 
   console.log("\n--- Addresses ---");
   console.log("WETH_ADDRESS:", WETH_ADDRESS);
   console.log("USDCE_ADDRESS:", USDCE_ADDRESS);
-  console.log("USDT_ADDRESS:", USDT_ADDRESS); // Log USDT address
+  console.log("USDT_ADDRESS:", USDT_ADDRESS); // Log CORRECTED USDT address
   console.log("SUSHISWAP_ROUTER_ADDRESS:", SUSHISWAP_ROUTER_ADDRESS);
   console.log("-----------------\n");
 
@@ -212,7 +212,7 @@ async function main() {
   // Perform the swap: Swap 0.5 WETH for USDC.e on SushiSwap
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH, Ethers v6 syntax
   // --- CORRECTED PATH TO WETH -> USDT -> USDC.e ---
-  const path = [WETH_ADDRESS, USDT_ADDRESS, USDCE_ADDRESS]; // <-- CORRECTED LINE
+  const path = [WETH_ADDRESS, USDT_ADDRESS, USDCE_ADDRESS]; // <-- CORRECTED LINE (USDT address updated)
   // Use deployer.address string directly for the 'to' address - Should work with standalone ethers
   const to = deployer.address; // Raw string address
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
