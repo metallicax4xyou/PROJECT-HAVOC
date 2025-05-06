@@ -1,12 +1,13 @@
 // scripts/swapWETHtoUSDC.js
 
 // Use the standalone ethers library for direct provider and wallet control
-const { ethers, BigInt } = require("ethers"); // Import BigInt
+// Use the global BigInt constructor available in Node.js or explicitly require it if needed
+const { ethers } = require("ethers"); // Removed BigInt from destructuring as it's global or handled explicitly below
 // Import dotenv to load environment variables from .env
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Attempting swap with Uniswap V3 WETH/USDC.e)...");
+  console.log("Running swapWETHtoUSDC.js script (Fixing BigInt usage)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -241,9 +242,12 @@ async function main() {
       recipient: deployer.address, // Address to send tokenOut to
       deadline: deadline,
       amountIn: amountIn, // Amount of tokenIn (in tokenIn decimals)
-      amountOutMinimum: BigInt(amountOutMinimum), // Minimum amount of tokenOut (in tokenOut decimals)
-      sqrtPriceLimitX96: BigInt(0), // Used for limiting price movement (0 for no limit)
+      // Ethers v6: Use BigInt string constructor or ethers.getBigInt
+      amountOutMinimum: BigInt("0"), // Minimum amount of tokenOut (in tokenOut decimals) - CORRECTED BigInt
+      // Ethers v6: Use BigInt string constructor or ethers.getBigInt
+      sqrtPriceLimitX96: BigInt("0"), // Used for limiting price movement (0 for no limit) - CORRECTED BigInt
   };
+
 
   console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Uniswap V3 Router...`); // <-- Updated Log
   console.log("Swap Parameters:", params); // Log the parameters struct
@@ -261,7 +265,8 @@ async function main() {
            tokenOut: USDCE_ADDRESS,
            amountIn: amountIn,
            fee: poolFee,
-           sqrtPriceLimitX96: BigInt(0) // Use BigInt(0) for Quoter as well
+           // Ethers v6: Use BigInt string constructor or ethers.getBigInt
+           sqrtPriceLimitX96: BigInt("0") // Use BigInt("0") for Quoter as well - CORRECTED BigInt
       };
       // Call quoteExactInputSingle on the *uniswapQuoter* instance (view call)
       const quoteResult = await uniswapQuoter.quoteExactInputSingle(quoteParams);
