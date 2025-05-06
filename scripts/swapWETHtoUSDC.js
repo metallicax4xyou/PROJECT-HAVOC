@@ -3,12 +3,12 @@
 // This is the standard Hardhat way to import the ethers object
 // It includes Hardhat-specific functions (getSigners)
 // and provides access to standard ethers.js utilities (parseEther, formatUnits, constants)
-// Note: This script uses Ethers v6 syntax, and applies the definitive fix for contract instantiation
-// by using new ethers.Contract() instead of getContractAt().
+// Note: This script uses Ethers v6 syntax, and attempts to resolve contract instantiation issues
+// by using new ethers.Contract() and checking for errors during each instantiation.
 const { ethers } = require("hardhat");
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Using new ethers.Contract())...");
+  console.log("Running swapWETHtoUSDC.js script (Isolating Instantiation Errors)...");
 
   // Get the deployer account (funded in your deploy script)
   const [deployer] = await ethers.getSigners(); // Use Hardhat's ethers.getSigners
@@ -99,28 +99,40 @@ async function main() {
   console.log("-------------------------------\n");
 
 
-  // Get contract instances using standard Ethers v6 constructor
-  console.log("Attempting to get contract instances using new ethers.Contract()...");
+  // Get contract instances using standard Ethers v6 constructor, isolating each
+  console.log("Attempting to get contract instances using new ethers.Contract(), one by one...");
   let weth, usdcE, sushiRouter;
 
   try {
-      // Use new ethers.Contract(address, abi, signer)
+      // Instantiate WETH contract
+      console.log("-> Attempting to instantiate WETH contract...");
       weth = new ethers.Contract(WETH_ADDRESS, WETH_MINIMAL_ABI, deployer); // <-- CORRECTED
-      console.log(`Got WETH contract instance at ${weth.address}`);
+      console.log(`Instantiated WETH contract. Target: ${weth.target}`); // Use .target in Ethers v6
+      console.log("WETH instantiation successful.\n");
 
+
+      // Instantiate USDC.e contract
+      console.log("-> Attempting to instantiate USDC.e contract...");
       usdcE = new ethers.Contract(USDCE_ADDRESS, ERC20_ABI, deployer); // USDC.e also uses ERC20 ABI <-- CORRECTED
-      console.log(`Got USDC.e contract instance at ${usdcE.address}`);
+      console.log(`Instantiated USDC.e contract. Target: ${usdcE.target}`); // Use .target in Ethers v6
+      console.log("USDC.e instantiation successful.\n");
 
+
+      // Instantiate Sushi Router contract
+      console.log("-> Attempting to instantiate Sushi Router contract...");
       sushiRouter = new ethers.Contract(SUSHISWAP_ROUTER_ADDRESS, SUSHI_ROUTER_ABI, deployer); // <-- CORRECTED
-      console.log(`Got Sushi Router contract instance at ${sushiRouter.address}`);
+      console.log(`Instantiated Sushi Router contract. Target: ${sushiRouter.target}`); // Use .target in Ethers v6
+      console.log("Sushi Router instantiation successful.\n");
+
 
       console.log("Finished attempting to get contract instances.");
 
-      // Check if instances were successfully obtained before proceeding
-      // Check .address property explicitly, as new Contract might not throw immediately on bad params
-      if (!weth.address || !usdcE.address || !sushiRouter.address) {
-           throw new Error("Failed to get one or more contract instances. Check addresses and ABI validity.");
+      // Check if instances were successfully obtained
+      if (!weth || !usdcE || !sushiRouter || !weth.target || !usdcE.target || !sushiRouter.target) {
+           throw new Error("Failed to get one or more contract instances with valid targets.");
       }
+       console.log("\nAll contract instances obtained and have valid targets. Proceeding with Simulation Sequence ---\n");
+
 
   } catch (error) {
       console.error("\nError during contract instantiation with new ethers.Contract():", error);
@@ -131,10 +143,11 @@ async function main() {
        if (error.message.includes("abi is not iterable") || error.message.includes("Invalid ABI format")) {
             console.error("Hint: An ABI might not be in the expected array format.");
        }
+       if (error.message.includes("resolveName not implemented")) {
+           console.error("Hint: resolveName error during instantiation might indicate an issue with signer or provider.");
+       }
       process.exit(1); // Exit on contract instantiation failure
   }
-
-  console.log("\n--- Contract Instances Obtained. Proceeding with Simulation Sequence ---\n");
 
   // --- Simulation Sequence ---
 
@@ -153,7 +166,7 @@ async function main() {
   // Use weth.balanceOf which is included in the minimal ABI (no .functions needed for view calls)
   // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
   // Use deployer.address string directly for balanceOf input
-  let wethBalance = await weth.balanceOf(deployer.address); // <-- Reverted to raw string
+  let wethBalance = await weth.balanceOf(deployer.address); // Raw string address
   console.log("Deployer WETH balance:", ethers.formatUnits(wethBalance, 18));
 
 
@@ -163,7 +176,7 @@ async function main() {
   console.log("Approving Sushi Router...");
   // Call the approve function on the weth instance loaded with the correct ABI (.approve should work directly)
   // Use SUSHISWAP_ROUTER_ADDRESS string directly
-  tx = await weth.approve(SUSHISWAP_ROUTER_ADDRESS, amountToApprove); // <-- Reverted to raw string (Approving Router)
+  tx = await weth.approve(SUSHISWAP_ROUTER_ADDRESS, amountToApprove); // Raw string address (Approving Router)
   console.log(`Approval Transaction sent: ${tx.hash}`);
   await tx.wait();
   console.log("Approved Sushi Router.");
@@ -173,7 +186,7 @@ async function main() {
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH, Ethers v6 syntax
   const path = [WETH_ADDRESS, USDCE_ADDRESS]; // These are constants, fine as is
   // Use deployer.address string directly for the 'to' address
-  const to = deployer.address; // <-- Reverted to raw string
+  const to = deployer.address; // Raw string address
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
 
   console.log(`Swapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Sushi Router...`); // Ethers v6 syntax
@@ -204,7 +217,7 @@ async function main() {
            console.error("Swap failure message:", error.data.message);
       }
        if (error.message.includes("resolveName not implemented")) {
-           console.error("Hint: Still getting resolveName error. This is highly unexpected with new ethers.Contract() and raw hex strings. Might indicate a deeper Hardhat/Ethers v6 compatibility issue or environment problem. Consider Hardhat/Ethers versioning or environment specifics.");
+           console.error("Hint: Still getting resolveName error on swap. This is highly unexpected with new ethers.Contract().");
        }
   }
 
@@ -212,7 +225,7 @@ async function main() {
   console.log("Checking final balances...");
   // Use weth.balanceOf and usdcE.balanceOf loaded with appropriate ABIs (view calls)
   // Use deployer.address string directly for balance checks
-  const deployerRawAddress = deployer.address; // <-- Raw deployer address for balance checks
+  const deployerRawAddress = deployer.address; // Raw deployer address for balance checks
 
   // Ethers v6: ethers.utils.formatUnits becomes ethers.formatUnits
   wethBalance = await weth.balanceOf(deployerRawAddress); // <-- Use raw address
