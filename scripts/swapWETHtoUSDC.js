@@ -6,7 +6,7 @@ const { ethers, BigInt } = require("ethers"); // Import ethers and BigInt
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Applying EXACT V3 Router/Quoter ABI signatures + Quoter Call Fix)...");
+  console.log("Running swapWETHtoUSDC.js script (Trying Uniswap V3 WETH/USDC.e with 500 bps fee)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -52,7 +52,7 @@ async function main() {
   // --- Using UNISWAP V3 ROUTER AND QUOTER ---
   const UNISWAP_V3_ROUTER_ADDRESS = "0xE592427A0AEce92De3Edee1F18E0157C05861564"; // Uniswap V3 Router 2
   const UNISWAP_V3_QUOTER_ADDRESS = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"; // Uniswap V3 Quoter V2
-  const poolFee = 100; // Fee tier for the selected pool (100 for 0.01%)
+  const poolFee = 500; // Fee tier for the selected pool - CHANGED TO 500 (0.05%)
 
 
   console.log("\n--- Addresses ---");
@@ -60,7 +60,7 @@ async function main() {
   console.log("USDCE_ADDRESS:", USDCE_ADDRESS);
   console.log("UNISWAP_V3_ROUTER_ADDRESS:", UNISWAP_V3_ROUTER_ADDRESS);
   console.log("UNISWAP_V3_QUOTER_ADDRESS:", UNISWAP_V3_QUOTER_ADDRESS);
-  console.log("Target Pool Fee:", poolFee);
+  console.log("Target Pool Fee:", poolFee, "bps"); // Log the fee
   console.log("-----------------\n");
 
   // --- Define specific ABIs needed in the script ---
@@ -100,22 +100,22 @@ async function main() {
   console.log("-------------------------\n");
 
   // Uniswap V3 Router 2 ABI - Minimal, with exactInputSingle
-  // Use the EXACT signature recommended by the specialist
+  // Use precise signature including parameter names and keywords
    const UNISWAP_V3_ROUTER_MINIMAL_ABI = [
-       "function exactInputSingle(tuple(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) external payable returns (uint256 amountOut)" // <-- EXACT SPECIALIST STRING
+       "function exactInputSingle(tuple(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) external payable returns (uint256 amountOut)"
    ];
-  console.log("--- Uniswap V3 Router ABI (Minimal, with exactInputSingle - CORRECTED) ---");
+  console.log("--- Uniswap V3 Router ABI (Minimal, with exactInputSingle) ---");
   console.log("Is UNISWAP_V3_ROUTER_MINIMAL_ABI an array?", Array.isArray(UNISWAP_V3_ROUTER_MINIMAL_ABI));
   console.log("UNISWAP_V3_ROUTER_MINIMAL_ABI length:", UNISWAP_V3_ROUTER_MINIMAL_ABI.length);
   console.log("-------------------------------\n");
 
 
    // Uniswap V3 Quoter V2 ABI - Minimal, with quoteExactInputSingle
-   // Use the EXACT signature recommended by the specialist (seems like V1 signature?)
+   // Use precise signature including parameter names and keywords for QuoterV2
    const UNISWAP_V3_QUOTER_MINIMAL_ABI = [
-       "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external view returns (uint256 amountOut)" // <-- EXACT SPECIALIST STRING - Likely V1 signature, adjusting call below
+       "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external view returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)"
    ];
-   console.log("--- Uniswap V3 Quoter V2 ABI (Minimal, with quoteExactInputSingle - CORRECTED) ---");
+   console.log("--- Uniswap V3 Quoter V2 ABI (Minimal, with quoteExactInputSingle) ---");
    console.log("Is UNISWAP_V3_QUOTER_MINIMAL_ABI an array?", Array.isArray(UNISWAP_V3_QUOTER_MINIMAL_ABI));
    console.log("UNISWAP_V3_QUOTER_MINIMAL_ABI length:", UNISWAP_V3_QUOTER_MINIMAL_ABI.length);
    console.log("--------------------------------\n");
@@ -195,7 +195,7 @@ async function main() {
   const routerParams = {
       tokenIn: WETH_ADDRESS,
       tokenOut: USDCE_ADDRESS,
-      fee: poolFee, // Fee tier (100 for 0.01%)
+      fee: poolFee, // Fee tier (500 for 0.05% in this version of the script)
       recipient: deployer.address, // Address to send tokenOut to
       deadline: deadline,
       amountIn: amountIn, // Amount of tokenIn (in tokenIn decimals)
@@ -205,19 +205,18 @@ async function main() {
 
    // Uniswap V3 exactInputSingle parameters struct for QuoterV2
    // https://docs.uniswap.org/contracts/v3/reference/periphery/lens/QuoterV2#quoteexactinputsingle
-   // If using the specialist's likely V1 signature, pass args individually
-   const quoterArgs = [
-        WETH_ADDRESS,
-        USDCE_ADDRESS,
-        poolFee, // Note: Quoter V1 takes fee here, V2 takes it in the struct. Using specialist's V1-like sig.
-        amountIn,
-        sqrtPriceLimitX96 // Use 0n here
-   ];
+   const quoterParams = {
+        tokenIn: WETH_ADDRESS,
+        tokenOut: USDCE_ADDRESS,
+        amountIn: amountIn, // Amount of tokenIn
+        fee: poolFee, // Fee tier (500 for 0.05%)
+        sqrtPriceLimitX96: sqrtPriceLimitX96 // Use 0n here
+   };
 
 
   console.log(`\nSwapping ${ethers.formatEther(amountIn)} WETH for USDC.e via Uniswap V3 Router...`);
   console.log("Router Swap Parameters:", routerParams);
-  console.log("Quoter Quote Arguments (matching specialist V1-like sig):", quoterArgs);
+  console.log("Quoter Quote Parameters:", quoterParams);
 
 
   // --- Diagnosing Swap Revert (Using correct call types and ABIs) ---
@@ -226,15 +225,14 @@ async function main() {
   console.log("\n--- Diagnosing Swap: Checking Quoter.quoteExactInputSingle ---");
   try {
       // Use .getFunction("methodName") followed by .staticCall() for view functions in Ethers v6
-      // Pass the arguments individually based on specialist's suggested V1-like signature
-      const quoteResult = await uniswapQuoter.getFunction("quoteExactInputSingle").staticCall(...quoterArgs); // <-- CORRECTED CALL (spreading individual args)
+      // Pass the quoterParams struct
+      const quoteResult = await uniswapQuoter.getFunction("quoteExactInputSingle").staticCall(quoterParams); // <-- CORRECTED CALL
       console.log(`Quoter.quoteExactInputSingle successful.`);
       // Quote result is an object containing amountOut and sqrtPriceX96After
-      // Specialist's V1-like sig returns uint256 amountOut directly, not a struct.
-      console.log(`Estimated output amount for WETH -> USDC.e (${poolFee} bps) swap: ${ethers.formatUnits(quoteResult, 6)} USDC.e`); // USDC.e has 6 decimals
+      console.log(`Estimated output amount for WETH -> USDC.e (${poolFee} bps) swap: ${ethers.formatUnits(quoteResult.amountOut, 6)} USDC.e`); // USDC.e has 6 decimals
 
   } catch (error) {
-      console.error("\nQuoter.quoteExactInputSingle failed. This pool might not be supported or liquidity is too low in the forked state, or ABI mismatch.");
+      console.error("\nQuoter.quoteExactInputSingle failed. This pool might not be supported or liquidity is too low in the forked state.");
       console.error("Error Object:", error);
       console.error("Error Reason:", error.reason); // Log specific revert reason if available
       console.error("Error Code:", error.code);   // Log Ethers error code
@@ -248,9 +246,8 @@ async function main() {
   // 2. Perform a dry-run using callStatic on Router.exactInputSingle (simulates the transaction)
   console.log("\n--- Diagnosing Swap: Performing callStatic dry-run on Router.exactInputSingle ---");
   try {
-      // Use .getFunction("methodName") followed by .staticCall() for simulations on the Router
-      // Pass the router parameters struct
-      const callStaticResult = await uniswapRouter.getFunction("exactInputSingle").staticCall(routerParams); // <-- This call expects the struct
+      // Call callStatic.exactInputSingle with the router parameters on the *uniswapRouter* instance
+      const callStaticResult = await uniswapRouter.callStatic.exactInputSingle(routerParams); // <-- CORRECTED CALL
       console.log("callStatic exactInputSingle successful.");
       // callStatic for exactInputSingle returns the amountOut
       console.log("callStatic Result (amountOut):", ethers.formatUnits(callStaticResult, 6)); // USDC.e has 6 decimals
@@ -274,9 +271,8 @@ async function main() {
     console.log("\n--- Diagnosis passed. Attempting actual swap transaction (Router.exactInputSingle) ---");
     let actualSwapTx;
     try {
-        // Use .getFunction("methodName") followed by .sendTransaction() for payable functions in Ethers v6
-        // Pass the router parameters struct
-        actualSwapTx = await uniswapRouter.getFunction("exactInputSingle").sendTransaction(routerParams); // <-- CORRECTED CALL
+        // Call exactInputSingle on the uniswapRouter instance (this is the transaction)
+        actualSwapTx = await uniswapRouter.exactInputSingle(routerParams); // <-- CORRECTED CALL
         console.log(`Swap Transaction sent: ${actualSwapTx.hash}`);
         const receipt = await actualSwapTx.wait(); // Wait for tx to be mined
         console.log("Swap successful. Transaction hash:", receipt.transactionHash);
