@@ -6,7 +6,7 @@ const { ethers, BigInt } = require("ethers"); // Import ethers and BigInt
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Applying EXACT V3 Router/Quoter ABI JSON Structures)...");
+  console.log("Running swapWETHtoUSDC.js script (Applying EXACT V3 Router/Quoter ABIs and callStatic - Final Attempt)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -99,33 +99,9 @@ async function main() {
   console.log("-------------------------\n");
 
   // Uniswap V3 Router 2 ABI - Minimal, with exactInputSingle
-  // Use the EXACT JSON structure recommended by the specialist
+  // Use the EXACT signature recommended by the specialist
    const UNISWAP_V3_ROUTER_MINIMAL_ABI = [
-      { // EXACT SPECIALIST JSON OBJECT
-        "name": "exactInputSingle",
-        "type": "function",
-        "inputs": [
-          {
-            "components": [
-              { "name": "tokenIn", "type": "address" },
-              { "name": "tokenOut", "type": "address" },
-              { "name": "fee", "type": "uint24" },
-              { "name": "recipient", "type": "address" },
-              { "name": "deadline", "type": "uint256" },
-              { "name": "amountIn", "type": "uint256" },
-              { "name": "amountOutMinimum", "type": "uint256" },
-              { "name": "sqrtPriceLimitX96", "type": "uint160" }
-            ],
-            "internalType": "struct ISwapRouter.ExactInputSingleParams",
-            "name": "params",
-            "type": "tuple"
-          }
-        ],
-        "outputs": [
-          { "name": "amountOut", "type": "uint256" }
-        ],
-        "stateMutability": "payable" // Router swap is payable
-      }
+       "function exactInputSingle(tuple(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) external payable returns (uint256 amountOut)" // <-- EXACT SPECIALIST STRING
    ];
   console.log("--- Uniswap V3 Router ABI (Minimal, with exactInputSingle - CORRECTED) ---");
   console.log("Is UNISWAP_V3_ROUTER_MINIMAL_ABI an array?", Array.isArray(UNISWAP_V3_ROUTER_MINIMAL_ABI));
@@ -134,23 +110,9 @@ async function main() {
 
 
    // Uniswap V3 Quoter V2 ABI - Minimal, with quoteExactInputSingle
-   // Use the EXACT JSON structure recommended by the specialist
+   // Use the EXACT signature recommended by the specialist (Note: this seems like V1 signature)
    const UNISWAP_V3_QUOTER_MINIMAL_ABI = [
-       { // EXACT SPECIALIST JSON OBJECT
-         "name": "quoteExactInputSingle",
-         "type": "function",
-         "inputs": [
-           { "name": "tokenIn", "type": "address" },
-           { "name": "tokenOut", "type": "address" },
-           { "name": "fee", "type": "uint24" },
-           { "name": "amountIn", "type": "uint256" },
-           { "name": "sqrtPriceLimitX96", "type": "uint160" }
-         ],
-         "outputs": [
-           { "name": "amountOut", "type": "uint256" } // Specialist's output; QuoterV2 returns a tuple, but let's try this first
-         ],
-         "stateMutability": "view" // Quoter is view
-       }
+       "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external view returns (uint256 amountOut)" // <-- EXACT SPECIALIST STRING
    ];
    console.log("--- Uniswap V3 Quoter V2 ABI (Minimal, with quoteExactInputSingle - CORRECTED) ---");
    console.log("Is UNISWAP_V3_QUOTER_MINIMAL_ABI an array?", Array.isArray(UNISWAP_V3_QUOTER_MINIMAL_ABI));
@@ -242,7 +204,7 @@ async function main() {
   };
 
    // Uniswap V3 exactInputSingle parameters for Quoter (Note: Specialist's suggested ABI seems V1-like)
-   // If using the specialist's suggested Quoter ABI, pass args individually
+   // If using the specialist's suggested Quoter ABI: "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external view returns (uint256 amountOut)"
    const quoterArgs = [ // Arguments array matching specialist's suggested V1-like ABI
         WETH_ADDRESS,
         USDCE_ADDRESS,
@@ -293,7 +255,7 @@ async function main() {
       console.log("callStatic Result (amountOut):", ethers.formatUnits(callStaticResult, 6)); // USDC.e has 6 decimals
 
   } catch (error) {
-      console.error("\nRouter.callStatic.exactInputSingle failed. This confirms the transaction would revert on-chain.");
+      console.error("\ncallStatic exactInputSingle failed. This confirms the transaction would revert on-chain.");
       console.error("Error Object:", error);
       console.error("Error Reason:", error.reason); // Log specific revert reason if available
       console.error("Error Code:", error.code);   // Log Ethers error code
