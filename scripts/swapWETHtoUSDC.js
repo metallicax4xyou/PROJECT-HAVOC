@@ -6,7 +6,7 @@ const { ethers, BigInt } = require("ethers"); // Import ethers and BigInt
 require('dotenv').config();
 
 async function main() {
-  console.log("Running swapWETHtoUSDC.js script (Applying CORRECT V3 Router/Quoter ABI signatures)...");
+  console.log("Running swapWETHtoUSDC.js script (Using .getFunction().staticCall() for simulations)...");
 
   // Get RPC URL and Private Key from environment variables
   const rpcUrl = process.env.LOCAL_FORK_RPC_URL;
@@ -97,23 +97,23 @@ async function main() {
   }
   console.log("-------------------------\n");
 
-  // Uniswap V3 Router 2 ABI - Minimal, with exactInputSingle (CORRECT SIGNATURE)
-  // This signature includes the params struct definition as a tuple
+  // Uniswap V3 Router 2 ABI - Minimal, with exactInputSingle
+  // Use precise signature including parameter names and keywords
    const UNISWAP_V3_ROUTER_MINIMAL_ABI = [
        "function exactInputSingle(tuple(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) external payable returns (uint256 amountOut)"
    ];
-  console.log("--- Uniswap V3 Router ABI (Minimal, with exactInputSingle - CORRECTED) ---");
+  console.log("--- Uniswap V3 Router ABI (Minimal, with exactInputSingle) ---");
   console.log("Is UNISWAP_V3_ROUTER_MINIMAL_ABI an array?", Array.isArray(UNISWAP_V3_ROUTER_MINIMAL_ABI));
   console.log("UNISWAP_V3_ROUTER_MINIMAL_ABI length:", UNISWAP_V3_ROUTER_MINIMAL_ABI.length);
   console.log("-------------------------------\n");
 
 
-   // Uniswap V3 Quoter V2 ABI - Minimal, with quoteExactInputSingle (CORRECT SIGNATURE)
-   // This signature includes the params struct definition as a tuple for QuoterV2
+   // Uniswap V3 Quoter V2 ABI - Minimal, with quoteExactInputSingle
+   // Use precise signature including parameter names and keywords for QuoterV2
    const UNISWAP_V3_QUOTER_MINIMAL_ABI = [
        "function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external view returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)"
    ];
-   console.log("--- Uniswap V3 Quoter V2 ABI (Minimal, with quoteExactInputSingle - CORRECTED) ---");
+   console.log("--- Uniswap V3 Quoter V2 ABI (Minimal, with quoteExactInputSingle) ---");
    console.log("Is UNISWAP_V3_QUOTER_MINIMAL_ABI an array?", Array.isArray(UNISWAP_V3_QUOTER_MINIMAL_ABI));
    console.log("UNISWAP_V3_QUOTER_MINIMAL_ABI length:", UNISWAP_V3_QUOTER_MINIMAL_ABI.length);
    console.log("--------------------------------\n");
@@ -182,9 +182,9 @@ async function main() {
   // Prepare Uniswap V3 Swap parameters
   const amountIn = ethers.parseEther("0.5"); // Swap 0.5 WETH (in WETH decimals, 18)
   const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes from now
-  // Ethers v6: Use BigInt string constructor or ethers.getBigInt
+  // Ethers v6: Use 0n literal
   const amountOutMinimum = 0n; // Minimum amount expected out (0 for testing simplicity) - In tokenOut decimals (6)
-  // Ethers v6: Use BigInt string constructor or ethers.getBigInt
+  // Ethers v6: Use 0n literal
   const sqrtPriceLimitX96 = 0n; // Used for limiting price movement (0 for no limit)
 
 
@@ -222,10 +222,9 @@ async function main() {
   // 1. Check expected output using Quoter.quoteExactInputSingle (view call)
   console.log("\n--- Diagnosing Swap: Checking Quoter.quoteExactInputSingle ---");
   try {
-      // Call quoteExactInputSingle as a static call on the uniswapQuoter instance
-      // Ethers v6 fix: Use .staticCall() or .callStatic() for view functions on instances with providers/signers
-      // Use the quoterParams struct
-      const quoteResult = await uniswapQuoter.callStatic.quoteExactInputSingle(quoterParams); // <-- CORRECTED CALL
+      // Use .getFunction("methodName") followed by .staticCall() for view functions in Ethers v6
+      // Pass the quoterParams struct
+      const quoteResult = await uniswapQuoter.getFunction("quoteExactInputSingle").staticCall(quoterParams); // <-- CORRECTED CALL
       console.log(`Quoter.quoteExactInputSingle successful.`);
       // Quote result is an object containing amountOut and sqrtPriceX96After
       console.log(`Estimated output amount for WETH -> USDC.e (${poolFee} bps) swap: ${ethers.formatUnits(quoteResult.amountOut, 6)} USDC.e`); // USDC.e has 6 decimals
@@ -245,8 +244,9 @@ async function main() {
   // 2. Perform a dry-run using callStatic on Router.exactInputSingle (simulates the transaction)
   console.log("\n--- Diagnosing Swap: Performing callStatic dry-run on Router.exactInputSingle ---");
   try {
-      // Call callStatic.exactInputSingle with the router parameters on the *uniswapRouter* instance
-      const callStaticResult = await uniswapRouter.callStatic.exactInputSingle(routerParams); // <-- CORRECTED CALL
+      // Use .getFunction("methodName") followed by .staticCall() for simulations on the Router
+      // Pass the router parameters struct
+      const callStaticResult = await uniswapRouter.getFunction("exactInputSingle").staticCall(routerParams); // <-- CORRECTED CALL
       console.log("callStatic exactInputSingle successful.");
       // callStatic for exactInputSingle returns the amountOut
       console.log("callStatic Result (amountOut):", ethers.formatUnits(callStaticResult, 6)); // USDC.e has 6 decimals
@@ -270,8 +270,9 @@ async function main() {
     console.log("\n--- Diagnosis passed. Attempting actual swap transaction (Router.exactInputSingle) ---");
     let actualSwapTx;
     try {
-        // Call exactInputSingle on the uniswapRouter instance (this is the transaction)
-        actualSwapTx = await uniswapRouter.exactInputSingle(routerParams); // <-- CORRECTED CALL
+        // Use .getFunction("methodName") followed by .sendTransaction() for payable functions in Ethers v6
+        // Pass the router parameters struct
+        actualSwapTx = await uniswapRouter.getFunction("exactInputSingle").sendTransaction(routerParams); // <-- CORRECTED CALL
         console.log(`Swap Transaction sent: ${actualSwapTx.hash}`);
         const receipt = await actualSwapTx.wait(); // Wait for tx to be mined
         console.log("Swap successful. Transaction hash:", receipt.transactionHash);
