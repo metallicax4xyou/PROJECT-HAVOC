@@ -84,7 +84,7 @@ async function main() {
       console.log("Required abis/ERC20.json successfully.");
       if (Array.isArray(ERC20_LOADED)) {
           ERC20_ABI = ERC20_LOADED;
-      } else if (ERC20_LOADED && Array.2isArray(ERC20_LOADED.abi)) {
+      } else if (ERC20_LOADED && Array.isArray(ERC20_LOADED.abi)) {
           ERC20_ABI = ERC20_LOADED.abi;
       } else {
           throw new Error("Invalid ERC20 ABI format");
